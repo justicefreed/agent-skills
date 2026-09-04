@@ -89,7 +89,7 @@ Effort rungs are likewise relative: **default** (what the model reports as its o
   saving is in the *model*, not the dial: a mechanical sweep on a minimal model at lowest effort is
   far cheaper than the same work on the default model at any setting. Reach for the model rung first.
 
-Half of these archetypes start *below* the provider's defaults and none starts above them. If you
+Three of these eight archetypes start *below* the provider's defaults and none starts above them. If you
 find yourself wanting the frontier model or an above-default dial as a starting point, that is a
 signal the **brief** is underspecified — fixing the brief is cheaper and compounds across every
 future dispatch, whereas more capability buys one better guess at the same ambiguity.
