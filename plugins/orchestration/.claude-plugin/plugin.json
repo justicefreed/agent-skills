@@ -1,0 +1,21 @@
+{
+  "name": "orchestration",
+  "version": "0.1.0",
+  "description": "Orchestrate multi-agent work: decide whether to delegate, choose substrate and isolation, select model and effort, write briefs, track dispatches, and verify results.",
+  "author": {
+    "name": "Justice Reed"
+  },
+  "repository": "https://github.com/justicefreed/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "subagents",
+    "delegation",
+    "multi-agent",
+    "worktree",
+    "paseo"
+  ],
+  "skills": [
+    "./skills/orchestrating"
+  ]
+}

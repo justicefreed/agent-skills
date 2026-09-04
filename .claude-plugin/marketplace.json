@@ -1,0 +1,23 @@
+{
+  "name": "justicefreed",
+  "owner": {
+    "name": "Justice Reed",
+    "url": "https://github.com/justicefreed"
+  },
+  "description": "Justice Reed's agent skills, packaged as Claude Code plugins. Harness-portable where possible.",
+  "plugins": [
+    {
+      "name": "orchestration",
+      "source": "./plugins/orchestration",
+      "description": "Orchestrate multi-agent work: delegation decisions, substrate selection, brief contracts, dispatch tracking, and result verification.",
+      "category": "development",
+      "keywords": [
+        "orchestration",
+        "subagents",
+        "delegation",
+        "multi-agent",
+        "worktree"
+      ]
+    }
+  ]
+}
