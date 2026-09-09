@@ -18,6 +18,20 @@
         "multi-agent",
         "worktree"
       ]
+    },
+    {
+      "name": "browser-verification",
+      "source": "./plugins/browser-verification",
+      "description": "Verify front-end work from the CLI without launching the user's Google Chrome: policy-immune headless wrapper, opt-in guard hook, Paseo browser-tools guidance.",
+      "category": "development",
+      "keywords": [
+        "browser",
+        "headless",
+        "chrome",
+        "screenshot",
+        "frontend",
+        "paseo"
+      ]
     }
   ]
 }

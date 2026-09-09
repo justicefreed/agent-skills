@@ -1,0 +1,23 @@
+{
+  "name": "browser-verification",
+  "version": "0.1.0",
+  "description": "Verify front-end work from the CLI without launching the user's installed Google Chrome: a policy-immune headless browser wrapper, a guard hook that refuses Google Chrome.app launches on Macs where a managed policy makes every launch prompt the user, and guidance on Paseo's built-in browser tools.",
+  "author": {
+    "name": "Justice Reed"
+  },
+  "repository": "https://github.com/justicefreed/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "browser",
+    "headless",
+    "chrome",
+    "screenshot",
+    "frontend",
+    "verification",
+    "paseo"
+  ],
+  "skills": [
+    "./skills/headless-browser"
+  ],
+  "hooks": "./hooks/hooks.json"
+}
