@@ -257,6 +257,49 @@ messages have become routing, and sets it up as an ordinary dispatch. The human 
 The tracker keeps one writer throughout. The front desk writes only to inboxes, which are
 multi-writer safe by construction, and claims its own inbox in its own worktree.
 
+## 9e. The status surface
+
+Status has three audiences and they are not interchangeable: the human right now, this turn's
+model, and *every later turn's* model. The third is the one that costs money — anything narrated
+into a transcript is re-read as input on every subsequent call, and cache reads were 61% of the
+measured bill in 9c. So the roster is not prose. It is chrome: a Claude Code `statusLine` command
+and a Paseo composer pill, both of which the human reads and the model never sees.
+
+**One collector, two adapters.** `orch statusline` renders from disk state only. `--format line` is
+the terminal's; `--format json` is the GUI's, and it embeds the same rendered `line` so the two
+surfaces cannot drift into disagreeing. Segments are subsettable (`--segments`), because a composer
+pill has less width than a terminal, and the choice of what to drop belongs to the surface rather
+than to a second formatter written in another language.
+
+**It never fails loudly and it is often silent.** On any internal error it prints nothing and exits
+0 — a renderer that reports its own failure into a status bar is a renderer the human switches off;
+`--debug` raises instead. In a repo where no program has ever run it prints nothing at all. And
+where several programs exist and none was chosen it says `pick --program`, the same refusal to guess
+that `resolve_program` makes everywhere else.
+
+**The expensive reads were already paid for.** The status line runs on *every* assistant message, so
+it may not open a transcript — those are megabytes. `orch cost`, which the turn-end hook already
+runs, now writes a per-target snapshot (`<program>/cost/<target>.json`, one writer per file) that
+the renderer reads in microseconds. The snapshots carry their own age, so the line marks a stale
+number rather than quietly reporting an old one: a dead hook becomes visible instead of invisible.
+The borrowed agent-track count is TTL-cached the same way.
+
+**The boundary with agent-track is one number.** That tool owns work items, gates and the critical
+path; this surface owns lanes — who is dispatched, with what, waiting on whom, at what cost. They
+overlap only in "items awaiting a human", which is fetched by running `track inbox --json`, never by
+parsing `.track/`, and omitted entirely when the repo has no `.track/` or no `track` on `PATH`. The
+surface is therefore useful in a repo that has never heard of agent-track, and additive in one that
+has. Paseo's own `agent-monitor` plugin already renders a daemon-wide liveness roster, which is why
+this one renders *intent* — dispatch entries, inbox depth, program spend, advisories — instead of a
+second liveness list.
+
+**Where the Paseo surface's shape came from.** A composer pill needs a `workspaceId` and an
+`agentId`, and 0.8 hands a client callback both only from a slash command or a Command Center item.
+There is no per-agent registration event, so a pill cannot appear by itself; `/orch` pins one. That
+constraint agrees with the intent — status is worth composer space on the one or two agents actually
+orchestrating, not on all fifteen lanes. The pill and its panel share one query key, so the panel
+opens from the pill's cache and the two can never show different numbers at the same instant.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.

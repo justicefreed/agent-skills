@@ -26,9 +26,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -191,8 +193,15 @@ def resolve_program(repo_key: str, requested: Optional[str]) -> str:
 # tracker file I/O
 # --------------------------------------------------------------------------- #
 
+# A parent-minted tracker id: `root`, `root.1`, `root.1.2`. Also the filter for
+# scanning a program directory, which holds this program's other state files too
+# (budget, transcripts, caches) -- reading one of those as a tracker used to
+# abort a recursive read, and an aborted read looks exactly like an empty roster.
+TRACKER_ID = re.compile(r"root(\.\d+)*")
+
+
 def check_tracker_id(tracker_id: str) -> None:
-    if not re.fullmatch(r"root(\.\d+)*", tracker_id):
+    if not TRACKER_ID.fullmatch(tracker_id):
         raise OrchError(
             "tracker id %r is not parent-minted form (root, root.1, root.1.2)."
             % tracker_id
@@ -626,7 +635,8 @@ def _read_all_trackers(repo_key: str, program: str,
     if recursive:
         if not os.path.isdir(pdir):
             return []
-        names = sorted(f[:-5] for f in os.listdir(pdir) if f.endswith(".json"))
+        names = sorted(f[:-5] for f in os.listdir(pdir)
+                       if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
         return [(n, load_tracker(os.path.join(pdir, n + ".json"))) for n in names]
 
     # Named tracker: a bad id or a never-minted one must FAIL, not read as an
@@ -1394,6 +1404,17 @@ def cmd_cost(args: argparse.Namespace) -> int:
             return 0
         raise OrchError("no model calls found in %s" % path)
 
+    # The status line must never read a transcript itself, so the read that just
+    # happened is written down for it. Best effort: a failed cache write is not
+    # worth failing a cost report over.
+    if repo_key and program:
+        try:
+            _, snapshot_target = resolve_target(args, repo_key)
+            if snapshot_target:
+                record_cost_usage(repo_key, program, snapshot_target, usage)
+        except (OrchError, OSError):
+            pass
+
     open_entries = 0
     budget: Dict[str, Any] = {}
     if repo_key and program:
@@ -1667,6 +1688,496 @@ def cmd_guard(args: argparse.Namespace) -> int:
 # cli
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# statusline: the one status surface the model never pays for
+# --------------------------------------------------------------------------- #
+#
+# An orchestrator that narrates -- "three lanes running, two intakes pending" --
+# pays for that sentence on every later model call, because its own output is
+# re-read as input for the rest of the session. A status line is the opposite
+# trade: the harness draws it as chrome, the human reads it, and not one token
+# of it reaches a model. Two rules follow, and they are the whole design:
+#
+#   1. Read only what is already on disk. Anything needing a transcript, a
+#      substrate query, or another process is cached or left out. This runs on
+#      every assistant message; it must not become the turn's biggest cost.
+#   2. Never fail, and never speak when there is nothing to say. A renderer that
+#      throws, or that shows noise in a repo with no program, is a renderer the
+#      human switches off -- and it is then worth nothing at the moment it
+#      would have mattered.
+#
+# The same JSON feeds a GUI surface (see references/statusline.md), so the
+# rendering rules live here rather than in each adapter.
+
+# Seconds to wait for a harness to write its payload. Only spent when a caller
+# leaves stdin open without writing; pass `--stdin never` to skip it entirely.
+STDIN_WAIT_S = float(os.environ.get("ORCH_STATUSLINE_STDIN_WAIT", 2.0))
+# Seconds a borrowed `track` count may be reused. That segment is the only one
+# that spawns a process, so it is the only one that needs a cache.
+TRACK_TTL_S = int(os.environ.get("ORCH_STATUSLINE_TRACK_TTL", 15))
+# Age past which a spend figure renders as approximate. The turn-end cost hook
+# refreshes it; a stale number means that hook stopped running, not that the
+# spending stopped.
+COST_STALE_S = int(os.environ.get("ORCH_STATUSLINE_COST_STALE", 900))
+# Percent of the compaction window. Low on purpose: rotating early is the
+# cheapest saving available, so the warning has to arrive while it is still a
+# choice (references/cost.md).
+CTX_WARN_PCT = int(os.environ.get("ORCH_STATUSLINE_CTX_WARN", 60))
+CTX_URGENT_PCT = int(os.environ.get("ORCH_STATUSLINE_CTX_URGENT", 80))
+DEFAULT_WINDOW = 200_000
+
+STATUS_SEGMENTS = ("prog", "lanes", "inbox", "cost", "ctx", "alerts", "track")
+
+_ANSI = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33",
+         "blue": "34", "magenta": "35", "cyan": "36"}
+
+
+def _paint(text: str, style: str, color: bool) -> str:
+    if not color or not style:
+        return text
+    codes = ";".join(_ANSI[s] for s in style.split() if s in _ANSI)
+    return "\033[%sm%s\033[0m" % (codes, text) if codes else text
+
+
+def _payload_from_stdin(mode: str) -> Dict[str, Any]:
+    """The harness payload, or an empty dict -- never a block and never a raise.
+
+    Claude Code pipes one JSON document and waits for stdout. Other callers pipe
+    nothing and may hold the pipe open forever, which is why this waits for
+    readability first instead of reading unconditionally.
+    """
+    if mode == "never":
+        return {}
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+    except (AttributeError, ValueError):
+        return {}
+    try:
+        import select
+        if not select.select([sys.stdin], [], [], STDIN_WAIT_S)[0]:
+            return {}
+    except Exception:  # no select for this handle: fall through and read
+        pass
+    try:
+        raw = sys.stdin.read()
+    except (OSError, ValueError):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _payload_cwd(payload: Dict[str, Any]) -> Optional[str]:
+    workspace = payload.get("workspace") or {}
+    for value in (workspace.get("current_dir"), payload.get("cwd"),
+                  workspace.get("project_dir")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# cost snapshots: measured once by the turn-end hook, read cheaply here
+
+def cost_snapshot_dir(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "cost")
+
+
+def record_cost_usage(repo_key: str, program: str, target: str,
+                      usage: Dict[str, Any]) -> None:
+    """Write down what a transcript read already measured.
+
+    A transcript is megabytes and the status line runs on every assistant
+    message, so the renderer must never read one. The turn-end cost hook has
+    already paid for that read; this makes the result readable in a few
+    microseconds. One file per target, because every lane's hook writes its own
+    and a shared file would make them lose each other's numbers.
+    """
+    _save_json(
+        os.path.join(cost_snapshot_dir(repo_key, program),
+                     inbox_slug(target) + ".json"),
+        {"target": target,
+         "cost": round(float(usage.get("cost", 0.0)), 4),
+         "cost_per_step": round(float(usage.get("cost_per_step", 0.0)), 4),
+         "context": int(usage.get("context", 0)),
+         "steps": int(usage.get("steps", 0)),
+         "at": _now()},
+    )
+
+
+def load_cost_snapshots(repo_key: str, program: str) -> Dict[str, Dict[str, Any]]:
+    root = cost_snapshot_dir(repo_key, program)
+    out: Dict[str, Dict[str, Any]] = {}
+    if not os.path.isdir(root):
+        return out
+    for fname in sorted(os.listdir(root)):
+        if not fname.endswith(".json"):
+            continue
+        data = _load_json(os.path.join(root, fname))
+        if data:
+            out[fname[:-5]] = data
+    return out
+
+
+def _age_seconds(stamp: Optional[str]) -> Optional[float]:
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
+
+
+# --------------------------------------------------------------------------- #
+# the one borrowed number
+
+def _track_counts(repo_root: str, cache_path: str,
+                  mode: str) -> Optional[Dict[str, Any]]:
+    """How many `track` items await a human, when this repo happens to use track.
+
+    One number, obtained by asking the `track` CLI rather than by reading its
+    files: agent-track owns that model, and a second parser of its markdown
+    would go stale exactly when it disagreed. Everything else it computes --
+    critical path, blockers, per-item detail -- stays its job, and this segment
+    disappears entirely in a repo without it.
+    """
+    if mode == "off" or not os.path.isdir(os.path.join(repo_root, ".track")):
+        return None
+    cached = _load_json(cache_path)
+    fresh = cached.get("at_ts")
+    if isinstance(fresh, (int, float)) and (time.time() - fresh) < TRACK_TTL_S:
+        return cached.get("counts")
+    exe = shutil.which("track")
+    if not exe:
+        return None
+    try:
+        done = subprocess.run(
+            [exe, "inbox", "--json", "--cwd", repo_root],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        items = json.loads(done.stdout.decode("utf-8", "replace") or "[]")
+    except Exception:
+        # Last good value beats a blank: a slow CLI is not news.
+        return cached.get("counts")
+    counts = {"awaiting": len(items) if isinstance(items, list) else 0}
+    try:
+        _save_json(cache_path, {"at_ts": time.time(), "counts": counts})
+    except OSError:
+        pass
+    return counts
+
+
+# --------------------------------------------------------------------------- #
+# collection
+
+def collect_status(args: argparse.Namespace,
+                   payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Everything both surfaces render, from disk only. {} means say nothing."""
+    repo_key, root, _ = repo_identity(args.repo)
+    programs = [p["program"] for p in list_programs(repo_key)]
+    if not programs:
+        # Nothing was ever orchestrated in this repo. Silence is the answer.
+        return {}
+    program = args.program or (programs[0] if len(programs) == 1 else None)
+    status: Dict[str, Any] = {
+        "repo": os.path.basename(root), "repo_path": root,
+        "program": program, "programs": programs, "at": _now(),
+    }
+    if program is None:
+        # Same refusal as everywhere else: naming the choice beats guessing it.
+        status["ambiguous"] = True
+        return status
+
+    counts = {"running": 0, "pending": 0, "harvested": 0}
+    flags = {"no_agent_id": 0, "queued_message": 0, "brief_missing": 0}
+    entries: List[Dict[str, Any]] = []
+    try:
+        trackers = _read_all_trackers(repo_key, program, True, "root")
+    except OrchError:
+        trackers = []
+    for name, data in trackers:
+        for entry in data.get("entries", []):
+            state = entry.get("status") or "pending"
+            counts[state] = counts.get(state, 0) + 1
+            row_flags = []
+            if state == "pending" and not entry.get("agent_id"):
+                flags["no_agent_id"] += 1
+                row_flags.append("no-agent-id")
+            if entry.get("pending_message"):
+                flags["queued_message"] += 1
+                row_flags.append("msg-queued")
+            brief = entry.get("brief_path")
+            if brief and not os.path.exists(brief):
+                flags["brief_missing"] += 1
+                row_flags.append("brief-missing")
+            entries.append({
+                "tracker": name,
+                "entry": entry.get("entry"),
+                "status": state,
+                "title": entry.get("title"),
+                "agent_id": entry.get("agent_id"),
+                "session_name": entry.get("session_name"),
+                "worktree": entry.get("worktree"),
+                "archetype": entry.get("archetype"),
+                "model": entry.get("model"),
+                "child_tracker": entry.get("child_tracker"),
+                "flags": row_flags,
+            })
+    status["lanes"] = {"counts": counts, "flags": flags,
+                       "total": sum(counts.values()), "entries": entries,
+                       "plan_doc": trackers[0][1].get("plan_doc")
+                       if trackers else None}
+
+    try:
+        _, target = resolve_target(args, repo_key)
+    except OrchError:
+        target = None
+    mine_slug = None
+    if target:
+        try:
+            mine_slug = inbox_slug(target)
+        except OrchError:
+            mine_slug = None
+    mine: Optional[int] = 0 if target else None
+    others: List[Dict[str, Any]] = []
+    idir = inbox_dir(repo_key, program)
+    for fname in sorted(os.listdir(idir)) if os.path.isdir(idir) else []:
+        if not fname.endswith(".jsonl"):
+            continue
+        slug = fname[: -len(".jsonl")]
+        items, _total = _read_pending(os.path.join(idir, fname),
+                                      os.path.join(idir, slug + ".cursor"))
+        if slug == mine_slug:
+            mine = len(items)
+        elif items:
+            others.append({"name": slug, "pending": len(items)})
+    status["inbox"] = {
+        "target": target, "pending": mine, "others": others,
+        "others_pending": sum(o["pending"] for o in others),
+    }
+    status["frontdesk"] = _load_json(frontdesk_path(repo_key, program)).get("target")
+
+    snapshots = load_cost_snapshots(repo_key, program)
+    mine_snap = snapshots.get(mine_slug or "", {})
+    program_cost = sum(float(s.get("cost", 0.0) or 0.0)
+                       for s in snapshots.values())
+    ages = [a for a in (_age_seconds(s.get("at")) for s in snapshots.values())
+            if a is not None]
+    session_cost = (payload.get("cost") or {}).get("total_cost_usd")
+    if session_cost is None and mine_snap:
+        session_cost = mine_snap.get("cost")
+    budget = load_budget(repo_key, program)
+    status["cost"] = {
+        "program": round(program_cost, 2) if snapshots else None,
+        "session": round(float(session_cost), 2) if session_cost is not None else None,
+        "per_step": mine_snap.get("cost_per_step"),
+        "limit": budget.get("limit"),
+        "measured_targets": len(snapshots),
+        "stale": bool(ages) and min(ages) > COST_STALE_S,
+        "age_s": round(min(ages)) if ages else None,
+    }
+
+    window = payload.get("context_window") or {}
+    tokens = window.get("used_tokens") or mine_snap.get("context") or 0
+    total = int(window.get("total_tokens") or 0) or int(
+        os.environ.get("ORCH_AUTOCOMPACT_WINDOW") or 0) or DEFAULT_WINDOW
+    percent = window.get("used_percentage")
+    if percent is None and tokens:
+        percent = 100.0 * tokens / total
+    status["context"] = {
+        "percent": round(float(percent), 1) if percent is not None else None,
+        "tokens": int(tokens) or None, "window": total,
+    }
+
+    # Same thresholds the turn-end cost hook advises on, so the two surfaces
+    # cannot disagree about whether something is wrong.
+    alerts = []
+    if tokens and tokens >= CONTEXT_URGENT:
+        alerts.append("rotate")
+    elif percent is not None and percent >= CTX_URGENT_PCT:
+        alerts.append("rotate")
+    elif (tokens and tokens >= CONTEXT_WARN) or (
+            percent is not None and percent >= CTX_WARN_PCT):
+        alerts.append("ctx")
+    if budget.get("limit") and program_cost >= float(budget["limit"]):
+        alerts.append("budget")
+    if counts.get("running", 0) >= FANOUT_WARN:
+        alerts.append("fanout")
+    if flags["no_agent_id"]:
+        alerts.append("unrecorded")
+    if flags["brief_missing"]:
+        alerts.append("brief")
+    status["alerts"] = alerts
+
+    status["track"] = _track_counts(
+        root, os.path.join(program_dir(repo_key, program), "track-cache.json"),
+        getattr(args, "track", "auto"))
+    return status
+
+
+# --------------------------------------------------------------------------- #
+# rendering
+
+def _glyphs(ascii_only: bool) -> Dict[str, str]:
+    if ascii_only:
+        return {"inbox": "in ", "sep": " | ", "alert": "!"}
+    return {"inbox": "✉", "sep": " · ", "alert": "!"}
+
+
+def render_status_line(status: Dict[str, Any], color: bool = True,
+                       ascii_only: bool = False,
+                       segments: Optional[Any] = None) -> str:
+    """The compact line. Empty string when there is nothing worth a pixel."""
+    if not status:
+        return ""
+    want = set(segments or STATUS_SEGMENTS)
+    g = _glyphs(ascii_only)
+    parts: List[str] = []
+
+    if "prog" in want:
+        label = "orch"
+        if status.get("program") and status["program"] != "default":
+            label = "orch:%s" % status["program"]
+        parts.append(_paint(label, "dim", color))
+    if status.get("ambiguous"):
+        parts.append(_paint("pick --program (%s)"
+                            % ", ".join(status.get("programs", [])),
+                            "yellow", color))
+        return g["sep"].join(parts)
+
+    lanes = status.get("lanes") or {}
+    counts = lanes.get("counts") or {}
+    flags = lanes.get("flags") or {}
+    if "lanes" in want:
+        if not lanes.get("total"):
+            parts.append(_paint("idle", "dim", color))
+        else:
+            if counts.get("running"):
+                parts.append(_paint("%d run" % counts["running"], "green", color))
+            if counts.get("pending"):
+                parts.append(_paint(
+                    "%d pend" % counts["pending"],
+                    "yellow" if flags.get("no_agent_id") else "dim", color))
+            if counts.get("harvested"):
+                parts.append(_paint("%d harv" % counts["harvested"], "dim", color))
+
+    inbox = status.get("inbox") or {}
+    if "inbox" in want and (inbox.get("pending") or inbox.get("others_pending")):
+        text = g["inbox"] + (str(inbox["pending"]) if inbox.get("pending") else "")
+        if inbox.get("others_pending"):
+            text += "+%d" % inbox["others_pending"]
+        parts.append(_paint(text, "cyan bold" if inbox.get("pending")
+                            else "dim", color))
+
+    cost = status.get("cost") or {}
+    if "cost" in want and cost.get("program") is not None:
+        text = "$%s" % _money(cost["program"])
+        limit = cost.get("limit")
+        if limit:
+            text += "/%s" % _money(limit)
+        if cost.get("stale"):
+            text += "~"
+        style = "dim"
+        if limit and cost["program"] >= float(limit):
+            style = "red bold"
+        elif limit and cost["program"] >= 0.8 * float(limit):
+            style = "yellow"
+        parts.append(_paint(text, style, color))
+
+    ctx = status.get("context") or {}
+    if "ctx" in want and ctx.get("percent") is not None:
+        percent = ctx["percent"]
+        style = ("red bold" if percent >= CTX_URGENT_PCT
+                 else "yellow" if percent >= CTX_WARN_PCT else "dim")
+        parts.append(_paint("ctx %d%%" % round(percent), style, color))
+
+    if "alerts" in want and status.get("alerts"):
+        parts.append(_paint(g["alert"] + " ".join(status["alerts"]),
+                            "red bold", color))
+
+    track = status.get("track") or {}
+    if "track" in want and track.get("awaiting"):
+        parts.append(_paint("trk %d" % track["awaiting"], "magenta", color))
+
+    return g["sep"].join(p for p in parts if p)
+
+
+def _money(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    return "%.0f" % amount if amount >= 10 else "%.2f" % amount
+
+
+def render_status_lines(status: Dict[str, Any], color: bool = True,
+                        ascii_only: bool = False, max_lanes: int = 5,
+                        width: int = 0,
+                        segments: Optional[Any] = None) -> List[str]:
+    """The compact line, then one row per lane. For a taller status bar."""
+    first = render_status_line(status, color, ascii_only, segments)
+    if not first:
+        return []
+    lines = [first]
+    entries = ((status.get("lanes") or {}).get("entries") or [])[:max_lanes]
+    limit = width or int(os.environ.get("COLUMNS") or 0) or 100
+    for entry in entries:
+        who = entry.get("session_name") or (entry.get("agent_id") or "-")[:8]
+        # Flags before the title: the title is what gets truncated, and a
+        # dispatch with no recorded agent id is the thing worth reading first.
+        row = "  %s %s %s %s%s" % (
+            entry.get("entry"), entry.get("status"), who,
+            ("[%s] " % " ".join(entry["flags"])) if entry.get("flags") else "",
+            entry.get("title") or "")
+        if len(row) > limit:
+            row = row[: max(0, limit - 1)] + "…"
+        lines.append(_paint(row, "dim", color))
+    remaining = (status.get("lanes") or {}).get("total", 0) - len(entries)
+    if remaining > 0:
+        lines.append(_paint("  +%d more" % remaining, "dim", color))
+    return lines
+
+
+def cmd_statusline(args: argparse.Namespace) -> int:
+    payload = _payload_from_stdin(args.stdin)
+    if args.repo == ".":
+        args.repo = _payload_cwd(payload) or args.repo
+    color = args.color == "always" or (
+        args.color == "auto" and not os.environ.get("NO_COLOR"))
+    segments = [s.strip() for s in args.segments.split(",")
+                if s.strip()] if args.segments else None
+    try:
+        # JSON is what a GUI adapter consumes, so its strings carry no escapes.
+        paint = color and args.format != "json"
+        status = collect_status(args, payload)
+        line = render_status_line(status, paint, args.ascii, segments)
+        lines = render_status_lines(status, paint, args.ascii, args.max_lanes,
+                                    args.width, segments)
+    except Exception:
+        # The module note applies: a renderer that reports its own failure into
+        # the harness's chrome is a renderer that gets removed. --debug when
+        # something is wrong; silence otherwise.
+        if args.debug:
+            raise
+        return 0
+    if args.format == "json":
+        print(json.dumps({**status, "line": line, "lines": lines}, indent=2))
+        return 0
+    if args.format == "multiline":
+        for row in lines:
+            print(row)
+        return 0
+    if line:
+        print(line)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="orch",
@@ -1813,6 +2324,29 @@ def build_parser() -> argparse.ArgumentParser:
                         help="PreToolUse hook: note when a tool input is large")
     sp.add_argument("--format", default="hook", choices=("hook",))
     sp.set_defaults(func=cmd_guard)
+
+    sp = sub.add_parser(
+        "statusline",
+        help="one line of program status for a harness status bar")
+    sp.add_argument("--program")
+    sp.add_argument("--to", help="inbox target to report as mine")
+    sp.add_argument("--format", default="line",
+                    choices=("line", "multiline", "json"))
+    sp.add_argument("--color", default="auto",
+                    choices=("auto", "always", "never"))
+    sp.add_argument("--ascii", action="store_true",
+                    help="no glyphs, for a terminal that mangles them")
+    sp.add_argument("--track", default="auto", choices=("auto", "off"),
+                    help="borrow agent-track's awaiting-a-human count")
+    sp.add_argument("--segments",
+                    help="comma-separated subset of: %s" % ",".join(STATUS_SEGMENTS))
+    sp.add_argument("--stdin", default="auto", choices=("auto", "never"),
+                    help="never: do not wait for a harness payload")
+    sp.add_argument("--max-lanes", type=int, default=5)
+    sp.add_argument("--width", type=int, default=0)
+    sp.add_argument("--debug", action="store_true",
+                    help="raise instead of rendering nothing")
+    sp.set_defaults(func=cmd_statusline)
 
     sp = sub.add_parser("budget", help="show or set this program's spend limit")
     sp.add_argument("--set", dest="limit", type=float,

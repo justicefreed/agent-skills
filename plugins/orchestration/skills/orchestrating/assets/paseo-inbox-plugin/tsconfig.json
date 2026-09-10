@@ -1,0 +1,17 @@
+{
+  "//": "The client bundle's type environment: React Native, no DOM, no Node. Dropping DOM is the point -- a surface that typechecks against `document` compiles clean and crashes on a phone. `server/` needs Node globals and gets them from tsconfig.server.json, so the two programs mirror the boundary Paseo's compiler enforces.",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023"],
+    "types": ["react"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["index.client.tsx", "client/**/*.ts", "client/**/*.tsx", "shared/**/*.ts"]
+}

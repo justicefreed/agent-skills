@@ -1,0 +1,7 @@
+# Dev-only. Nothing here is installed at runtime: Paseo bundles this directory
+# from source, and every dependency in package.json exists to typecheck it. The
+# one version that has to be pinned -- the SDK -- is pinned exactly in
+# package.json, so a lockfile would add weight to this repo without adding
+# reproducibility to anything that ships.
+node_modules/
+package-lock.json

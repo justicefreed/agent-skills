@@ -214,11 +214,17 @@ Load these on demand, not up front.
 | `references/messaging.md` | what may be sent to a worker, and when |
 | `references/verification.md` | the checks-that-cannot-fail catalog |
 | `references/closeout.md` | commits, hygiene, resource reclamation |
+| `references/statusline.md` | the status surface for the human: status line, Paseo pill |
 
 **Tooling.** Tracker and inbox operations go through `scripts/orch.py`, resolved relative to this
 skill's base directory. Harness-specific path resolution is in
 `references/substrates/_capabilities.md`. Never edit tracker files by hand: the script enforces the
 required fields, and the enforcement is the point.
+
+**Status for the human.** Do not narrate the roster into chat — it becomes permanent context that
+is re-read on every later turn. `orch statusline` renders it into harness chrome instead, which the
+model never pays for: a Claude Code status line, or the Paseo pill in
+`assets/paseo-inbox-plugin/`. Install once per machine; `references/statusline.md`.
 
 This skill's front matter registers hooks: inbox drain and cost advisory at turn end, state
 re-derivation after compaction, and a note when a large tool input is about to become permanent

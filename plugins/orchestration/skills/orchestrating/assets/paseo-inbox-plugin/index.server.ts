@@ -1,39 +1,23 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
+/**
+ * orch-inbox -- server entry. Two contributions, both shelling out to `orch`:
+ *
+ *  - inbox delivery, on `agent.turn_ended`: the fallback for providers with no
+ *    Stop hook. This is the plugin's original and primary job.
+ *  - the `orch.status` RPC, for the composer pill in `index.client.tsx`. Purely
+ *    read-only, and separate on purpose -- the pill is chrome a human reads, so
+ *    nothing it renders is ever sent into an agent's context.
+ */
+
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
-const run = promisify(execFile);
-
-// The tracker ships as a Python script inside the skill, not as an `orch` binary
-// on PATH, so the default has to find it the same way the skill's turn-end hook
-// does. Same candidate order, so both paths agree about which copy is canonical.
-function resolveOrch(): { bin: string; lead: string[] } {
-  const override = process.env.ORCH_INBOX_ORCH_BIN;
-  if (override) return { bin: override, lead: [] };
-  const candidates = [
-    process.env.ORCH_SKILL_DIR,
-    join(homedir(), ".claude", "skills", "orchestrating"),
-    join(homedir(), ".agents", "skills", "orchestrating"),
-  ];
-  for (const dir of candidates) {
-    if (!dir) continue;
-    const script = join(dir, "scripts", "orch.py");
-    if (existsSync(script)) return { bin: "python3", lead: [script] };
-  }
-  // Nothing found. Fall back to a PATH lookup so the failure names `orch`
-  // rather than a guessed path that was never going to exist.
-  return { bin: "orch", lead: [] };
-}
+import { orchRun } from "./server/orch";
+import { handleStatusRead } from "./server/status";
+import { statusRead } from "./shared/status";
 
 // A turn ending is not the same as the human being done. Someone who starts typing
 // the instant a turn ends must win the race against us, because a user-queued
 // message outranks an inbox item. This delay is the whole mechanism for that.
 const SETTLE_DELAY_MS = 1000;
-
-const ORCH = resolveOrch();
 
 // Tokens. Empty string disables. Must be a plain integer between 100000 and
 // 1000000; the harness clamps anything else to its minimum.
@@ -70,9 +54,8 @@ function settle(signal: AbortSignal): Promise<boolean> {
 // and the common case is an empty inbox. It would also introduce a window where
 // peek says yes and drain then returns nothing.
 async function drain(repo: string, target: string, signal: AbortSignal): Promise<string> {
-  const { stdout } = await run(
-    ORCH.bin,
-    [...ORCH.lead, "--repo", repo, "inbox", "drain", "--to", target, "--format", "text"],
+  const { stdout } = await orchRun(
+    ["--repo", repo, "inbox", "drain", "--to", target, "--format", "text"],
     { signal },
   );
   return stdout.trim();
@@ -87,6 +70,11 @@ type HookContext = {
 };
 
 export default function contribute(server: PluginServerContext) {
+  // The status surface. Read-only, and the only thing in this plugin the human
+  // drives directly: the client pins a composer pill whose label is the same
+  // line `orch statusline` prints into a terminal status bar.
+  server.handle(statusRead, handleStatusRead);
+
   server.before("agent.session_open", ({ request }: { request: any }) => {
     // Lets a worker address its own inbox without the parent having to tell it its id.
     const existing = request.env?.ORCH_INBOX_TARGET;
