@@ -215,20 +215,18 @@ Load these on demand, not up front.
 | `references/messaging.md` | what may be sent to a worker, and when |
 | `references/verification.md` | the checks-that-cannot-fail catalog |
 | `references/closeout.md` | commits, hygiene, resource reclamation |
-| `references/statusline.md` | the status surface for the human: status line, Paseo pill |
+| `references/statusline.md` | the human's status surface: status line, Paseo pill |
 
-**Tooling.** Tracker and inbox operations go through `scripts/orch.py`; path resolution per harness
-is in `references/substrates/_capabilities.md`. Never edit tracker files by hand — the script's field
-enforcement is the point. This skill's front matter registers hooks that drain, advise, re-derive
-state, check for a compaction loop and guard large inputs; all are silent when there is nothing to
-say. Export `ORCH_SKILL_DIR` if this skill lives somewhere their candidate list does not cover.
+**Tooling.** Tracker and inbox operations go through `scripts/orch.py`; per-harness path resolution
+is in `references/substrates/_capabilities.md`, `ORCH_SKILL_DIR` included. Never edit tracker files by
+hand — the script's field enforcement is the point. The front matter registers hooks that drain,
+advise, re-derive state, check for a compaction loop and guard large inputs; all silent when there is
+nothing to say.
 
-**Status for the human.** Do not narrate the roster into chat — it becomes permanent context re-read
-on every later turn. `orch statusline` renders it into harness chrome the model never pays for: a
-Claude Code status line, or the Paseo pill in `assets/paseo-inbox-plugin/`. Install once per
-machine; `references/statusline.md`.
+**Status for the human.** Never narrate the roster into chat — it becomes permanent context re-read
+every later turn. `orch statusline` renders it into harness chrome the model never pays for;
+`references/statusline.md` installs it, once per machine.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
-build discipline, formatter exclusions, known traps, output-verbosity preferences. Generate it from
-`assets/STANDING-RULES.template.md` on first use. Those facts belong to the project, not to this
-skill, and briefs reference that file rather than repeating it.
+build discipline, formatter exclusions, known traps. Generate it from
+`assets/STANDING-RULES.template.md` on first use; briefs reference it rather than repeating it.

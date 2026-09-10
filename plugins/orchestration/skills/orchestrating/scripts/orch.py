@@ -230,11 +230,17 @@ def list_programs(repo_key: str) -> List[Dict[str, Any]]:
         pdir = os.path.join(root, name)
         if not os.path.isdir(pdir):
             continue
-        trackers = [f for f in os.listdir(pdir) if f.endswith(".json")]
+        # Tracker-shaped names only -- the third site where globbing `*.json`
+        # counted sidecars as trackers. Here it did not raise, it just lied
+        # quietly: a program with one tracker and seven sidecars reported
+        # trackers=8, and `updated` came from whichever sidecar was touched
+        # last, so a program whose only recent activity was a cost advisory
+        # writing its warn marker looked freshly dispatched.
+        names = tracker_names(pdir)
         open_entries = 0
         newest = 0.0
-        for fname in trackers:
-            path = os.path.join(pdir, fname)
+        for tname in names:
+            path = os.path.join(pdir, tname + ".json")
             newest = max(newest, os.path.getmtime(path))
             try:
                 with open(path, "r", encoding="utf-8") as fh:
@@ -244,7 +250,7 @@ def list_programs(repo_key: str) -> List[Dict[str, Any]]:
         found.append({
             "program": name,
             "path": pdir,
-            "trackers": len(trackers),
+            "trackers": len(names),
             "open_entries": open_entries,
             "updated": datetime.fromtimestamp(newest, timezone.utc).isoformat(
                 timespec="seconds") if newest else None,
