@@ -86,6 +86,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
 | `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
+| `orch compaction measure\|check\|window` | context floor and safe auto-compact window; `check` is the session-start loop detector; `window` is what a launcher asks |
+| `orch rotate begin\|claim\|complete\|status\|abort` | replace a live agent; see `../rotation.md` for the order and who runs which |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that
 boundary is why the adapters stay swappable. `prune` likewise takes the live agent set as an
@@ -104,6 +106,21 @@ The parent is the **only minter**. `orch mint-child e1` returns `root.1`; put `t
 in that worker's brief front matter. A child recovers its id from its brief, or via `orch whoami`
 when it has its own worktree. If neither works it must **ask, never mint** — two tracker files for
 one job is a split-brain where each half is internally consistent and neither is complete.
+
+## Two records that are neither tracker nor inbox
+
+`compaction.json` and `rotation.json` sit beside the tracker in the program directory, and both are
+there for the same reason: they carry a fact **the next session cannot re-derive**.
+
+A session cannot measure its own context floor before it has one, and it cannot change its own
+auto-compact window at all — that is read at launch. So the measured floor is recorded for whoever
+launches next. It only ever grows: a floor that shrank would be a smaller reading of the same
+irreducible context, not a smaller context.
+
+A rotation record is the obligation the *successor* inherits — which inbox to take, which agent to
+close — and it must survive the predecessor going away mid-handoff, which is precisely the case it
+exists for. It is deleted on `rotate complete`, and a record still pending after ten minutes raises
+an advisory on the turn-end hook. That is the dangling-session detector.
 
 ## The inbox is state with different rules
 

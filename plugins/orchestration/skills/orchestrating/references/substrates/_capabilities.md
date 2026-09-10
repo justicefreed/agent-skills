@@ -17,6 +17,13 @@ and holds the harness-specific details the spine deliberately excludes.
 | `RETUNE` | change a running worker's model / effort / mode | does **not** change instructions |
 | `WAKE` | recurring prompt back to *this* orchestrator | heartbeat semantics |
 | `SCHEDULE` | recurring spawn of a *fresh* worker on a cadence | distinct from `WAKE` |
+| `ROTATE` | replace a **live** agent — usually yourself — with a fresh one on a handoff note | see `../rotation.md`; the successor performs the `CLOSE`, never the predecessor |
+
+`ROTATE` is not a single call on any substrate. It is `SPAWN` plus `CLOSE` with a strict order and an
+inbox transfer between them, and it is a verb rather than a procedure note because the *placement*
+part is substrate-specific: the successor must land in the predecessor's worktree, and on substrates
+with a visible session surface, in the same one the human was looking at. An adapter states how to
+place it; `../rotation.md` owns the order.
 
 There is deliberately no `NUDGE`. Mid-task instruction of a running worker is not implementable on
 any substrate examined — see `../messaging.md` for the evidence. Corrections arrive via `ESCALATE`,

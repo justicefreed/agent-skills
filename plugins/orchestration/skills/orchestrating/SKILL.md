@@ -13,6 +13,8 @@ hooks:
       hooks:
         - type: command
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" resume --format hook; done; exit 0'
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" compaction check --format hook; done; exit 0'
   PreToolUse:
     - matcher: "Write|Edit|Bash"
       hooks:
@@ -156,6 +158,11 @@ session-start hook re-derives your state from disk afterwards. The turn-end hook
 fan-out, or a set budget crosses a threshold. Act at a seam: land and close what is finished, patch
 the plan document, then compact. `references/cost.md`.
 
+When a summary will not do, `ROTATE` onto a fresh agent — but **never spawn a successor and then
+archive yourself.** `CLOSE` interrupts the turn that calls it, so you cannot observe that it worked,
+and the inbox does not follow you. Run `orch rotate begin`, spawn what it prints in your own
+worktree, and stop; the successor claims the inbox and closes you. `references/rotation.md`.
+
 **Propose a front desk once execution is routine.** When the plan is written, the first wave is out,
 and the human's recent messages are approvals and task adds rather than decisions, offer a cheap
 router between them and you: it forwards verbatim, answers status from files, relays your questions.
@@ -206,6 +213,7 @@ Load these on demand, not up front.
 | `references/delegation.md` | substrate, isolation, archetype, model and effort |
 | `references/availability.md` | bounded turns, and the inbox for queued input |
 | `references/cost.md` | what a program actually spends, compaction, hygiene |
+| `references/rotation.md` | replacing a live orchestrator without leaving two behind |
 | `references/frontdesk.md` | the cheap router between the human and you |
 | `references/integration.md` | the standing integrator lane, and who reviews before landing |
 | `references/briefs.md` | brief front matter, body, and report contract |
@@ -227,8 +235,8 @@ model never pays for: a Claude Code status line, or the Paseo pill in
 `assets/paseo-inbox-plugin/`. Install once per machine; `references/statusline.md`.
 
 This skill's front matter registers hooks: inbox drain and cost advisory at turn end, state
-re-derivation after compaction, and a note when a large tool input is about to become permanent
-context. All are silent when there is nothing to say. Export `ORCH_SKILL_DIR` if this skill lives
+re-derivation and a compaction-loop check after compaction, and a note when a large tool input is
+about to become permanent context. All are silent when there is nothing to say. Export `ORCH_SKILL_DIR` if this skill lives
 somewhere the hooks' candidate list does not cover.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —

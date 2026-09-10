@@ -82,16 +82,17 @@ enough — and tells the human when an advisory appears. Compaction handles the 
 own. Replacement is for when it does not: an orchestrator that is confused after compaction, or a
 budget the human has decided to stop at.
 
-The replacement procedure, driven by the front desk on the human's say-so:
+**The procedure is `rotation.md`; do not improvise one.** The front desk's part is only the two ends
+of it, on the human's say-so:
 
-1. `orch inbox send --to root --kind correction --body "ROTATE: land and close what is finished,
-   patch the plan document, write a handoff note to <path>, then send 'HANDOFF READY' to frontdesk."`
-2. On `HANDOFF READY`, spawn a fresh orchestrator on the handoff note with the orchestrating skill,
-   in the **same** worktree the old one used. Its `orch inbox claim --as root --force` takes over the
-   inbox; queued items are preserved because the log and cursor never moved.
-3. Close the old orchestrator. Two orchestrators on one program is the split-brain `state.md`
-   designs against.
-4. Tell the human in one line.
+1. `orch inbox send --to root --kind correction --body "ROTATE per rotation.md: land and close what
+   is finished, patch the plan document, write a handoff note to <path>, then run orch rotate begin
+   and spawn your successor in your own worktree."`
+2. Tell the human in one line when `orch rotate status` goes quiet.
+
+Everything between those is the orchestrator's and its successor's, because the successor is what
+closes the predecessor — the front desk closing it would race the handoff. If a rotation stalls, the
+turn-end advisory in the successor's session names what is owed; relay that.
 
 This is rarely needed. The measured saving comes from compaction firing early; replacement is the
 fallback for when a summary has gone wrong, and the front desk exists so that fallback costs the human

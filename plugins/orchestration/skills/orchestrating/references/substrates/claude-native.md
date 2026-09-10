@@ -17,6 +17,14 @@ not the process — and for short-lived work where a fresh restart is cheap.
 | `RETUNE` | none | model is fixed at spawn; **no effort dial** — effort comes from the agent definition | documented |
 | `WAKE` | the wakeup/cron scheduling tools | | documented |
 | `SCHEDULE` | the cron-creation tool | | documented |
+| `ROTATE` | **not available for yourself.** A subagent cannot replace its parent, and a session cannot spawn its own successor | a subagent dies with this session, so a "successor" spawned here is not a replacement | documented |
+
+`ROTATE` is the one verb this substrate cannot supply, and the reason is the same one that makes it
+second choice in the detection order: its agents do not outlive the session. Rotating an orchestrator
+here means the **human** starts a fresh session on the handoff note — so `orch rotate begin` still
+applies (write the note, record the rotation), and the new session runs `orch rotate claim` and then
+`orch rotate complete --assume-none-alive`, because ending the old session *is* the close. Tell the
+human that explicitly; it is a step only they can take. See `../rotation.md`.
 
 ## The messaging asymmetry
 

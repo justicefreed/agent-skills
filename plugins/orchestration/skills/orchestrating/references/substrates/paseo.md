@@ -21,6 +21,13 @@ orchestration policy.
 | `RETUNE` | `update_agent` (`settings.model`, `thinkingOptionId`, `modeId`) | changes config on a **running** agent; does not touch instructions | documented |
 | `WAKE` | `create_heartbeat` | prompts *you* on a cadence; no update tool — delete and recreate | documented |
 | `SCHEDULE` | `create_schedule` | spawns a **fresh** agent per firing | documented |
+| `ROTATE` | `create_agent` with `workspaceId` **omitted**, then the successor calls `archive_agent` on you | omitting `workspaceId` places the successor in your own workspace, which is both the same worktree and the same tab strip the human was watching. There is no replace-in-place API | documented |
+
+On `ROTATE`, two Paseo facts do the deciding. `archive_agent` **interrupts if running**, so an agent
+that archives itself never reaches its next line and cannot observe the result — the successor must
+be the one to call it. And an agent-scoped `create_agent` already defaults to the caller's workspace,
+so the correct placement is the default one: pass `initialPrompt` verbatim from `orch rotate begin`
+and pass no `workspaceId`. Full order in `../rotation.md`.
 
 ## Send semantics — verified by experiment
 
@@ -55,6 +62,12 @@ Paseo-hosted Claude agents get the turn-end hook from this skill's front matter,
 the baseline and needs no Paseo-specific setup. For agents on providers with no turn-end hook, or for
 a target sitting idle with no turn coming, install `../../assets/paseo-inbox-plugin/`: a daemon-side
 plugin that injects `ORCH_INBOX_TARGET` on session open and drains on `agent.turn_ended`.
+
+The same plugin is also how a Paseo-hosted agent gets an early auto-compact window: it asks
+`orch compaction window` at session open and sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only for a
+long-lived role on a Claude Code provider (`claude`, `claude-cursor`) with a safe measured number.
+Nothing else can set that variable — it is read at launch, so no running session can change its own
+window. See `../cost.md`.
 
 Two facts about it worth knowing before relying on it. There is **no idle event and no timer** in the
 plugin API, so an agent that never takes another turn never drains — the orchestrator must peek on
