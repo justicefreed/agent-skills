@@ -24,6 +24,19 @@ Outside the repository, never committed:
 - **A commit-everything cannot sweep it.** Untracked orchestration state living inside a repo is
   how an unrelated commit acquires another lane's files.
 
+**The one cost of living outside the repo, and how it is paid.** Briefs live here too, so a brief is
+outside the worktree of the worker that must read it — and in Claude Code a read outside the working
+directory raises a permission prompt under every session mode except `bypassPermissions`. The first
+instruction of a brief-driven spawn is therefore the thing most likely to stall it, and a worker
+halted on a prompt looks exactly like a worker thinking. Three were found stopped this way at once.
+
+Choosing a better mode does not fix this one; only scope does. `orch permissions --install` adds a
+single narrow rule — `Read(//<state root>/**)` — to `~/.claude/settings.json` (or
+`$CLAUDE_CONFIG_DIR`), which settles it for every worker in every repository. Run it once per
+machine. `orch open` warns whenever it records a brief that is neither inside the worker's worktree
+nor covered by such a rule, and a settings file that does not parse is never rewritten. Settings are
+read at launch, so a grant reaches the next worker spawned and not one already stalled.
+
 Durable *provenance* — what was commissioned, what it produced, what was ruled — graduates into
 in-repo artifacts at harvest. The tracker is not the record of what happened; it is the record of
 what is **still open**.
@@ -58,6 +71,15 @@ If the process dies between them, you are left with a `pending` entry naming a b
 — enough to find the orphan. Recording *after* the spawn instead would leave an agent nobody knows
 exists. `orch roster` flags `NO-AGENT-ID` for exactly this.
 
+The mode is decided here too, not at the spawn. `open` fills in `ORCH_WORKER_MODE` (default `auto`)
+unless the brief's front matter or `--mode` says otherwise, refuses a mode that stops to ask a human
+without `--ask-mode-ok`, and prints the `settings` fragment to pass — because a field that has to be
+remembered at spawn time is a field that gets forgotten, and forgetting this one selects Always Ask.
+`roster` then flags `ASK-MODE:<id>` on any entry recorded in a blocking mode, and `NO-MODE` on one
+recorded before the mode was tracked. Use `orch update <e> --mode <id>` to record what a worker is
+*actually* in; `update` does not refuse a blocking mode, because the repair path has to be able to
+write down the bad state before anyone can report it.
+
 Required brief front matter — `title`, `worktree`, `expected_artifacts`, `advances`,
 `consumption` — is read from the file, never retyped. `orch` rejects placeholders (`unknown`,
 `tbd`, `n/a`, …): a required field answered with a placeholder is an omission in costume.
@@ -68,8 +90,9 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | Command | Purpose |
 |---|---|
 | `orch programs` | what programs exist for this repo |
-| `orch open --brief P [--agent-id ID] [--program N] [--tracker ID]` | record a dispatch |
-| `orch update E [--agent-id] [--session-name] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch open --brief P [--agent-id ID] [--mode M] [--program N] [--tracker ID]` | record a dispatch |
+| `orch update E [--agent-id] [--session-name] [--mode] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch permissions [--install]` | check, or grant, the one read a worker needs to start |
 | `orch mint-child E` | allocate a sub-orchestrator's tracker id (idempotent) |
 | `orch close E --consumed "<what happened>"` | delete a consumed entry |
 | `orch roster [--recursive] [--json]` | open entries, with flags |

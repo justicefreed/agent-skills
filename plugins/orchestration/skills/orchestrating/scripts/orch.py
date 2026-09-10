@@ -50,6 +50,7 @@ OPTIONAL_BRIEF_FIELDS = (
     "archetype",
     "model",
     "effort",
+    "mode",
     "progress_artifact",
     "tracker_id",
     "parent_tracker",
@@ -72,6 +73,24 @@ PLACEHOLDERS = {
 }
 
 STATUSES = ("pending", "running", "harvested")
+
+# Session modes that stop a worker to ask a human. `default` deserves naming
+# precisely, because everything about it misleads: the id reads like "whatever
+# the sensible default is", the label it actually carries is **Always Ask**, and
+# it is what a Paseo spawn gets when `settings.modeId` is OMITTED -- even though
+# the provider advertises `defaultMode: auto`. Verified on a live stalled
+# worker: created with no mode, came up `currentModeId: "default"`, halted on
+# its first tool call. A worker has no human watching its session, so Always Ask
+# is not caution there; it is a deadlock that looks like a hang.
+BLOCKING_MODES = {"default", "plan", "ask"}
+
+# What a worker should launch with instead. `auto` runs a classifier over
+# permission prompts rather than skipping them -- the moderate tier, and already
+# what orchestrators chose in 145 of 164 recorded spawns, so this makes the
+# common choice the automatic one. `bypassPermissions` never prompts and is the
+# unattended answer, but it is a real security decision: set it per dispatch,
+# deliberately, never as a default.
+WORKER_MODE_DEFAULT = os.environ.get("ORCH_WORKER_MODE") or "auto"
 
 # An unfilled template slot -- `<one line, imperative>` -- is the likeliest form
 # of copy-the-template-without-reading-it, so it is rejected as a placeholder.
@@ -134,6 +153,52 @@ def state_root() -> str:
 
 def program_dir(repo_key: str, program: str) -> str:
     return os.path.join(state_root(), repo_key, program)
+
+
+def claude_settings_path() -> str:
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude")
+    return os.path.join(base, "settings.json")
+
+
+def _within(path: str, directory: Any) -> bool:
+    """Is `path` inside `directory`? False for anything unusable as a path."""
+    if not isinstance(directory, str) or not directory.startswith("/"):
+        return False
+    base = os.path.realpath(directory).rstrip("/")
+    target = os.path.realpath(path)
+    return target == base or target.startswith(base + "/")
+
+
+def brief_read_rule() -> str:
+    """The one allow rule that lets a worker read its own brief unprompted."""
+    return "Read(//%s/**)" % os.path.realpath(state_root()).lstrip("/")
+
+
+def brief_read_allowed() -> bool:
+    """Is the state root already covered by a Read allow rule?
+
+    Covered by a *broader* rule counts: a user who has allowed `//Users/**` has
+    made this decision already, and re-asking them would be noise.
+    """
+    settings = _load_json(claude_settings_path())
+    allow = (settings.get("permissions") or {}).get("allow") or []
+    # Both spellings of the state root. A rule this script installs is written
+    # resolved, but a human writes the path they typed -- and on macOS the two
+    # differ for anything under a symlinked prefix.
+    targets = {state_root().rstrip("/"), os.path.realpath(state_root()).rstrip("/")}
+    for rule in allow:
+        if not isinstance(rule, str) or not rule.startswith("Read("):
+            continue
+        pattern = rule[len("Read("):].rstrip(")").strip()
+        if not pattern.startswith("//"):
+            continue            # relative to a project, so not this directory
+        prefix = "/" + pattern[2:].split("*", 1)[0].rstrip("/")
+        if prefix == "/":
+            continue
+        if any(t == prefix or t.startswith(prefix + "/") for t in targets):
+            return True
+    return False
 
 
 def list_programs(repo_key: str) -> List[Dict[str, Any]]:
@@ -443,6 +508,13 @@ def entry_summary(entry: Dict[str, Any]) -> str:
     brief = entry.get("brief_path")
     if brief and not os.path.exists(brief):
         flags.append("BRIEF-MISSING")
+    # A worker in a blocking mode is not slow, it is waiting for someone who is
+    # not coming. Flagged rather than hidden, because from the outside it looks
+    # exactly like a long task -- which is why it went unnoticed for so long.
+    if entry.get("mode") in BLOCKING_MODES:
+        flags.append("ASK-MODE:" + entry["mode"])
+    elif not entry.get("mode"):
+        flags.append("NO-MODE")
     return "  ".join(filter(None, [
         entry["entry"],
         entry["status"],
@@ -470,10 +542,95 @@ def cmd_programs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_permissions(args: argparse.Namespace) -> int:
+    """Check -- or grant -- the one read a brief-driven worker cannot start without.
+
+    A brief lives in the orchestration state directory, which is deliberately
+    outside every repository (`references/state.md` says why). That is right for
+    the state and wrong for the reader: in Claude Code a read outside the working
+    directory raises a permission prompt under every mode except
+    `bypassPermissions`, so the first instruction in a brief-driven spawn is
+    exactly the thing that stalls it. Choosing a better mode does not fix this
+    one -- only scope does. Three workers were found halted here at once, each on
+    the first read of its own brief.
+
+    One narrow rule for one directory settles it for every worker, in every
+    repository, permanently.
+    """
+    path = claude_settings_path()
+    rule = brief_read_rule()
+
+    if brief_read_allowed():
+        print("ok       briefs read without a prompt")
+        print("         %s" % rule)
+        print("         via %s" % path)
+        return 0
+
+    if not args.install:
+        print("MISSING  a worker will stall on the first read of its brief")
+        print("         briefs live in %s," % state_root())
+        print("         outside every worktree, and a read outside the working")
+        print("         directory prompts under every mode except bypass.")
+        print("         grant it once:  orch permissions --install")
+        print("         or add to %s by hand:" % path)
+        print('             "permissions": { "allow": ["%s"] }' % rule)
+        return 3
+
+    # Never rewrite a settings file that did not parse. It is the human's own
+    # configuration, it is not ours to reformat, and a file that fails to load is
+    # far likelier to be mid-edit than to be empty.
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise OrchError(
+                "%s did not parse (%s). Refusing to rewrite it -- add\n  %s\n"
+                "to permissions.allow by hand." % (path, exc, rule))
+        if not isinstance(data, dict):
+            raise OrchError("%s is not a JSON object. Refusing to rewrite it."
+                            % path)
+    else:
+        data = {}
+
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        perms = {}
+    allow = perms.get("allow")
+    if not isinstance(allow, list):
+        allow = []
+    if rule not in allow:
+        allow.append(rule)
+    perms["allow"] = allow
+    data["permissions"] = perms
+    _save_json(path, data)
+
+    print("granted  %s" % rule)
+    print("         in %s" % path)
+    print("settings are read at launch, so this reaches the next worker spawned "
+          "and not one already stalled. Answer that one's prompt by hand.",
+          file=sys.stderr)
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     repo_key, root, common = repo_identity(args.repo)
     fields = parse_front_matter(args.brief)
     validate_brief(fields, args.brief)
+
+    # Decide the session mode HERE, before the spawn, and record it. Left to the
+    # spawn call it is a field that can be forgotten, and forgetting it is not
+    # neutral -- it selects Always Ask. Deciding it at dispatch means the mode is
+    # something the tracker can be asked about afterwards.
+    mode = str(args.mode or fields.get("mode") or WORKER_MODE_DEFAULT).strip()
+    if mode in BLOCKING_MODES and not args.ask_mode_ok:
+        raise OrchError(
+            "mode %r stops the worker to ask a human, and nobody is watching a "
+            "worker's session. It will halt on its first tool call -- usually "
+            "the read of this very brief -- and present as a hang rather than "
+            "as a question.\nSpawn with settings.modeId=%r instead. Pass "
+            "--ask-mode-ok if this dispatch genuinely is meant to stop and "
+            "wait." % (mode, WORKER_MODE_DEFAULT))
 
     if args.program:
         program = args.program
@@ -520,6 +677,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         "review_waiver": fields.get("review_waiver"),
         "model": fields.get("model"),
         "effort": fields.get("effort"),
+        "mode": mode,
         "child_tracker": None,
         "pending_message": None,
         "opened_at": _now(),
@@ -533,9 +691,21 @@ def cmd_open(args: argparse.Namespace) -> int:
 
     print(entry_id)
     if not args.agent_id:
-        print("recorded before spawn. After spawning, run:\n"
+        # The settings fragment is printed rather than described, because the
+        # failure this prevents is a forgotten field and a description is
+        # something you can read and still forget to copy.
+        print("recorded before spawn. Spawn with settings %s -- omit the mode "
+              "and the worker comes up in Always Ask, which halts it on its "
+              "first tool call. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>"
-              % entry_id, file=sys.stderr)
+              % (json.dumps({"modeId": mode}), entry_id), file=sys.stderr)
+    if (not brief_read_allowed()
+            and not _within(entry["brief_path"], entry["worktree"])):
+        print("warning: this brief is outside the worker's worktree and reading "
+              "it is not allow-listed, so the worker's first act -- reading the "
+              "brief -- will prompt whatever mode it runs in. Settle it once "
+              "for every future worker:\n  orch permissions --install",
+              file=sys.stderr)
     return 0
 
 
@@ -560,6 +730,13 @@ def cmd_update(args: argparse.Namespace) -> int:
             raise OrchError("status must be one of %s" % ", ".join(STATUSES))
         entry["status"] = args.status
         changed.append("status")
+    if args.mode:
+        # No BLOCKING_MODES refusal here, deliberately. `update` is the repair
+        # path: an agent already stalled in Always Ask has to be recorded as
+        # such before it can be reported, and refusing the write would leave
+        # the tracker describing a worker that does not exist.
+        entry["mode"] = args.mode.strip()
+        changed.append("mode")
     if args.pending_message is not None:
         entry["pending_message"] = args.pending_message or None
         changed.append("pending_message")
@@ -628,26 +805,35 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def tracker_names(pdir: str) -> List[str]:
+    """Tracker ids in a program directory, by NAME and never by parseability.
+
+    The program directory is also home to nine sidecar records -- budget.json,
+    compaction.json, rotation.json, transcripts.json and the warn markers -- and
+    `load_tracker` rejects anything without a matching schema version, so code
+    that listed every `*.json` here treated a sidecar as a tracker. Two callers
+    did, and each failed differently: the recursive reader aborted its whole
+    comprehension on the first sidecar it met (callers swallowing OrchError then
+    saw an empty program, which is why the FAN-OUT advisory reported zero open
+    dispatches from the moment a program acquired any sidecar, and why `whoami`
+    failed with a complaint about budget.json), while the not-found message
+    offered `compaction` as a tracker id the reader could pass.
+
+    Filtering on the name is what makes a genuinely corrupt tracker still raise.
+    """
+    if not os.path.isdir(pdir):
+        return []
+    return sorted(f[:-5] for f in os.listdir(pdir)
+                  if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
+
+
 def _read_all_trackers(repo_key: str, program: str,
                        recursive: bool, tracker_id: str
                        ) -> List[Tuple[str, Dict[str, Any]]]:
     pdir = program_dir(repo_key, program)
     if recursive:
-        if not os.path.isdir(pdir):
-            return []
-        # Only tracker-shaped names. The program directory is also home to nine
-        # sidecar records -- budget.json, compaction.json, rotation.json,
-        # transcripts.json and the warn markers -- and `load_tracker` rejects
-        # anything without a matching schema version, so listing every `*.json`
-        # meant the first sidecar aborted the whole comprehension. Callers that
-        # swallow OrchError then saw an empty program: that is why the FAN-OUT
-        # advisory reported zero open dispatches from the moment a program
-        # acquired its first sidecar, and why `whoami` failed with a complaint
-        # about budget.json. A genuinely corrupt tracker must still raise, so
-        # this filters by NAME and never by whether the parse succeeded.
-        names = sorted(f[:-5] for f in os.listdir(pdir)
-                       if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
-        return [(n, load_tracker(os.path.join(pdir, n + ".json"))) for n in names]
+        return [(n, load_tracker(os.path.join(pdir, n + ".json")))
+                for n in tracker_names(pdir)]
 
     # Named tracker: a bad id or a never-minted one must FAIL, not read as an
     # empty program. Those two look identical to the caller otherwise, which is
@@ -655,8 +841,10 @@ def _read_all_trackers(repo_key: str, program: str,
     check_tracker_id(tracker_id)
     path = os.path.join(pdir, tracker_id + ".json")
     if not os.path.exists(path):
-        existing = sorted(f[:-5] for f in os.listdir(pdir)) \
-            if os.path.isdir(pdir) else []
+        # Tracker-shaped names only, for the same reason the recursive branch
+        # filters: listing every `*.json` here named the sidecars as trackers and
+        # invited the reader to pass `--tracker compaction`.
+        existing = tracker_names(pdir)
         raise OrchError(
             "no tracker %r in program %r. Existing trackers: %s"
             % (tracker_id, program, ", ".join(existing) or "(none)")
@@ -3068,9 +3256,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("programs", help="list programs for this repo")
     sp.set_defaults(func=cmd_programs)
 
+    sp = sub.add_parser("permissions",
+                        help="check the one read a worker needs to start")
+    sp.add_argument("--install", action="store_true",
+                    help="add the rule to your Claude settings")
+    sp.set_defaults(func=cmd_permissions)
+
     sp = sub.add_parser("open", help="record a dispatch from its brief")
     sp.add_argument("--brief", required=True, help="path to the brief file")
     sp.add_argument("--agent-id", help="omit when recording before the spawn")
+    sp.add_argument("--mode",
+                    help="session mode to spawn with (default: %s; brief front "
+                         "matter `mode` overrides that)" % WORKER_MODE_DEFAULT)
+    sp.add_argument("--ask-mode-ok", action="store_true",
+                    help="allow a mode that stops to ask a human")
     common(sp)
     sp.set_defaults(func=cmd_open)
 
@@ -3078,6 +3277,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("entry", help="entry id or agent id")
     sp.add_argument("--agent-id")
     sp.add_argument("--session-name")
+    sp.add_argument("--mode", help="the session mode the agent is actually in")
     sp.add_argument("--status", choices=STATUSES)
     sp.add_argument("--pending-message",
                     help="message to deliver when the worker next goes idle")

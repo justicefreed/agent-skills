@@ -121,7 +121,9 @@ this worktree's inbox is claimed.
    finished diff in hand (`references/integration.md`).
 2. **Record it**, passing the brief so its front matter supplies the required fields rather than you
    restating them. A dispatch the tracker does not know about is undispatched work.
-3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree.
+3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree, and with the session
+   mode `orch open` prints. Omitting the mode is not a neutral default: it selects *Always Ask*, and
+   a worker nobody is watching then halts on its first tool call. `references/delegation.md`.
 
 Reference the project's standing-rules file; never restate it — repeated prose costs output tokens
 every dispatch and goes stale on the first correction.

@@ -112,7 +112,35 @@ find yourself wanting the frontier model or an above-default dial as a starting 
 signal the **brief** is underspecified — fixing the brief is cheaper and compounds across every
 future dispatch, whereas more capability buys one better guess at the same ambiguity.
 
-## 4. Model and effort
+## 4. Model, effort, and mode
+
+**Set the session mode explicitly at every spawn. Never let it default.** It is the only one of the
+three dials that can deadlock a worker, and its failure mode is silent — an agent halted on a
+permission prompt is indistinguishable from an agent thinking hard, so a stalled lane can sit for
+hours looking busy.
+
+The trap is the mode *id*. On Claude providers the id `default` reads like "whatever the sensible
+default is"; its actual label is **Always Ask**, and it is what a spawn receives when `modeId` is
+omitted — even though the provider advertises `defaultMode: auto`. Verified on a live worker created
+with no mode: it came up `currentModeId: "default"` and stopped on its first tool call, which was
+the read of its own brief. A worker has no human watching its session, so Always Ask is not caution
+there; it is a hang.
+
+| Want | Claude / claude-cursor | Cursor |
+|---|---|---|
+| A worker that runs unattended but still screens its own actions | `auto` — a classifier reviews each prompt | `agent` + feature `auto_accept` |
+| Edits without prompts, commands still screened | `acceptEdits` | — |
+| Genuinely unattended, no prompt possible | `bypassPermissions` — a real security decision, per dispatch | `agent` + `auto_accept` |
+| Read-only investigation, and you accept it will stop to ask | `plan` | `plan` or `ask` |
+
+`orch open` records the mode and prints the exact `settings` fragment to pass; it refuses `default`,
+`plan` and `ask` unless you pass `--ask-mode-ok`, because those stop and wait. `ORCH_WORKER_MODE`
+changes the default it fills in. `orch roster` flags a recorded blocking mode as `ASK-MODE`.
+
+**Mode alone is not enough.** A brief lives outside the worker's worktree, and in Claude Code a read
+outside the working directory prompts under *every* mode except `bypassPermissions` — so the first
+line of a brief-driven spawn is the thing that stalls it. Run `orch permissions --install` once per
+machine; see `state.md`.
 
 **Profiles first.** If the substrate offers named launch bundles configured by the human, list them,
 read every profile's notes, and pick the one whose notes match the work. Materialise it into the
