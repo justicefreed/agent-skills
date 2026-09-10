@@ -1,0 +1,8 @@
+{
+  "//": "The daemon subprocess's type environment: Node, no React globals. `server/orch.ts` reads `process.env` and spawns children, none of which exist under the client program's `types: [\"react\"]`.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["index.server.ts", "server/**/*.ts", "shared/**/*.ts"]
+}
