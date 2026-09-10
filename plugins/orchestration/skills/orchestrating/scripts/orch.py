@@ -161,44 +161,64 @@ def claude_settings_path() -> str:
     return os.path.join(base, "settings.json")
 
 
-def _within(path: str, directory: Any) -> bool:
-    """Is `path` inside `directory`? False for anything unusable as a path."""
-    if not isinstance(directory, str) or not directory.startswith("/"):
-        return False
-    base = os.path.realpath(directory).rstrip("/")
-    target = os.path.realpath(path)
-    return target == base or target.startswith(base + "/")
+def read_dirs() -> List[str]:
+    """Every directory a worker is told to read but cannot reach unprompted.
+
+    Two of them, failing for one reason: a read outside the working directory
+    prompts. The state root holds the briefs. The skill's own directory holds
+    the references a brief points at -- observed stalling a worker on
+    `references/substrates/_capabilities.md` just as another stalled on a brief.
+
+    Both spellings of each are returned, because a rule written for one does not
+    match a read of the other and the installed skill is normally a symlink into
+    a checkout.
+
+    The skill directory is taken from where the skill is *installed*, not from
+    where this file happens to be running. `scripts/link-skills.sh` links into
+    `~/.claude/skills` and `~/.agents/skills`, and those are the copies a worker
+    reads; deriving it from `__file__` instead would write a permanent rule for
+    whichever throwaway worktree the orchestrator was in at the time.
+    """
+    installed = [os.path.join(os.path.expanduser("~"), base, "skills",
+                              "orchestrating")
+                 for base in (".claude", ".agents")]
+    skills = [d for d in installed if os.path.exists(d)]
+    if not skills:      # not linked; the running copy is the only one there is
+        skills = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+
+    out: List[str] = []
+    for path in [state_root()] + skills:
+        for spelling in (path, os.path.realpath(path)):
+            spelling = os.path.normpath(spelling).rstrip("/")
+            if spelling and spelling != "/" and spelling not in out:
+                out.append(spelling)
+    return out
 
 
-def brief_read_rule() -> str:
-    """The one allow rule that lets a worker read its own brief unprompted."""
-    return "Read(//%s/**)" % os.path.realpath(state_root()).lstrip("/")
+def read_rule(directory: str) -> str:
+    return "Read(//%s/**)" % directory.lstrip("/")
 
 
-def brief_read_allowed() -> bool:
-    """Is the state root already covered by a Read allow rule?
+def missing_read_rules() -> List[str]:
+    """The rules a worker needs that the human's settings do not yet grant.
 
-    Covered by a *broader* rule counts: a user who has allowed `//Users/**` has
-    made this decision already, and re-asking them would be noise.
+    A *broader* existing rule counts: someone who has allowed `//Users/**` has
+    already made this decision, and asking again would be noise.
     """
     settings = _load_json(claude_settings_path())
     allow = (settings.get("permissions") or {}).get("allow") or []
-    # Both spellings of the state root. A rule this script installs is written
-    # resolved, but a human writes the path they typed -- and on macOS the two
-    # differ for anything under a symlinked prefix.
-    targets = {state_root().rstrip("/"), os.path.realpath(state_root()).rstrip("/")}
+    prefixes = []
     for rule in allow:
         if not isinstance(rule, str) or not rule.startswith("Read("):
             continue
         pattern = rule[len("Read("):].rstrip(")").strip()
         if not pattern.startswith("//"):
-            continue            # relative to a project, so not this directory
+            continue            # relative to a project, so not one of these
         prefix = "/" + pattern[2:].split("*", 1)[0].rstrip("/")
-        if prefix == "/":
-            continue
-        if any(t == prefix or t.startswith(prefix + "/") for t in targets):
-            return True
-    return False
+        if prefix != "/":
+            prefixes.append(prefix)
+    return [read_rule(d) for d in read_dirs()
+            if not any(d == p or d.startswith(p + "/") for p in prefixes)]
 
 
 def list_programs(repo_key: str) -> List[Dict[str, Any]]:
@@ -550,30 +570,34 @@ def cmd_permissions(args: argparse.Namespace) -> int:
     the state and wrong for the reader: in Claude Code a read outside the working
     directory raises a permission prompt under every mode except
     `bypassPermissions`, so the first instruction in a brief-driven spawn is
-    exactly the thing that stalls it. Choosing a better mode does not fix this
-    one -- only scope does. Three workers were found halted here at once, each on
-    the first read of its own brief.
+    exactly the thing that stalls it. The skill's own reference corpus is
+    outside the worktree for the same reason and stalls workers the same way.
+    Choosing a better mode does not fix either -- only scope does. Four workers
+    were found halted here at once: three on a brief, one on a reference.
 
-    One narrow rule for one directory settles it for every worker, in every
-    repository, permanently.
+    A rule per directory settles it for every worker, in every repository,
+    permanently.
     """
     path = claude_settings_path()
-    rule = brief_read_rule()
+    missing = missing_read_rules()
 
-    if brief_read_allowed():
-        print("ok       briefs read without a prompt")
-        print("         %s" % rule)
+    if not missing:
+        print("ok       briefs and references read without a prompt")
+        for directory in read_dirs():
+            print("         %s" % read_rule(directory))
         print("         via %s" % path)
         return 0
 
     if not args.install:
-        print("MISSING  a worker will stall on the first read of its brief")
-        print("         briefs live in %s," % state_root())
-        print("         outside every worktree, and a read outside the working")
-        print("         directory prompts under every mode except bypass.")
-        print("         grant it once:  orch permissions --install")
-        print("         or add to %s by hand:" % path)
-        print('             "permissions": { "allow": ["%s"] }' % rule)
+        print("MISSING  %d rule(s); a worker will stall on its first read"
+              % len(missing))
+        print("         a read outside the working directory prompts under every")
+        print("         mode except bypass, and neither the briefs nor the")
+        print("         skill's references are inside any worktree.")
+        for rule in missing:
+            print("         %s" % rule)
+        print("         grant them once:  orch permissions --install")
+        print("         or add to %s by hand under permissions.allow" % path)
         return 3
 
     # Never rewrite a settings file that did not parse. It is the human's own
@@ -586,7 +610,8 @@ def cmd_permissions(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             raise OrchError(
                 "%s did not parse (%s). Refusing to rewrite it -- add\n  %s\n"
-                "to permissions.allow by hand." % (path, exc, rule))
+                "to permissions.allow by hand."
+                % (path, exc, "\n  ".join(missing)))
         if not isinstance(data, dict):
             raise OrchError("%s is not a JSON object. Refusing to rewrite it."
                             % path)
@@ -599,13 +624,15 @@ def cmd_permissions(args: argparse.Namespace) -> int:
     allow = perms.get("allow")
     if not isinstance(allow, list):
         allow = []
-    if rule not in allow:
-        allow.append(rule)
+    for rule in missing:
+        if rule not in allow:
+            allow.append(rule)
     perms["allow"] = allow
     data["permissions"] = perms
     _save_json(path, data)
 
-    print("granted  %s" % rule)
+    for rule in missing:
+        print("granted  %s" % rule)
     print("         in %s" % path)
     print("settings are read at launch, so this reaches the next worker spawned "
           "and not one already stalled. Answer that one's prompt by hand.",
@@ -699,13 +726,12 @@ def cmd_open(args: argparse.Namespace) -> int:
               "first tool call. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>"
               % (json.dumps({"modeId": mode}), entry_id), file=sys.stderr)
-    if (not brief_read_allowed()
-            and not _within(entry["brief_path"], entry["worktree"])):
-        print("warning: this brief is outside the worker's worktree and reading "
-              "it is not allow-listed, so the worker's first act -- reading the "
-              "brief -- will prompt whatever mode it runs in. Settle it once "
-              "for every future worker:\n  orch permissions --install",
-              file=sys.stderr)
+    if missing_read_rules():
+        print("warning: this brief, and the skill references it points at, sit "
+              "outside the worker's worktree and are not allow-listed, so the "
+              "worker's first act -- reading them -- will prompt whatever mode "
+              "it runs in. Settle it once for every future worker:\n"
+              "  orch permissions --install", file=sys.stderr)
     return 0
 
 

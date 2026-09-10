@@ -36,8 +36,8 @@ and pass no `workspaceId`. Full order in `../rotation.md`.
 **Omitting `settings.modeId` does not give you the provider's advertised default.** `list_providers`
 reports `defaultMode: auto` for `claude` and `claude-cursor`. A worker created with no `settings`
 nevertheless comes up `currentModeId: "default"` — whose label is **Always Ask**. Observed directly
-on three subagents halted at the same moment, each on the first `Read` of its own brief. Pass the id
-explicitly, every time; `orch open` prints the fragment.
+on four subagents halted at the same moment: three on the first `Read` of their own brief, one on a
+reference the brief sent it to. Pass the id explicitly, every time; `orch open` prints the fragment.
 
 **Mode ids are provider-specific, and `inspect_provider` is the only authority.** Do not guess one
 from a label. As observed: `claude` and `claude-cursor` expose `plan`, `default` (Always Ask),

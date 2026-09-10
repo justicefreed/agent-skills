@@ -28,14 +28,20 @@ Outside the repository, never committed:
 outside the worktree of the worker that must read it — and in Claude Code a read outside the working
 directory raises a permission prompt under every session mode except `bypassPermissions`. The first
 instruction of a brief-driven spawn is therefore the thing most likely to stall it, and a worker
-halted on a prompt looks exactly like a worker thinking. Three were found stopped this way at once.
+halted on a prompt looks exactly like a worker thinking. Four were found stopped this way at once:
+three on a brief, one on a *reference* — the skill's own `references/` corpus is outside the worktree
+for the same reason and stalls a worker the same way.
 
-Choosing a better mode does not fix this one; only scope does. `orch permissions --install` adds a
-single narrow rule — `Read(//<state root>/**)` — to `~/.claude/settings.json` (or
-`$CLAUDE_CONFIG_DIR`), which settles it for every worker in every repository. Run it once per
-machine. `orch open` warns whenever it records a brief that is neither inside the worker's worktree
-nor covered by such a rule, and a settings file that does not parse is never rewritten. Settings are
-read at launch, so a grant reaches the next worker spawned and not one already stalled.
+Choosing a better mode does not fix either; only scope does. `orch permissions --install` adds one
+narrow `Read(//<dir>/**)` rule per directory to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`),
+covering the state root and the installed skill, which settles it for every worker in every
+repository. Run it once per machine; `orch permissions` alone checks and exits 3. Three details are
+deliberate: both spellings of each directory are granted, since the installed skill is a symlink into
+a checkout and a rule for one spelling need not match a read of the other; the skill path comes from
+where the skill is *installed* rather than from where the script is running, so a throwaway worktree
+never earns a permanent rule; and a settings file that does not parse is never rewritten. `orch open`
+warns when the rules are absent. Settings are read at launch, so a grant reaches the next worker
+spawned, not one already stalled.
 
 Durable *provenance* — what was commissioned, what it produced, what was ruled — graduates into
 in-repo artifacts at harvest. The tracker is not the record of what happened; it is the record of

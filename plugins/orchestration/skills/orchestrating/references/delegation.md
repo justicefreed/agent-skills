@@ -137,10 +137,11 @@ there; it is a hang.
 `plan` and `ask` unless you pass `--ask-mode-ok`, because those stop and wait. `ORCH_WORKER_MODE`
 changes the default it fills in. `orch roster` flags a recorded blocking mode as `ASK-MODE`.
 
-**Mode alone is not enough.** A brief lives outside the worker's worktree, and in Claude Code a read
-outside the working directory prompts under *every* mode except `bypassPermissions` — so the first
-line of a brief-driven spawn is the thing that stalls it. Run `orch permissions --install` once per
-machine; see `state.md`.
+**Mode alone is not enough.** A brief lives outside the worker's worktree, and so does the skill's
+own `references/` corpus; in Claude Code a read outside the working directory prompts under *every*
+mode except `bypassPermissions` — so both the first line of a brief-driven spawn and the reference it
+sends the worker to are things that stall it. Run `orch permissions --install` once per machine; see
+`state.md`.
 
 **Profiles first.** If the substrate offers named launch bundles configured by the human, list them,
 read every profile's notes, and pick the one whose notes match the work. Materialise it into the
