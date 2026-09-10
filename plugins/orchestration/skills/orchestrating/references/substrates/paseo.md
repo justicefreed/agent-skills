@@ -49,6 +49,18 @@ Two consequences:
   per notification behind an in-flight guard, and verify after sending that the turn which started
   is yours — there is no atomic send, so a lost race looks exactly like a delivery.
 
+## Inbox drain paths
+
+Paseo-hosted Claude agents get the turn-end hook from this skill's front matter, unchanged — that is
+the baseline and needs no Paseo-specific setup. For agents on providers with no turn-end hook, or for
+a target sitting idle with no turn coming, install `../../assets/paseo-inbox-plugin/`: a daemon-side
+plugin that injects `ORCH_INBOX_TARGET` on session open and drains on `agent.turn_ended`.
+
+Two facts about it worth knowing before relying on it. There is **no idle event and no timer** in the
+plugin API, so an agent that never takes another turn never drains — the orchestrator must peek on
+its behalf. And its pre-delivery settle delay is a mitigation, not a lock: a human message arriving
+inside that window can still race it.
+
 ## Policy
 
 - **Profiles first.** Call `list_profiles` and read every profile's `notes` before choosing how to

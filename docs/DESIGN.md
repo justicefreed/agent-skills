@@ -149,16 +149,127 @@ checkable than "important."
 Closeout: explicit-path commits while agents are live, entry deletion as the completion criterion,
 resource reclamation by explicit name.
 
+## 9a. Availability, and why the orchestrator kept doing the work
+
+Measured from one three-hour program's transcript: 30 worker dispatches, **zero** integrators, and
+71 of 106 minutes of orchestrator busy time spent landing other agents' work across 20 of 35 turns.
+The orchestrator never *decided* to merge inline; merging arrived at intake and was simply done, on
+the program's most capable model, while the human's queued input waited.
+
+Two structural causes, and one fix each.
+
+**Emergent work never reached the delegate-or-inline decision.** Step 1 marks *planned* units of
+work. A merge, a doc patch, a re-verification are not units when you plan — they surface at intake
+with the orchestrator's context already loaded, which is exactly the condition under which inline is
+cheapest to start and most expensive to finish. Fixes: Principle 5, an explicit re-ask in Step 1, a
+meta-work archetype table, and a standing integrator lane so landing has a home.
+
+**Availability was not a named resource.** Optimising context alone permits a ten-minute inline
+merge, because a merge is cheap in tokens and ruinous in latency. Availability is now the third
+scarce resource, with bounded turns as the rule and stated exceptions for work that genuinely cannot
+be split.
+
+The review question that follows — if the orchestrator no longer reads every diff, who does — is
+answered by observing what `verification.md` actually protects: **two different readers**, not the
+orchestrator specifically. So the integrator is the second reader, at its own tier, and the
+`review:` mode is declared in the brief at dispatch rather than judged at landing time by the agent
+holding the finished diff. `in-brief` is the escape hatch for lanes whose own spec already required
+an independent or adversarial pass; it is honoured only when the report carries that pass's result,
+and escalates rather than silently downgrading when it does not.
+
+## 9b. The inbox
+
+Queued input is an append-only JSONL file per target plus a cursor, drained by the receiver at the
+end of a turn. It exists because §8 established that **no substrate offers a safe send to a running
+agent.** The inbox does not solve that; it removes the send. Senders append, the receiver drains, and
+there is no check-then-send window to lose.
+
+It is the only multi-writer state in the design, and the exception is bought rather than assumed:
+small appends land whole, lines are never mutated, and a line's index never changes — so the one
+mutable file, the cursor, still has exactly one writer, and Principle 3 holds where it decides
+correctness. One claimant per worktree, resting on the existing one-writer-per-worktree rule.
+
+Drain paths, in order of preference: a turn-end hook in this skill's own front matter (covers every
+Claude-harness agent including Paseo-hosted ones, registers on skill load, prints nothing on an empty
+inbox so an idle turn costs zero tokens); an optional bundled Paseo daemon plugin for providers with
+no turn-end hook; and `peek` by hand. The hook reads the working directory from the payload the
+harness pipes it, because a hook is not guaranteed to run where the agent is working.
+
+## 9c. Cost, measured
+
+Same program, 1,632 model calls, ~$1,100 estimated. Cache reads — re-reading the context on every
+model call — were **61%** of it, output 16%, cache writes 23%, fresh input ~0%. Reasoning tokens were
+about **3%**.
+
+The load-bearing measurement is one orchestrator at three points in one session: $0.42 per model
+call at 118K of context, $1.35 at 668K, and $0.23 after an auto-compaction dropped it to 88K. Same
+agent, same kind of work, 5.9x. By composition that context was 35% tool results, 29% its own
+tool-call text, 32% its own prose and reasoning, and 4% worker notifications — **self-inflicted, not
+imposed by the workers.**
+
+Hence Principle 6: an orchestrator's context is a tax on every remaining step, so a large read is a
+recurring charge. Three consequences the skill did not previously draw:
+
+- **Rotation is a practice, not a recovery path.** The tracker, brief files and plan document already
+  exist to make an orchestrator replaceable; §9 treated that as insurance against compaction. Used
+  deliberately at ~200K, it is the largest available saving.
+- **The effort dial is a trap.** It is the most visible knob and worth ~3%. Turning it down buys
+  almost nothing and makes every decision worse. Say so explicitly, because it is the first thing
+  anyone reaches for.
+- **Fan-out width is an intake problem.** Every open dispatch is a report that must be read, and
+  intake is what grows the context. Width beyond what can be landed is deferred intake, not
+  parallelism.
+
+`orch cost` derives all of this from the harness transcript, so measuring costs no model tokens, and
+the turn-end hook speaks only when a threshold trips — context, fan-out width, or a budget the human
+set. It re-speaks only on a *new* condition or 1.5x growth: a hook that nags gets switched off, and
+then it is worth nothing at the moment it would have mattered. Rates are an overridable estimate,
+never stored as truth.
+
+## 9d. Rotation as compaction; the front desk
+
+**Compaction is the rotation mechanism.** It is what produced the $0.23 figure, and the harness
+exposes its trigger point (`autoCompactWindow`, 100K–1M). Two things made it insufficient on its
+own: it fired late, and the summary is a recollection of state. The fixes are a Paseo `session_open`
+hook that sets the window to ~200K for Claude agents, and a `SessionStart` hook on `compact|resume`
+that runs `orch resume` — roster, inbox state, plan document, front desk — printed from disk into the
+fresh context. Nothing about the program depends on what the summary kept; Principle 1 applied to
+compaction. Full agent replacement is the fallback for a summary that went wrong, not the routine.
+
+**Hygiene gets one deterministic nudge.** By composition, 304KB of that orchestrator's context was
+shell heredocs writing briefs and review documents inline — doc-writer work done at frontier tier
+and then re-read forever. A `PreToolUse` hook notes any large `Write`/`Edit`/`Bash` input once per
+cooldown. It never blocks, because the content is sometimes rightly the orchestrator's; it makes the
+choice visible at the moment it is made.
+
+**The front desk** is the pair pattern from the first design pass, revived with a cost justification
+and a narrower job. Measured, a third of one session's human turns were routing — approvals, task
+adds, status — at $5–20 each because a frontier orchestrator turned to answer them. An economy-tier
+router takes those: it forwards verbatim to the orchestrator's inbox, answers status from files, and
+relays the orchestrator's questions back. Its whitelist is the design; a cheap model that *helps* is
+the failure mode, so it may not paraphrase, decide, spawn, or edit. The saving it produces directly
+is second-order (~12% of that session). Its first-order value is structural: the human's chat surface
+is no longer attached to the orchestrator, so the orchestrator becomes headless — no prose to
+re-read — and can be compacted or replaced without the human noticing. It is phase-gated: the
+frontier orchestrator plans in direct conversation, then *proposes* the front desk once the human's
+messages have become routing, and sets it up as an ordinary dispatch. The human can always bypass it.
+
+The tracker keeps one writer throughout. The front desk writes only to inboxes, which are
+multi-writer safe by construction, and claims its own inbox in its own worktree.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.
 2. Write through, never write back — the record is a precondition, not a follow-up.
 3. Reduce every writer set to one. Concurrency is designed out, not solved.
 4. An unfalsifiable check is worse than no check.
+5. Only do what only you can do. Emergent work gets the same decision as planned work.
+6. Your context is a tax on every remaining step. A large read is a recurring charge.
 
 Principles 1–3 generated most of the structure. Principle 4 is why the messaging table above was
 measured rather than inferred — and the measurement overturned two assumptions, including one taken
-from vendor documentation.
+from vendor documentation. Principle 5 was added after measuring a real program against the skill
+and finding the skill silent on its largest cost.
 
 ## 11. Deliberate non-goals
 

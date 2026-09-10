@@ -52,7 +52,14 @@ OPTIONAL_BRIEF_FIELDS = (
     "tracker_id",
     "parent_tracker",
     "plan_doc",
+    "review",
+    "review_waiver",
 )
+
+# Who reads this lane's diff before it lands. Declared at dispatch, because it
+# is a property of the spec -- not a judgment the integrator makes at landing
+# time with the work already in front of it and an incentive to wave it through.
+REVIEW_MODES = ("integrator", "in-brief", "none")
 
 # Values that look like compliance but carry no information. Rejecting these is
 # the difference between enforcement and ritual: a required field answered
@@ -378,6 +385,22 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
             % path
         )
 
+    if "review" in fields:
+        mode = str(fields["review"]).strip()
+        if mode not in REVIEW_MODES:
+            raise OrchError(
+                "brief %s: review must be one of %s. Got %r.\n"
+                "`in-brief` claims this lane's own spec requires an independent "
+                "pass, and the integrator will refuse to land unless the report "
+                "actually carries that pass's result." % (path, ", ".join(REVIEW_MODES), mode)
+            )
+        if mode == "none" and not str(fields.get("review_waiver", "")).strip():
+            raise OrchError(
+                "brief %s: review: none requires review_waiver: <why this needs "
+                "no second reader>.\nAn unreviewed lane is a decision someone "
+                "must be able to find later." % path
+            )
+
     if "progress_artifact" in fields:
         if is_placeholder(fields["progress_artifact"]):
             raise OrchError(
@@ -484,6 +507,8 @@ def cmd_open(args: argparse.Namespace) -> int:
         "agent_id": args.agent_id,
         "session_name": None,
         "archetype": fields.get("archetype"),
+        "review": fields.get("review", "integrator"),
+        "review_waiver": fields.get("review_waiver"),
         "model": fields.get("model"),
         "effort": fields.get("effort"),
         "child_tracker": None,
@@ -742,6 +767,903 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# inbox: queued input for a running agent
+# --------------------------------------------------------------------------- #
+#
+# The one place this file accepts MANY writers. Everything else here is
+# single-writer by design (Principle 3), and the inbox earns its exception two
+# ways:
+#
+#   * Appends only. A sender appends one line and never mutates another; a line
+#     once written never moves, so line INDEX is a stable name for an item.
+#     A single small append under O_APPEND lands whole, so concurrent senders
+#     interleave lines but never corrupt one.
+#   * One reader. Only the addressed agent drains, and the cursor -- the only
+#     mutable file -- therefore still has exactly one writer.
+#
+# That combination is what removes the race that makes sending to a running
+# agent unsafe: nobody sends, everybody appends, and the receiver decides when
+# to look. There is no check-then-send window to lose.
+
+INBOX_KINDS = ("approval", "correction", "task", "answer", "question", "fyi")
+
+# A line is refused above this size rather than truncated. Single-write appends
+# are atomic only while they stay small, and an item too big for one line is a
+# document -- so it belongs in a file the item points at, exactly as a brief
+# does. Truncating instead would corrupt the item silently.
+MAX_ITEM_BYTES = 4000
+
+
+def inbox_dir(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "inbox")
+
+
+def inbox_slug(target: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", target.strip())
+    if not slug or slug in (".", "..") or len(slug) > 120:
+        raise OrchError("inbox target %r is not a usable name" % target)
+    return slug
+
+
+def inbox_paths(repo_key: str, program: str, target: str) -> Tuple[str, str]:
+    base = os.path.join(inbox_dir(repo_key, program), inbox_slug(target))
+    return base + ".jsonl", base + ".cursor"
+
+
+def claims_path(repo_key: str) -> str:
+    return os.path.join(state_root(), repo_key, "inbox-claims.json")
+
+
+def _load_claims(repo_key: str) -> Dict[str, Any]:
+    try:
+        with open(claims_path(repo_key), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _worktree_key(start: str) -> str:
+    """This agent's worktree, realpathed.
+
+    Sound as an identity only because of the skill's standing rule that a
+    worktree has exactly one writer. If that rule is broken, two agents claim
+    one inbox and both drain it -- which is why the rule is a rule.
+    """
+    return os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
+
+
+def resolve_target(args: argparse.Namespace, repo_key: str
+                   ) -> Tuple[Optional[str], Optional[str]]:
+    """Return (program, target), or (None, None) when this agent has no inbox.
+
+    Order: explicit flag, then environment, then the claim recorded for this
+    worktree. Never guessed: an agent that drains an inbox addressed to someone
+    else consumes input meant for another lane, and the sender has no way to
+    discover that it happened.
+    """
+    target = getattr(args, "to", None) or os.environ.get("ORCH_INBOX_TARGET")
+    program = getattr(args, "program", None)
+    if target:
+        return (program or resolve_program(repo_key, None)), target
+    claim = _load_claims(repo_key).get(_worktree_key(args.repo))
+    if not claim:
+        return None, None
+    return (program or claim.get("program") or "default"), claim.get("target")
+
+
+def _read_pending(log: str, cursor: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Return (undelivered items, total line count)."""
+    try:
+        with open(log, "r", encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except FileNotFoundError:
+        return [], 0
+    delivered = 0
+    try:
+        with open(cursor, "r", encoding="utf-8") as fh:
+            delivered = int(json.load(fh).get("delivered", 0))
+    except (FileNotFoundError, ValueError, TypeError):
+        delivered = 0
+    items = []
+    for index, line in enumerate(lines[delivered:], start=delivered + 1):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            item = {"kind": "fyi", "body": line, "malformed": True}
+        item["index"] = index
+        items.append(item)
+    return items, len(lines)
+
+
+def _advance_cursor(cursor: str, delivered: int) -> None:
+    os.makedirs(os.path.dirname(cursor), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cursor), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"delivered": delivered, "at": _now()}, fh)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, cursor)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def render_inbox(items: List[Dict[str, Any]], target: str) -> str:
+    head = "INBOX — %d queued item%s for `%s`, delivered now and cleared." % (
+        len(items), "" if len(items) == 1 else "s", target)
+    parts = [head, ""]
+    for item in items:
+        meta = [str(item.get("kind", "fyi"))]
+        if item.get("from"):
+            meta.append("from %s" % item["from"])
+        if item.get("at"):
+            meta.append(str(item["at"]))
+        if item.get("ref"):
+            meta.append("ref %s" % item["ref"])
+        parts.append("[%d] %s" % (item.get("index", 0), " · ".join(meta)))
+        parts.append(str(item.get("body", "")).strip())
+        parts.append("")
+    # The steer matters more than the items. This is the exact moment an
+    # orchestrator starts doing the work itself, because it has just been handed
+    # something small and its context is already loaded.
+    parts.append(
+        "These are queued inputs, not a brief. Route each through the "
+        "delegate-or-inline decision before acting, and keep this turn bounded."
+    )
+    return "\n".join(parts).strip() + "\n"
+
+
+def cmd_inbox_claim(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    worktree = _worktree_key(args.repo)
+    claims = _load_claims(repo_key)
+    prior = claims.get(worktree)
+    if prior and prior.get("target") != args.target and not args.force:
+        raise OrchError(
+            "worktree %s is already claimed by %r (program %r).\n"
+            "Two agents draining one inbox split its items; pass --force only "
+            "if you know the prior claimant is gone."
+            % (worktree, prior.get("target"), prior.get("program"))
+        )
+    claims[worktree] = {"target": args.target, "program": program,
+                        "at": _now()}
+    path = claims_path(repo_key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(claims, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    print("inbox for %s claimed by %r (program %s)"
+          % (worktree, args.target, program))
+    return 0
+
+
+def cmd_inbox_send(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    if not args.to:
+        raise OrchError("--to is required when sending; a sender never guesses "
+                        "whose inbox it is writing to")
+    program = resolve_program(repo_key, args.program)
+    if is_placeholder(args.body):
+        raise OrchError("--body must say something actionable")
+    item = {
+        "at": _now(),
+        "kind": args.kind,
+        "from": args.sender or os.environ.get("ORCH_INBOX_TARGET") or "unknown",
+        "body": args.body,
+    }
+    if args.ref:
+        item["ref"] = args.ref
+    line = json.dumps(item, sort_keys=True) + "\n"
+    encoded = line.encode("utf-8")
+    if len(encoded) > MAX_ITEM_BYTES:
+        raise OrchError(
+            "item is %d bytes, over the %d-byte line limit.\n"
+            "Write the detail to a file and send a body that points at it -- "
+            "the same reason a brief is a file." % (len(encoded), MAX_ITEM_BYTES)
+        )
+    log, _ = inbox_paths(repo_key, program, args.to)
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    # One open, one write, one close: appends interleave but never tear.
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, encoded)
+    finally:
+        os.close(fd)
+    if not args.quiet:
+        print("queued %s for %s" % (args.kind, args.to))
+    return 0
+
+
+def cmd_inbox_peek(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program, target = resolve_target(args, repo_key)
+    if not target:
+        if not args.quiet:
+            print("no inbox claimed for this worktree")
+        return 3
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, _ = _read_pending(log, cursor)
+    if not items:
+        if not args.quiet:
+            print("inbox for %s is empty" % target)
+        return 3
+    if not args.quiet:
+        kinds = ", ".join(sorted({str(i.get("kind", "fyi")) for i in items}))
+        print("%d pending for %s (%s)" % (len(items), target, kinds))
+    return 0
+
+
+def cmd_inbox_drain(args: argparse.Namespace) -> int:
+    """Print undelivered items and advance the cursor.
+
+    Silent and successful when there is nothing to do, because this runs from a
+    turn-end hook on every turn. A drain that printed or failed when idle would
+    make the hook cost tokens forever, and the first thing anyone would do is
+    remove the hook.
+    """
+    if args.format == "hook" and args.repo == ".":
+        # A turn-end hook is not guaranteed to run in the directory the agent is
+        # working in, and the harness says so by putting `cwd` in the payload it
+        # pipes to the hook. Trusting the process cwd instead is how the hook
+        # silently drains the wrong repo's inbox, or none at all.
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program, target = resolve_target(args, repo_key)
+    except OrchError:
+        # A hook fires everywhere, including outside a repo and in sessions
+        # that never orchestrated anything. Refusing loudly there would train
+        # the human to delete the hook.
+        if args.format == "hook":
+            return 0
+        raise
+    if not target:
+        return 0
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, total = _read_pending(log, cursor)
+    if not items:
+        return 0
+    text = render_inbox(items, target)
+    # Cursor advances only after the text is in hand, and the caller must
+    # deliver what it printed: a drain whose output is discarded loses the
+    # items. That is why nothing but the receiver may drain.
+    _advance_cursor(cursor, total)
+    if args.format == "json":
+        print(json.dumps({"target": target, "items": items}, indent=2))
+    elif args.format == "hook":
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": text,
+        }}))
+    else:
+        print(text, end="")
+    return 0
+
+
+_HOOK_PAYLOAD: Optional[Dict[str, Any]] = None
+_HOOK_PAYLOAD_READ = False
+
+
+def hook_payload() -> Dict[str, Any]:
+    """The turn-end hook's JSON payload, or {} when not running as a hook.
+
+    Read at most once, because stdin is not re-readable. Silent on every
+    failure path: an interactive invocation has a terminal on stdin and must not
+    block, and a payload that is absent or unparseable is simply not a hook
+    invocation.
+    """
+    global _HOOK_PAYLOAD, _HOOK_PAYLOAD_READ
+    if _HOOK_PAYLOAD_READ:
+        return _HOOK_PAYLOAD or {}
+    _HOOK_PAYLOAD_READ = True
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read(1 << 20)
+    except (OSError, ValueError):
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    _HOOK_PAYLOAD = parsed if isinstance(parsed, dict) else None
+    return _HOOK_PAYLOAD or {}
+
+
+def _hook_cwd() -> Optional[str]:
+    cwd = hook_payload().get("cwd")
+    return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
+
+
+def cmd_inbox_list(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program, target = resolve_target(args, repo_key)
+    if not target:
+        raise OrchError("no inbox target; pass --to or run `orch inbox claim`")
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, total = _read_pending(log, cursor)
+    pending_from = total - len(items) + 1
+    if not args.all:
+        print("%s: %d delivered, %d pending" % (target, total - len(items),
+                                                len(items)))
+        for item in items:
+            line = "  [%d] %s %s" % (item.get("index", 0), item.get("kind"),
+                                     item.get("body", ""))
+            print(line[:200])
+        return 0
+    try:
+        with open(log, "r", encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except FileNotFoundError:
+        lines = []
+    for index, line in enumerate(lines, start=1):
+        mark = "pending " if index >= pending_from else "delivered"
+        print("%s [%d] %s" % (mark, index, line[:400]))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# cost: what the orchestrator's own context is charging per step
+# --------------------------------------------------------------------------- #
+#
+# Measured on a real program: identical work cost $0.42 per model call while the
+# orchestrator carried 118K of context, $1.35 at 668K, and $0.23 after an
+# auto-compaction dropped it to 88K. Cache reads were 61% of the bill, output
+# 16%, and reasoning tokens only ~3%.
+#
+# The consequence is the point of this section: an orchestrator's context is not
+# a private convenience, it is a **tax on every remaining step of the program**.
+# A 20K tool result read once is 20K re-read on every subsequent call. Nothing
+# in a token count makes that visible, so the numbers are computed here instead.
+
+# Per-million-token rates, USD. An ESTIMATE for advisory purposes, current as of
+# 2026-09; override with ORCH_RATES (JSON) or <program>/rates.json rather than
+# editing this table, so a price change does not need a code change.
+DEFAULT_RATES = {
+    "default":  {"in": 15.0, "out": 75.0, "cache_write": 18.75, "cache_read": 1.5},
+    "haiku":    {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
+    "sonnet":   {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
+}
+
+# Context thresholds, in tokens. The first is where the per-step tax starts to
+# dominate; the second is where rotating is almost always cheaper than continuing.
+CONTEXT_WARN = int(os.environ.get("ORCH_CONTEXT_WARN", 250_000))
+CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
+# Fan-out width past which a program is usually generating more intake than it
+# can consume. Advisory only -- there is no safe universal cap.
+FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
+
+
+def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
+    override = os.environ.get("ORCH_RATES")
+    if override:
+        try:
+            return {**DEFAULT_RATES, **json.loads(override)}
+        except ValueError:
+            pass
+    if repo_key and program:
+        path = os.path.join(program_dir(repo_key, program), "rates.json")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return {**DEFAULT_RATES, **json.load(fh)}
+        except (OSError, ValueError):
+            pass
+    return dict(DEFAULT_RATES)
+
+
+def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
+    name = (model or "").lower()
+    for key, value in rates.items():
+        if key != "default" and key in name:
+            return value
+    return rates["default"]
+
+
+def project_dir_for(cwd: str) -> Optional[str]:
+    """The harness transcript directory for a working directory, if it exists."""
+    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))
+    path = os.path.join(base, slug)
+    return path if os.path.isdir(path) else None
+
+
+def find_transcript(args: argparse.Namespace) -> Optional[str]:
+    if getattr(args, "transcript", None):
+        return args.transcript
+    from_hook = hook_payload().get("transcript_path")
+    if isinstance(from_hook, str) and os.path.isfile(os.path.expanduser(from_hook)):
+        return os.path.expanduser(from_hook)
+    pdir = project_dir_for(args.repo if os.path.isdir(args.repo) else ".")
+    if not pdir:
+        return None
+    files = [os.path.join(pdir, f) for f in os.listdir(pdir) if f.endswith(".jsonl")]
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarise a harness transcript's model calls.
+
+    Reads the file streaming and keeps only aggregates, because the whole point
+    is to answer a question about a large file without carrying it anywhere.
+    """
+    totals = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}
+    steps = 0
+    cost = 0.0
+    recent: List[Tuple[int, float]] = []          # (context, cost) per step
+    models: Dict[str, int] = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                message = row.get("message") or {}
+                usage = message.get("usage") or {}
+                if not usage:
+                    continue
+                model = message.get("model") or ""
+                rate = rate_for(model, rates)
+                models[model] = models.get(model, 0) + 1
+                fields = {
+                    "in": usage.get("input_tokens", 0) or 0,
+                    "out": usage.get("output_tokens", 0) or 0,
+                    "cache_write": usage.get("cache_creation_input_tokens", 0) or 0,
+                    "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+                }
+                step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
+                for key, value in fields.items():
+                    totals[key] += value
+                cost += step_cost
+                steps += 1
+                context = fields["in"] + fields["cache_write"] + fields["cache_read"]
+                recent.append((context, step_cost))
+                if len(recent) > 25:
+                    recent.pop(0)
+    except OSError:
+        return {}
+    if not steps:
+        return {}
+    window = recent[-25:]
+    return {
+        "transcript": path,
+        "steps": steps,
+        "tokens": totals,
+        "cost": cost,
+        "context": window[-1][0] if window else 0,
+        "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
+        "models": models,
+        "shares": {k: (totals[k] * rate_for(max(models, key=models.get) if models else "",
+                                           rates)[k] / 1e6 / cost if cost else 0)
+                   for k in totals},
+    }
+
+
+def budget_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "budget.json")
+
+
+def load_budget(repo_key: str, program: str) -> Dict[str, Any]:
+    try:
+        with open(budget_path(repo_key, program), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
+                    open_entries: int) -> List[str]:
+    """Only things worth interrupting for, and each with the action attached."""
+    out = []
+    context = usage.get("context", 0)
+    per_step = usage.get("cost_per_step", 0.0)
+    if context >= CONTEXT_URGENT:
+        out.append(
+            "CONTEXT %dK — every further model call costs about $%.2f, and a "
+            "typical turn is a dozen calls. Rotate now: write a handoff note, "
+            "then hand the program to a fresh orchestrator, which resumes from "
+            "the tracker, the briefs and the plan document. Measured: the same "
+            "work runs ~5x cheaper at a low context."
+            % (context // 1000, per_step)
+        )
+    elif context >= CONTEXT_WARN:
+        out.append(
+            "CONTEXT %dK — at about $%.2f per model call and rising. Stop "
+            "reading anything large into this session; delegate reads and keep "
+            "only conclusions. Plan a rotation."
+            % (context // 1000, per_step)
+        )
+    limit = budget.get("limit")
+    if isinstance(limit, (int, float)) and limit > 0:
+        spent = usage.get("cost", 0.0)
+        if spent >= limit:
+            out.append("BUDGET — about $%.0f spent against a $%.0f limit for this "
+                       "session. Say so plainly and let the human decide whether "
+                       "to continue." % (spent, limit))
+        elif spent >= 0.75 * limit:
+            out.append("BUDGET — about $%.0f of $%.0f used." % (spent, limit))
+    if open_entries >= FANOUT_WARN:
+        out.append(
+            "FAN-OUT %d open dispatches — each one returns a report you must "
+            "read, and intake is what grows this context. Land and close what "
+            "is finished before dispatching more." % open_entries
+        )
+    return out
+
+
+def transcripts_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "transcripts.json")
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_json(path: str, data: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def record_transcript(repo_key: str, program: str, target: str, path: str) -> None:
+    """Remember which transcript belongs to which inbox target.
+
+    Written by the agent itself from its own hook payload, so a front desk can
+    later ask `orch cost --for root` about the backend without either of them
+    knowing the other's session id -- a mapping the substrate does not expose.
+    """
+    tpath = transcripts_path(repo_key, program)
+    data = _load_json(tpath)
+    if data.get(target) == path:
+        return
+    data[target] = path
+    _save_json(tpath, data)
+
+
+def cmd_cost(args: argparse.Namespace) -> int:
+    quiet = args.format == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        repo_key, program = None, None
+    rates = load_rates(repo_key, program)
+    if getattr(args, "for_target", None):
+        if not (repo_key and program):
+            raise OrchError("--for needs a repository with a program")
+        known = _load_json(transcripts_path(repo_key, program)).get(args.for_target)
+        if not known:
+            raise OrchError(
+                "no transcript recorded for %r yet. The target records its own "
+                "transcript the first time its turn-end hook runs." % args.for_target
+            )
+        args.transcript = known
+    path = find_transcript(args)
+    if quiet and path and repo_key and program:
+        try:
+            _, target = resolve_target(args, repo_key)
+        except OrchError:
+            target = None
+        if target:
+            record_transcript(repo_key, program, target, path)
+    if not path:
+        if quiet:
+            return 0
+        raise OrchError("no transcript found; pass --transcript")
+    usage = read_usage(path, rates)
+    if not usage:
+        if quiet:
+            return 0
+        raise OrchError("no model calls found in %s" % path)
+
+    open_entries = 0
+    budget: Dict[str, Any] = {}
+    if repo_key and program:
+        budget = load_budget(repo_key, program)
+        try:
+            for _, data in _read_all_trackers(repo_key, program, True, "root"):
+                open_entries += len(data.get("entries", []))
+        except OrchError:
+            pass
+
+    advisories = cost_advisories(usage, budget, open_entries)
+
+    if args.format == "json":
+        print(json.dumps({**usage, "advisories": advisories,
+                          "open_entries": open_entries}, indent=2))
+        return 0
+
+    if quiet:
+        if not advisories or not _should_warn(repo_key, program, usage,
+                                              advisories):
+            return 0
+        text = ("COST — $%.0f this session, ~$%.2f per model call at %dK "
+                "context.\n\n%s\n" % (usage["cost"], usage["cost_per_step"],
+                                      usage["context"] // 1000,
+                                      "\n\n".join(advisories)))
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop", "additionalContext": text}}))
+        return 0
+
+    t = usage["tokens"]
+    print("transcript   %s" % usage["transcript"])
+    print("model calls  %d" % usage["steps"])
+    print("context now  %dK tokens" % (usage["context"] // 1000))
+    print("tokens       in %s · out %s · cache write %s · cache read %s"
+          % tuple("{:,}".format(t[k]) for k in
+                  ("in", "out", "cache_write", "cache_read")))
+    print("cost (est)   $%.2f total · $%.2f per model call (last 25)"
+          % (usage["cost"], usage["cost_per_step"]))
+    print("cost share   %s" % " · ".join(
+        "%s %.0f%%" % (k.replace("_", " "), v * 100)
+        for k, v in sorted(usage["shares"].items(), key=lambda x: -x[1])))
+    if open_entries:
+        print("open work    %d dispatches" % open_entries)
+    if budget.get("limit"):
+        print("budget       $%s" % budget["limit"])
+    for line in advisories:
+        print("\n! %s" % line)
+    if not advisories:
+        print("\nno advisories: context and fan-out are within thresholds.")
+    return 0
+
+
+def _should_warn(repo_key: Optional[str], program: Optional[str],
+                 usage: Dict[str, Any], advisories: List[str]) -> bool:
+    """Warn when something new is true, or when it got materially worse.
+
+    A hook that repeats itself gets switched off, and then it is worth nothing
+    at the moment it would have mattered. The signature is the *set* of
+    advisory kinds, so a newly-blown budget still speaks even if a context
+    warning already fired at this level.
+    """
+    if not repo_key or not program:
+        return True
+    path = os.path.join(program_dir(repo_key, program), "cost-warned.json")
+    context = usage.get("context", 0)
+    signature = "|".join(sorted(a.split(" ")[0] for a in advisories))
+    if context >= CONTEXT_URGENT:
+        signature += "|urgent"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            prior = json.load(fh)
+    except (OSError, ValueError):
+        prior = {}
+    if (prior.get("signature") == signature
+            and context < prior.get("context", 0) * 1.5):
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"signature": signature, "context": context,
+                       "at": _now()}, fh)
+    except OSError:
+        pass
+    return True
+
+
+def cmd_budget(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = budget_path(repo_key, program)
+    if args.limit is None:
+        data = load_budget(repo_key, program)
+        print("budget for %s: %s" % (program,
+                                     ("$%s" % data["limit"]) if data.get("limit")
+                                     else "none set"))
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"limit": args.limit, "at": _now()}, fh)
+        fh.write("\n")
+    print("budget for %s set to $%s" % (program, args.limit))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# resume: re-derive orchestration state after compaction or resume
+# --------------------------------------------------------------------------- #
+#
+# Compaction is the cheapest rotation there is -- measured, the per-call price
+# fell 5.9x when it fired -- and the only thing wrong with it is that the summary
+# is a *recollection* of state. Nothing here needs recollecting: the tracker,
+# the inbox and the plan document are on disk. This command prints them, so the
+# fresh context starts from the source of truth rather than from a paraphrase.
+
+def frontdesk_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "frontdesk.json")
+
+
+def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
+    lines = ["ORCHESTRATION STATE — re-derived from disk, not from memory."]
+    tracker_id = getattr(args, "tracker", None) or "root"
+    try:
+        _, data = _read_all_trackers(repo_key, program, False, tracker_id)[0]
+    except (OrchError, IndexError):
+        data = None
+    if data is None:
+        lines.append("program %r has no tracker %r yet." % (program, tracker_id))
+    else:
+        lines.append("program %s · tracker %s · plan %s"
+                     % (program, data["tracker_id"], data.get("plan_doc") or "none"))
+        entries = data.get("entries", [])
+        lines.append("open dispatches: %d" % len(entries))
+        for entry in entries:
+            lines.append("  " + entry_summary(entry))
+    try:
+        inbox_program, target = resolve_target(args, repo_key)
+    except OrchError:
+        inbox_program, target = None, None
+    if target:
+        log, cursor = inbox_paths(repo_key, inbox_program or program, target)
+        pending, _ = _read_pending(log, cursor)
+        lines.append("inbox `%s`: %s" % (
+            target, ("%d pending — run `orch inbox drain`" % len(pending))
+            if pending else "empty"))
+    else:
+        lines.append("inbox: none claimed for this worktree — run `orch inbox claim --as root`")
+    fd = _load_json(frontdesk_path(repo_key, program))
+    if fd.get("target"):
+        lines.append("front desk: `%s` — human input arrives through it; answer it "
+                     "via `orch inbox send --to %s`" % (fd["target"], fd["target"]))
+    lines.append("")
+    lines.append("Before acting: reload the orchestrating skill, then reconcile "
+                 "liveness against the substrate (tracker → substrate → OS). The "
+                 "roster above is recorded intent, not proof of life.")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    quiet = args.format == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        programs = list_programs(repo_key)
+        if not programs:
+            # Nothing was ever orchestrated here; a hook must say nothing.
+            if quiet:
+                return 0
+            raise OrchError("no programs for this repo")
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        raise
+    text = render_resume(repo_key, program, args)
+    if quiet:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": text}}))
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_frontdesk(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = frontdesk_path(repo_key, program)
+    if args.clear:
+        if os.path.exists(path):
+            os.unlink(path)
+        print("front desk cleared for %s" % program)
+        return 0
+    if not args.target:
+        data = _load_json(path)
+        print("front desk for %s: %s" % (program, data.get("target") or "none"))
+        return 0
+    _save_json(path, {"target": args.target, "agent_id": args.agent_id,
+                      "at": _now()})
+    print("front desk for %s is `%s`" % (program, args.target))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# guard: say so at the moment a large tool input becomes permanent context
+# --------------------------------------------------------------------------- #
+
+GUARD_BYTES = int(os.environ.get("ORCH_GUARD_BYTES", 6000))
+GUARD_COOLDOWN_S = int(os.environ.get("ORCH_GUARD_COOLDOWN", 600))
+
+
+def _tool_input_size(name: str, tool_input: Dict[str, Any]) -> int:
+    if name == "Bash":
+        return len(str(tool_input.get("command", "")))
+    if name == "Write":
+        return len(str(tool_input.get("content", "")))
+    if name in ("Edit", "MultiEdit"):
+        return len(str(tool_input.get("new_string", "")))
+    return 0
+
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    """PreToolUse: a non-blocking note when a tool input is large.
+
+    Large content the orchestrator writes is re-read on every later model call.
+    Measured, inline document-writing was the single largest self-inflicted item
+    in one program's context. Nothing is blocked -- the model may well be right
+    to write it -- but the choice should be made knowing what it costs.
+    """
+    payload = hook_payload()
+    name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(name, str) or not isinstance(tool_input, dict):
+        return 0
+    size = _tool_input_size(name, tool_input)
+    if size < GUARD_BYTES:
+        return 0
+    cwd = payload.get("cwd")
+    try:
+        repo_key, _, _ = repo_identity(cwd if isinstance(cwd, str) else args.repo)
+        program = resolve_program(repo_key, None)
+    except OrchError:
+        return 0
+    if not list_programs(repo_key):
+        return 0
+    marker = os.path.join(program_dir(repo_key, program), "guard-warned.json")
+    prior = _load_json(marker)
+    try:
+        last = datetime.fromisoformat(prior.get("at", "1970-01-01T00:00:00+00:00"))
+    except ValueError:
+        last = datetime.fromtimestamp(0, timezone.utc)
+    if (datetime.now(timezone.utc) - last).total_seconds() < GUARD_COOLDOWN_S:
+        return 0
+    try:
+        _save_json(marker, {"at": _now(), "tool": name, "bytes": size})
+    except OSError:
+        pass
+    text = (
+        "CONTEXT — this %s input is about %dKB, and it is now permanent context "
+        "for the rest of this session, re-read on every later model call. If it "
+        "is a document (brief body, review doc, plan patch, report), a doc-writer "
+        "worker at economy tier should author it from a one-paragraph spec, and "
+        "you should hold only the path. If it genuinely has to be yours, carry on."
+        % (name, size // 1024)
+    )
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "additionalContext": text}}))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # cli
 # --------------------------------------------------------------------------- #
 
@@ -816,6 +1738,87 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--recursive", action="store_true")
     common(sp)
     sp.set_defaults(func=cmd_prune)
+
+    sp = sub.add_parser("inbox", help="queued input for a running agent")
+    isub = sp.add_subparsers(dest="inbox_command", required=True)
+
+    ip = isub.add_parser("claim",
+                         help="record that this worktree drains a given target")
+    ip.add_argument("--as", dest="target", required=True,
+                    help="inbox name this agent answers to, e.g. root")
+    ip.add_argument("--program")
+    ip.add_argument("--force", action="store_true",
+                    help="override an existing claim on this worktree")
+    ip.set_defaults(func=cmd_inbox_claim)
+
+    ip = isub.add_parser("send", help="append one item to a target's inbox")
+    ip.add_argument("--to", required=True)
+    ip.add_argument("--body", required=True)
+    ip.add_argument("--kind", default="fyi", choices=INBOX_KINDS)
+    ip.add_argument("--ref", help="tracker entry or item this concerns")
+    ip.add_argument("--from", dest="sender")
+    ip.add_argument("--program")
+    ip.add_argument("--quiet", action="store_true")
+    ip.set_defaults(func=cmd_inbox_send)
+
+    ip = isub.add_parser("peek",
+                         help="report pending count; exit 3 when empty")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--quiet", action="store_true")
+    ip.set_defaults(func=cmd_inbox_peek)
+
+    ip = isub.add_parser("drain",
+                         help="print pending items and mark them delivered")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--format", default="text",
+                    choices=("text", "json", "hook"))
+    ip.set_defaults(func=cmd_inbox_drain)
+
+    ip = isub.add_parser("list", help="show the inbox log")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--all", action="store_true",
+                    help="include already-delivered items")
+    ip.set_defaults(func=cmd_inbox_list)
+
+    sp = sub.add_parser("cost", help="what this session is spending, and why")
+    sp.add_argument("--transcript", help="harness transcript (found if omitted)")
+    sp.add_argument("--for", dest="for_target",
+                    help="another agent's inbox target, e.g. root, whose "
+                         "transcript was recorded by its own hook")
+    sp.add_argument("--to", help=argparse.SUPPRESS)
+    sp.add_argument("--program")
+    sp.add_argument("--format", default="text", choices=("text", "json", "hook"))
+    sp.set_defaults(func=cmd_cost)
+
+    sp = sub.add_parser("resume",
+                        help="print orchestration state re-derived from disk")
+    sp.add_argument("--program")
+    sp.add_argument("--tracker", default="root")
+    sp.add_argument("--to", help=argparse.SUPPRESS)
+    sp.add_argument("--format", default="text", choices=("text", "hook"))
+    sp.set_defaults(func=cmd_resume)
+
+    sp = sub.add_parser("frontdesk",
+                        help="record which inbox target relays the human")
+    sp.add_argument("--set", dest="target")
+    sp.add_argument("--agent-id")
+    sp.add_argument("--clear", action="store_true")
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_frontdesk)
+
+    sp = sub.add_parser("guard",
+                        help="PreToolUse hook: note when a tool input is large")
+    sp.add_argument("--format", default="hook", choices=("hook",))
+    sp.set_defaults(func=cmd_guard)
+
+    sp = sub.add_parser("budget", help="show or set this program's spend limit")
+    sp.add_argument("--set", dest="limit", type=float,
+                    help="USD; omit to show the current limit")
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_budget)
 
     return p
 

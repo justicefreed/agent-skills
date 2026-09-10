@@ -28,6 +28,7 @@ advances: [3.1, 3.4, 3.7]                        # required; or the literal `non
 consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
 archetype: integrator                            # optional, provenance
+review: integrator                               # optional; integrator | in-brief | none
 tracker_id: root.1                                # only for a sub-orchestrator
 plan_doc: docs/migration-2026-09/PLAN.md          # optional
 ---
@@ -46,6 +47,14 @@ Why these five are required and nothing else is:
 
 `orch` rejects placeholders (`unknown`, `tbd`, `n/a`, …). A required field answered with a
 placeholder is an omission wearing a costume, and accepting one turns validation into ritual.
+
+**`review:` is optional but consequential**, and it defaults to `integrator`. It declares who reads
+this lane's diff before it lands: `integrator` (the default second reader), `in-brief` (this lane's
+own spec requires an independent or adversarial pass, and the integrator lands on that evidence), or
+`none` (mechanical work, and `review_waiver:` must say why). Set it here, at dispatch, because it is
+a property of the spec — deciding it later, with a finished diff in hand, is deciding it under the
+wrong incentive. A brief claiming `in-brief` whose report carries no such pass does not land; the
+integrator escalates. See `integration.md`.
 
 Everything else — constraints, rationale, history — goes in the body, because the body is what the
 *worker* reads and duplicating it into structured fields creates two copies that drift.
