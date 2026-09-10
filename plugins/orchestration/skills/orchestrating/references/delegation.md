@@ -75,6 +75,7 @@ rather than in a plan. It is ordinary delegable work with ordinary tiers:
 | Patching a plan document from a ruling | doc writer | economy / one below default | give it the ruling verbatim; it is transcription, not judgment |
 | Tracker hygiene, orphan sweeps, reclamation | inventory | minimal / lowest | never by glob |
 | Re-running a check someone else's report claimed | verifier | economy / one below default | must state which tree it ran in |
+| Relaying the human's approvals and task adds during execution | front desk | economy / lowest | a router with a whitelist, never a helper — `frontdesk.md` |
 | Ruling on an escalation; ordering history | **not delegable** | — | you hold the program's context; this is Principle 5's other half |
 
 The last row is the point of the table. Principle 5 cuts both ways: work that only you can do must

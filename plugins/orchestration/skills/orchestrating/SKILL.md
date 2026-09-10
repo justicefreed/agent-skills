@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Orchestrate work across multiple agents — decide whether to delegate at all, choose the execution substrate and isolation, pick model and effort, write briefs, track dispatches, land finished work, and verify what comes back. Use when the user wants work fanned out to subagents or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, is deciding whether a task is worth delegating, needs queued input delivered to a busy agent, or when another skill needs the delegation and brief-contract rules.
+description: Orchestrate work across multiple agents — decide whether to delegate at all, choose the execution substrate and isolation, pick model and effort, write briefs, track dispatches, land finished work, and verify what comes back. Use when the user wants work fanned out to subagents or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, is deciding whether a task is worth delegating, needs queued input delivered to a busy agent, wants a cheap front desk between themselves and a running orchestrator, or when another skill needs the delegation and brief-contract rules.
 hooks:
   Stop:
     - hooks:
@@ -8,6 +8,16 @@ hooks:
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
         - type: command
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" cost --format hook; done; exit 0'
+  SessionStart:
+    - matcher: "compact|resume"
+      hooks:
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" resume --format hook; done; exit 0'
+  PreToolUse:
+    - matcher: "Write|Edit|Bash"
+      hooks:
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" guard; done; exit 0'
 ---
 
 # Orchestrating
@@ -131,21 +141,25 @@ is running — in that order.
 reconciliation is for a failed heartbeat or for re-deriving state from a fresh context — *never* as
 a wait loop. Details in `references/liveness.md`.
 
-**Messaging.** Read `references/messaging.md` before sending anything to a running worker. The
-short version: mid-task correction does not exist on any substrate, so a correction either waits,
-destroys work, or comes from the worker via `ESCALATE`. Peer questions are usually artifact reads in
-disguise — ask the filesystem, not the agent.
+**Messaging.** Read `references/messaging.md` before sending anything to a running worker. Mid-task
+correction does not exist on any substrate: a correction waits, destroys work, or comes from the
+worker via `ESCALATE`. Peer questions are usually artifact reads in disguise — ask the filesystem.
 
-**Queued input.** Anything addressed to a busy agent — including you — goes to that agent's inbox
-and is drained between turns. Nobody sends; senders append. See `references/availability.md`.
+**Queued input.** Anything addressed to a busy agent — including you — goes to its inbox and is
+drained between turns. Nobody sends; senders append. `references/availability.md`.
 
 **Resources.** Global constraints (build capacity, one writer per worktree) are enforced against the
 operating system, never against a tracker or a peer's claim.
 
-**Rotate before you are expensive.** The turn-end hook warns when your context, your fan-out width,
-or a set budget crosses a threshold. Act at a seam, not mid-request: land and close what is finished,
-patch the plan document, write a handoff note, start a fresh orchestrator on it. See
-`references/cost.md`.
+**Rotate before you are expensive.** Compaction is the rotation mechanism, set to fire early; a
+session-start hook re-derives your state from disk afterwards. The turn-end hook warns when context,
+fan-out, or a set budget crosses a threshold. Act at a seam: land and close what is finished, patch
+the plan document, then compact. `references/cost.md`.
+
+**Propose a front desk once execution is routine.** When the plan is written, the first wave is out,
+and the human's recent messages are approvals and task adds rather than decisions, offer a cheap
+router between them and you: it forwards verbatim, answers status from files, relays your questions.
+You go headless and cheaper; the human can always open you directly. `references/frontdesk.md`.
 
 **Tuning.** `RETUNE` changes a running worker's model or effort without touching its instructions.
 It is the only safe way to influence work already underway; prefer starting cheap and escalating.
@@ -191,7 +205,8 @@ Load these on demand, not up front.
 | `references/substrates/*.md` | the one adapter Step 0 selects |
 | `references/delegation.md` | substrate, isolation, archetype, model and effort |
 | `references/availability.md` | bounded turns, and the inbox for queued input |
-| `references/cost.md` | what a program actually spends, and rotation |
+| `references/cost.md` | what a program actually spends, compaction, hygiene |
+| `references/frontdesk.md` | the cheap router between the human and you |
 | `references/integration.md` | the standing integrator lane, and who reviews before landing |
 | `references/briefs.md` | brief front matter, body, and report contract |
 | `references/state.md` | tracker layout, ids, and the `orch` command surface |
@@ -205,9 +220,10 @@ skill's base directory. Harness-specific path resolution is in
 `references/substrates/_capabilities.md`. Never edit tracker files by hand: the script enforces the
 required fields, and the enforcement is the point.
 
-This skill's front matter registers a turn-end hook that drains your inbox. It is silent when the
-inbox is empty, so it costs nothing on an idle turn. Export `ORCH_SKILL_DIR` if this skill lives
-somewhere the hook's candidate list does not cover.
+This skill's front matter registers hooks: inbox drain and cost advisory at turn end, state
+re-derivation after compaction, and a note when a large tool input is about to become permanent
+context. All are silent when there is nothing to say. Export `ORCH_SKILL_DIR` if this skill lives
+somewhere the hooks' candidate list does not cover.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
 build discipline, formatter exclusions, known traps, output-verbosity preferences. Generate it from

@@ -785,7 +785,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
 # agent unsafe: nobody sends, everybody appends, and the receiver decides when
 # to look. There is no check-then-send window to lose.
 
-INBOX_KINDS = ("approval", "correction", "task", "answer", "fyi")
+INBOX_KINDS = ("approval", "correction", "task", "answer", "question", "fyi")
 
 # A line is refused above this size rather than truncated. Single-write appends
 # are atomic only while they stay small, and an item too big for one line is a
@@ -1312,8 +1312,52 @@ def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
     return out
 
 
+def transcripts_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "transcripts.json")
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_json(path: str, data: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def record_transcript(repo_key: str, program: str, target: str, path: str) -> None:
+    """Remember which transcript belongs to which inbox target.
+
+    Written by the agent itself from its own hook payload, so a front desk can
+    later ask `orch cost --for root` about the backend without either of them
+    knowing the other's session id -- a mapping the substrate does not expose.
+    """
+    tpath = transcripts_path(repo_key, program)
+    data = _load_json(tpath)
+    if data.get(target) == path:
+        return
+    data[target] = path
+    _save_json(tpath, data)
+
+
 def cmd_cost(args: argparse.Namespace) -> int:
     quiet = args.format == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
     try:
         repo_key, _, _ = repo_identity(args.repo)
         program = resolve_program(repo_key, args.program)
@@ -1322,7 +1366,24 @@ def cmd_cost(args: argparse.Namespace) -> int:
             return 0
         repo_key, program = None, None
     rates = load_rates(repo_key, program)
+    if getattr(args, "for_target", None):
+        if not (repo_key and program):
+            raise OrchError("--for needs a repository with a program")
+        known = _load_json(transcripts_path(repo_key, program)).get(args.for_target)
+        if not known:
+            raise OrchError(
+                "no transcript recorded for %r yet. The target records its own "
+                "transcript the first time its turn-end hook runs." % args.for_target
+            )
+        args.transcript = known
     path = find_transcript(args)
+    if quiet and path and repo_key and program:
+        try:
+            _, target = resolve_target(args, repo_key)
+        except OrchError:
+            target = None
+        if target:
+            record_transcript(repo_key, program, target, path)
     if not path:
         if quiet:
             return 0
@@ -1434,6 +1495,171 @@ def cmd_budget(args: argparse.Namespace) -> int:
         json.dump({"limit": args.limit, "at": _now()}, fh)
         fh.write("\n")
     print("budget for %s set to $%s" % (program, args.limit))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# resume: re-derive orchestration state after compaction or resume
+# --------------------------------------------------------------------------- #
+#
+# Compaction is the cheapest rotation there is -- measured, the per-call price
+# fell 5.9x when it fired -- and the only thing wrong with it is that the summary
+# is a *recollection* of state. Nothing here needs recollecting: the tracker,
+# the inbox and the plan document are on disk. This command prints them, so the
+# fresh context starts from the source of truth rather than from a paraphrase.
+
+def frontdesk_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "frontdesk.json")
+
+
+def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
+    lines = ["ORCHESTRATION STATE — re-derived from disk, not from memory."]
+    tracker_id = getattr(args, "tracker", None) or "root"
+    try:
+        _, data = _read_all_trackers(repo_key, program, False, tracker_id)[0]
+    except (OrchError, IndexError):
+        data = None
+    if data is None:
+        lines.append("program %r has no tracker %r yet." % (program, tracker_id))
+    else:
+        lines.append("program %s · tracker %s · plan %s"
+                     % (program, data["tracker_id"], data.get("plan_doc") or "none"))
+        entries = data.get("entries", [])
+        lines.append("open dispatches: %d" % len(entries))
+        for entry in entries:
+            lines.append("  " + entry_summary(entry))
+    try:
+        inbox_program, target = resolve_target(args, repo_key)
+    except OrchError:
+        inbox_program, target = None, None
+    if target:
+        log, cursor = inbox_paths(repo_key, inbox_program or program, target)
+        pending, _ = _read_pending(log, cursor)
+        lines.append("inbox `%s`: %s" % (
+            target, ("%d pending — run `orch inbox drain`" % len(pending))
+            if pending else "empty"))
+    else:
+        lines.append("inbox: none claimed for this worktree — run `orch inbox claim --as root`")
+    fd = _load_json(frontdesk_path(repo_key, program))
+    if fd.get("target"):
+        lines.append("front desk: `%s` — human input arrives through it; answer it "
+                     "via `orch inbox send --to %s`" % (fd["target"], fd["target"]))
+    lines.append("")
+    lines.append("Before acting: reload the orchestrating skill, then reconcile "
+                 "liveness against the substrate (tracker → substrate → OS). The "
+                 "roster above is recorded intent, not proof of life.")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    quiet = args.format == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        programs = list_programs(repo_key)
+        if not programs:
+            # Nothing was ever orchestrated here; a hook must say nothing.
+            if quiet:
+                return 0
+            raise OrchError("no programs for this repo")
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        raise
+    text = render_resume(repo_key, program, args)
+    if quiet:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": text}}))
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_frontdesk(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = frontdesk_path(repo_key, program)
+    if args.clear:
+        if os.path.exists(path):
+            os.unlink(path)
+        print("front desk cleared for %s" % program)
+        return 0
+    if not args.target:
+        data = _load_json(path)
+        print("front desk for %s: %s" % (program, data.get("target") or "none"))
+        return 0
+    _save_json(path, {"target": args.target, "agent_id": args.agent_id,
+                      "at": _now()})
+    print("front desk for %s is `%s`" % (program, args.target))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# guard: say so at the moment a large tool input becomes permanent context
+# --------------------------------------------------------------------------- #
+
+GUARD_BYTES = int(os.environ.get("ORCH_GUARD_BYTES", 6000))
+GUARD_COOLDOWN_S = int(os.environ.get("ORCH_GUARD_COOLDOWN", 600))
+
+
+def _tool_input_size(name: str, tool_input: Dict[str, Any]) -> int:
+    if name == "Bash":
+        return len(str(tool_input.get("command", "")))
+    if name == "Write":
+        return len(str(tool_input.get("content", "")))
+    if name in ("Edit", "MultiEdit"):
+        return len(str(tool_input.get("new_string", "")))
+    return 0
+
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    """PreToolUse: a non-blocking note when a tool input is large.
+
+    Large content the orchestrator writes is re-read on every later model call.
+    Measured, inline document-writing was the single largest self-inflicted item
+    in one program's context. Nothing is blocked -- the model may well be right
+    to write it -- but the choice should be made knowing what it costs.
+    """
+    payload = hook_payload()
+    name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(name, str) or not isinstance(tool_input, dict):
+        return 0
+    size = _tool_input_size(name, tool_input)
+    if size < GUARD_BYTES:
+        return 0
+    cwd = payload.get("cwd")
+    try:
+        repo_key, _, _ = repo_identity(cwd if isinstance(cwd, str) else args.repo)
+        program = resolve_program(repo_key, None)
+    except OrchError:
+        return 0
+    if not list_programs(repo_key):
+        return 0
+    marker = os.path.join(program_dir(repo_key, program), "guard-warned.json")
+    prior = _load_json(marker)
+    try:
+        last = datetime.fromisoformat(prior.get("at", "1970-01-01T00:00:00+00:00"))
+    except ValueError:
+        last = datetime.fromtimestamp(0, timezone.utc)
+    if (datetime.now(timezone.utc) - last).total_seconds() < GUARD_COOLDOWN_S:
+        return 0
+    try:
+        _save_json(marker, {"at": _now(), "tool": name, "bytes": size})
+    except OSError:
+        pass
+    text = (
+        "CONTEXT — this %s input is about %dKB, and it is now permanent context "
+        "for the rest of this session, re-read on every later model call. If it "
+        "is a document (brief body, review doc, plan patch, report), a doc-writer "
+        "worker at economy tier should author it from a one-paragraph spec, and "
+        "you should hold only the path. If it genuinely has to be yours, carry on."
+        % (name, size // 1024)
+    )
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "additionalContext": text}}))
     return 0
 
 
@@ -1559,9 +1785,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("cost", help="what this session is spending, and why")
     sp.add_argument("--transcript", help="harness transcript (found if omitted)")
+    sp.add_argument("--for", dest="for_target",
+                    help="another agent's inbox target, e.g. root, whose "
+                         "transcript was recorded by its own hook")
+    sp.add_argument("--to", help=argparse.SUPPRESS)
     sp.add_argument("--program")
     sp.add_argument("--format", default="text", choices=("text", "json", "hook"))
     sp.set_defaults(func=cmd_cost)
+
+    sp = sub.add_parser("resume",
+                        help="print orchestration state re-derived from disk")
+    sp.add_argument("--program")
+    sp.add_argument("--tracker", default="root")
+    sp.add_argument("--to", help=argparse.SUPPRESS)
+    sp.add_argument("--format", default="text", choices=("text", "hook"))
+    sp.set_defaults(func=cmd_resume)
+
+    sp = sub.add_parser("frontdesk",
+                        help="record which inbox target relays the human")
+    sp.add_argument("--set", dest="target")
+    sp.add_argument("--agent-id")
+    sp.add_argument("--clear", action="store_true")
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_frontdesk)
+
+    sp = sub.add_parser("guard",
+                        help="PreToolUse hook: note when a tool input is large")
+    sp.add_argument("--format", default="hook", choices=("hook",))
+    sp.set_defaults(func=cmd_guard)
 
     sp = sub.add_parser("budget", help="show or set this program's spend limit")
     sp.add_argument("--set", dest="limit", type=float,

@@ -12,7 +12,11 @@ send a prompt into a running agent's turn.
 ## What it does
 
 - On `agent.session_open`, injects `ORCH_INBOX_TARGET` (the agent id) into the launch env unless one
-  is already set, so an agent can address its own inbox without being told its id.
+  is already set, so an agent can address its own inbox without being told its id. For Claude agents
+  it also sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` unless already set, so the agent compacts at
+  about 200K tokens rather than near the window limit — measured, the same orchestrator cost 5.9x
+  more per model call at 668K of context than at 88K. Override with `ORCH_AUTOCOMPACT_WINDOW` in the
+  daemon environment; set it empty to disable.
 - On `agent.turn_ended`, waits a short settle delay, then drains and sends the drained text to that
   same agent as a new turn. A `canceled` outcome is skipped entirely — a cancelled turn means a human
   is driving. There is no separate `peek`: a drain on an empty inbox prints nothing and advances

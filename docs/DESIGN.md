@@ -226,6 +226,37 @@ set. It re-speaks only on a *new* condition or 1.5x growth: a hook that nags get
 then it is worth nothing at the moment it would have mattered. Rates are an overridable estimate,
 never stored as truth.
 
+## 9d. Rotation as compaction; the front desk
+
+**Compaction is the rotation mechanism.** It is what produced the $0.23 figure, and the harness
+exposes its trigger point (`autoCompactWindow`, 100K–1M). Two things made it insufficient on its
+own: it fired late, and the summary is a recollection of state. The fixes are a Paseo `session_open`
+hook that sets the window to ~200K for Claude agents, and a `SessionStart` hook on `compact|resume`
+that runs `orch resume` — roster, inbox state, plan document, front desk — printed from disk into the
+fresh context. Nothing about the program depends on what the summary kept; Principle 1 applied to
+compaction. Full agent replacement is the fallback for a summary that went wrong, not the routine.
+
+**Hygiene gets one deterministic nudge.** By composition, 304KB of that orchestrator's context was
+shell heredocs writing briefs and review documents inline — doc-writer work done at frontier tier
+and then re-read forever. A `PreToolUse` hook notes any large `Write`/`Edit`/`Bash` input once per
+cooldown. It never blocks, because the content is sometimes rightly the orchestrator's; it makes the
+choice visible at the moment it is made.
+
+**The front desk** is the pair pattern from the first design pass, revived with a cost justification
+and a narrower job. Measured, a third of one session's human turns were routing — approvals, task
+adds, status — at $5–20 each because a frontier orchestrator turned to answer them. An economy-tier
+router takes those: it forwards verbatim to the orchestrator's inbox, answers status from files, and
+relays the orchestrator's questions back. Its whitelist is the design; a cheap model that *helps* is
+the failure mode, so it may not paraphrase, decide, spawn, or edit. The saving it produces directly
+is second-order (~12% of that session). Its first-order value is structural: the human's chat surface
+is no longer attached to the orchestrator, so the orchestrator becomes headless — no prose to
+re-read — and can be compacted or replaced without the human noticing. It is phase-gated: the
+frontier orchestrator plans in direct conversation, then *proposes* the front desk once the human's
+messages have become routing, and sets it up as an ordinary dispatch. The human can always bypass it.
+
+The tracker keeps one writer throughout. The front desk writes only to inboxes, which are
+multi-writer safe by construction, and claims its own inbox in its own worktree.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.

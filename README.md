@@ -64,6 +64,8 @@ don't need one, and handles only dispatching, tracking and verifying delegated w
 | **The orchestrator ends up doing the work** | Merging and landing arrive after planning, so they never get the delegate-or-inline decision and default to the priciest agent you have. Landing gets a standing lane, emergent work is re-decided explicitly, and each brief declares who reads its diff before it lands. |
 | **You wait to tell it something** | Input for a busy agent goes to an append-only inbox and is delivered at the end of its turn, so nothing races a running task and nothing has to be timed. A turn-end hook ships with the skill and costs nothing when the inbox is empty. |
 | **The bill balloons and you find out late** | `orch cost` reads the harness transcript, so measuring is free. The same turn-end hook warns when the orchestrator's context, the fan-out width, or a budget you set crosses a threshold — and stays quiet otherwise. Cache reads, not reasoning, are the line that grows; the skill says which levers actually move it. |
+| **A long session gets expensive just by being long** | Compaction is treated as rotation and made to fire early — the Paseo plugin sets the auto-compact window to about 200K — and a session-start hook re-derives the roster, inbox and plan from disk afterwards, so nothing depends on the summary. |
+| **You are paying a frontier model to hear "approved"** | Once execution is routine, the orchestrator can propose a front desk: an economy-tier router that forwards your words verbatim to its inbox, answers status from files, and relays its questions. The orchestrator goes headless and cheaper; you can always open it directly. |
 
 ### Substrates
 

@@ -35,6 +35,10 @@ const SETTLE_DELAY_MS = 1000;
 
 const ORCH = resolveOrch();
 
+// Tokens. Empty string disables. Must be a plain integer between 100000 and
+// 1000000; the harness clamps anything else to its minimum.
+const AUTOCOMPACT_WINDOW = process.env.ORCH_AUTOCOMPACT_WINDOW ?? "200000";
+
 // Deliveries already in flight. A second delivery for the same agent would `send`
 // while the first send's turn is still running, and a prompt landing mid-turn
 // destroys that turn on Paseo.
@@ -88,8 +92,23 @@ export default function contribute(server: PluginServerContext) {
     const existing = request.env?.ORCH_INBOX_TARGET;
     const target = existing ?? request.agentId;
     targets.set(request.agentId, target);
-    if (existing) return undefined;
-    return { ...request, env: { ...request.env, ORCH_INBOX_TARGET: target } };
+
+    const env: Record<string, string> = { ...request.env };
+    let changed = false;
+    if (!existing) {
+      env.ORCH_INBOX_TARGET = target;
+      changed = true;
+    }
+    // Compaction is the cheap rotation. Measured, the same orchestrator cost 5.9x
+    // more per model call at 668K of context than at 88K, and the harness only
+    // compacts near the window limit unless told otherwise. A low window makes
+    // every Claude agent rotate before the tax bites; a worker with a brief and a
+    // progress artifact loses nothing to it.
+    if (AUTOCOMPACT_WINDOW && !env.CLAUDE_CODE_AUTO_COMPACT_WINDOW && request.provider === "claude") {
+      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = AUTOCOMPACT_WINDOW;
+      changed = true;
+    }
+    return changed ? { ...request, env } : undefined;
   });
 
   server.on("agent.turn_ended", async (event: any, context: HookContext) => {

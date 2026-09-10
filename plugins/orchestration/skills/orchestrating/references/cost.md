@@ -92,21 +92,59 @@ Rates are an estimate for advisory purposes, not a bill. Override them with `ORC
 `rates.json` in the program directory rather than editing the script, so a price change is not a code
 change.
 
-## Rotating
+## Rotating — compaction, made early and lossless
 
-When the advisory fires, and before the human's next big ask rather than in the middle of one:
+Compaction already *is* rotation: it is what dropped that session from $1.35 to $0.23 a call. The
+only thing wrong with it was timing — the harness waited until the window was nearly full, so the
+session spent five hundred calls in the expensive band first — and the fact that the summary is a
+recollection of state rather than the state itself. Both are fixed without a new agent.
 
-1. **Land and close what is finished.** A rotation with open, unconsumed entries hands the next
-   orchestrator work it cannot describe.
-2. **Patch the plan document with anything ruled but not yet written down.** This is the only state
-   that cannot be re-derived, and it is the whole reason rotation is safe.
-3. **Write a handoff note** naming the program, the tracker id, the plan document, what is in flight,
-   and any ruling too fresh to have landed anywhere else. Where the harness offers a handoff skill,
-   use it rather than inventing a format.
-4. **Start a fresh orchestrator on the note**, and have it reconcile before acting — tracker, then
-   substrate, then the operating system, per `liveness.md`. Its first act is `orch inbox claim`.
-5. **Close the old session.** Two orchestrators driving one program is the split-brain that
-   `state.md` designs against.
+**Make it early.** The harness's auto-compact window is configurable from 100K to 1M tokens. For an
+orchestrator, set it around 200K:
 
-Rotation is not failure recovery. It is the cheapest thing in this file, and the only one that
-resets the tax rather than slowing its growth.
+| Where | How |
+|---|---|
+| Paseo-hosted agents | the bundled `assets/paseo-inbox-plugin/` injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` on session open; override with `ORCH_AUTOCOMPACT_WINDOW`, empty to disable |
+| Claude Code CLI | `/autocompact 200k` in the session, or `autoCompactWindow` in `.claude/settings.json` |
+
+A worker with a brief file and a progress artifact loses nothing to an early compaction either; the
+setting is safe program-wide.
+
+**Make it lossless.** This skill's front matter registers a session-start hook on `compact` and
+`resume` that runs `orch resume`: the roster, the inbox state, the plan document path, and the front
+desk if one exists, printed from disk into the fresh context. Nothing about the program's state
+depends on what the summary chose to keep. Add a `# Compact instructions` section to the repo's
+`CLAUDE.md` if there is conversational state worth steering the summary toward — rulings mid-flight,
+a decision the human made but that has not landed in the plan document yet.
+
+**Before compacting, if you have the choice**, do the two things a summary cannot: land and close
+what is finished, and patch the plan document with anything ruled but not yet written down. Then
+compact at a seam rather than mid-request.
+
+**Full replacement** — a fresh agent on a handoff note — is the fallback for when a summary has gone
+wrong, not the routine. With a front desk in place (`frontdesk.md`) it costs the human nothing,
+because their chat surface was never attached to you.
+
+## Hygiene rules, with the numbers that justify them
+
+Measured composition of what one orchestrator wrote into its own permanent context:
+
+| Source | Size |
+|---|---|
+| Shell heredocs over 2KB — briefs and review docs written inline | 304KB in 62 writes |
+| Prose to the human | 111KB in 150 messages |
+| Worker launch prompts | 31KB in 53 spawns |
+
+Four rules follow, each checkable:
+
+1. **Anything longer than a paragraph is authored by a worker.** A brief is a short delta on the
+   template and the standing rules. A review document belongs to the lane that did the work. A plan
+   patch is a doc writer's job with the ruling handed over verbatim. The PreToolUse hook in this
+   skill's front matter says so at the moment a large input is about to land, once per ten minutes
+   (`ORCH_GUARD_BYTES`, `ORCH_GUARD_COOLDOWN`). It never blocks; sometimes the content is rightly
+   yours.
+2. **Independent tool calls go in one message.** Each model call re-reads the whole context. Median
+   twelve calls a turn, maximum sixty-one; every one avoided is the full context size saved.
+3. **Large reads happen in a worker.** The worker's context dies with it. Yours does not.
+4. **Status goes to files, not to chat.** During execution, tell the human what changed in a line or
+   two and put the rest in the plan document. With a front desk, say nothing in your own session at all.

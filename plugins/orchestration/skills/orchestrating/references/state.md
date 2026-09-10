@@ -81,8 +81,11 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch inbox peek [--to T]` | pending count; exit 3 when empty |
 | `orch inbox drain [--to T] [--format text\|json\|hook]` | print pending items and mark delivered |
 | `orch inbox list [--to T] [--all]` | the inbox log, delivered items included |
-| `orch cost [--transcript P] [--json]` | calls, context, cost per call, share by component |
+| `orch cost [--transcript P \| --for T] [--json]` | calls, context, cost per call, share by component |
 | `orch budget [--set N]` | show or set this program's spend limit in USD |
+| `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
+| `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
+| `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that
 boundary is why the adapters stay swappable. `prune` likewise takes the live agent set as an
