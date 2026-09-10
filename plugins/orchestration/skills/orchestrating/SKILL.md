@@ -155,10 +155,9 @@ archive yourself.** `CLOSE` interrupts the turn that calls it, so you cannot obs
 and the inbox does not follow you. Run `orch rotate begin`, spawn what it prints in your own
 worktree, and stop; the successor claims the inbox and closes you. `references/rotation.md`.
 
-**Propose a front desk once execution is routine.** When the plan is written, the first wave is out,
-and the human's recent messages are approvals and task adds rather than decisions, offer a cheap
-router between them and you: it forwards verbatim, answers status from files, relays your questions.
-You go headless and cheaper; the human can always open you directly. `references/frontdesk.md`.
+**Propose a front desk once execution is routine.** The turn-end hook raises `FRONT-DESK` when the
+human's own turns have become routing traffic. It fires once; the offer is theirs to accept, and they
+can always open you directly. `references/frontdesk.md`.
 
 **Tuning.** `RETUNE` changes a running worker's model or effort without touching its instructions.
 It is the only safe way to influence work already underway; prefer starting cheap and escalating.

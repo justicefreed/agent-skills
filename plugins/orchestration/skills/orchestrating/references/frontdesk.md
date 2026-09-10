@@ -16,6 +16,24 @@ The orchestrator proposes; the human decides. Propose when all three hold:
 - the last several human messages were approvals, task adds, or status questions, not decisions;
 - you expect the program to run long enough that the saving is real — a couple of hours or more.
 
+**The turn-end hook raises this for you.** Across ten recorded programs a front desk was never once
+proposed, because the three conditions above lived only as prose and nothing measured them. `orch
+cost` now emits a `FRONT-DESK` advisory when the human's own turns have become routing traffic:
+the largest cluster of near-identical short turns reaches `ORCH_FRONTDESK_RELAY` (6), the session
+has at least `ORCH_FRONTDESK_MIN_TURNS` (20) human turns, and at least `ORCH_FRONTDESK_DISPATCHES`
+(6) dispatches are open.
+
+Clustering is the whole signal, and it is a strong one: measured across recorded programs, *no*
+piece of genuine human prose ever repeated its opening words, while machine-shaped pointers
+(`[track] T-015 was ruled resolved. Run: ...`) repeated constantly. Harness and substrate envelopes
+— `<paseo-system>`, `<task-notification>`, slash-command echoes, interrupt artifacts — are excluded
+before counting, because they cluster perfectly and are *not* work a front desk can absorb; they are
+your own event feed. One program showed a relay cluster of 8 where every other showed 1.
+
+The advisory fires **once per program**, deliberately: it asks the human to authorise an extra
+agent, so a declined proposal must not return every turn. It is a prompt to ask, never a decision —
+propose it in your own words and let them choose.
+
 Do **not** propose it during planning. Planning is a conversation, and a router in the middle of a
 conversation loses meaning and adds latency. Say plainly that the human can open you directly at any
 time; the front desk is a convenience, not a gate.

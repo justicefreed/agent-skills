@@ -107,7 +107,7 @@ in that worker's brief front matter. A child recovers its id from its brief, or 
 when it has its own worktree. If neither works it must **ask, never mint** — two tracker files for
 one job is a split-brain where each half is internally consistent and neither is complete.
 
-## Two records that are neither tracker nor inbox
+## Records that are neither tracker nor inbox
 
 `compaction.json` and `rotation.json` sit beside the tracker in the program directory, and both are
 there for the same reason: they carry a fact **the next session cannot re-derive**.
@@ -121,6 +121,14 @@ A rotation record is the obligation the *successor* inherits — which inbox to 
 close — and it must survive the predecessor going away mid-handoff, which is precisely the case it
 exists for. It is deleted on `rotate complete`, and a record still pending after ten minutes raises
 an advisory on the turn-end hook. That is the dangling-session detector.
+
+Seven smaller sidecars share that directory — `budget.json`, `rates.json`, `transcripts.json`,
+`frontdesk.json`, and the fire-once markers `cost-warned.json`, `guard-warned.json` and
+`frontdesk-suggested.json`. **Only files named `root`, `root.1`, `root.1.2` are trackers**, and the
+recursive reader filters on exactly that grammar. It has to: a sidecar has no tracker schema
+version, so a reader that globbed `*.json` aborted on the first one it met. Callers that swallowed
+the error then saw an empty program, which is why the fan-out advisory silently reported zero open
+dispatches once a program acquired any sidecar at all. Add a sidecar freely; never name one `root*`.
 
 ## The inbox is state with different rules
 

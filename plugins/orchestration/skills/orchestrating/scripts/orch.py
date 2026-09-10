@@ -635,6 +635,16 @@ def _read_all_trackers(repo_key: str, program: str,
     if recursive:
         if not os.path.isdir(pdir):
             return []
+        # Only tracker-shaped names. The program directory is also home to nine
+        # sidecar records -- budget.json, compaction.json, rotation.json,
+        # transcripts.json and the warn markers -- and `load_tracker` rejects
+        # anything without a matching schema version, so listing every `*.json`
+        # meant the first sidecar aborted the whole comprehension. Callers that
+        # swallow OrchError then saw an empty program: that is why the FAN-OUT
+        # advisory reported zero open dispatches from the moment a program
+        # acquired its first sidecar, and why `whoami` failed with a complaint
+        # about budget.json. A genuinely corrupt tracker must still raise, so
+        # this filters by NAME and never by whether the parse succeeded.
         names = sorted(f[:-5] for f in os.listdir(pdir)
                        if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
         return [(n, load_tracker(os.path.join(pdir, n + ".json"))) for n in names]
@@ -1198,6 +1208,15 @@ CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
 # Fan-out width past which a program is usually generating more intake than it
 # can consume. Advisory only -- there is no safe universal cap.
 FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
+# Conditions for PROPOSING a front desk. Calibrated against seven recorded
+# programs: the largest relay cluster was 8 in the one program where the human
+# had visibly become the router, and <=5 in every other, so 6 separates them
+# with room either side. The floor on total turns stops a three-message session
+# from firing on a coincidence, and the dispatch floor keeps the suggestion away
+# from programs too small to need a relay.
+FRONTDESK_RELAY_TURNS = int(os.environ.get("ORCH_FRONTDESK_RELAY", 6))
+FRONTDESK_MIN_TURNS = int(os.environ.get("ORCH_FRONTDESK_MIN_TURNS", 20))
+FRONTDESK_DISPATCHES = int(os.environ.get("ORCH_FRONTDESK_DISPATCHES", 6))
 
 
 def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
@@ -1246,6 +1265,70 @@ def find_transcript(args: argparse.Namespace) -> Optional[str]:
     return max(files, key=os.path.getmtime) if files else None
 
 
+# A human turn that is one of many near-identical messages is RELAY traffic:
+# the human standing between two agents and forwarding pointers by hand. That is
+# precisely what a front desk exists to absorb, and it is measurable with no
+# model tokens -- normalise each human turn to its opening words with digits
+# masked, then count the largest cluster. Substantive short asks ("add X to
+# gitignore") do not cluster; "[track] T-025 is done. Run: ..." does.
+RELAY_TEMPLATE_WORDS = int(os.environ.get("ORCH_RELAY_WORDS", 4))
+# A routing pointer is short. Measured across three programs, the clustered
+# human messages were 124-201 characters ("[track] T-015 was ruled resolved.
+# Run: ...") while every genuine piece of human prose was unique -- human
+# writing simply does not repeat its opening four words. The cap keeps a long
+# clustered message, which cannot be a pointer, out of the numerator.
+RELAY_MAX_CHARS = int(os.environ.get("ORCH_RELAY_MAX_CHARS", 600))
+
+
+def _relay_template(text: str) -> str:
+    masked = re.sub(r"\d+", "#", text.lower())
+    words = re.sub(r"[^a-z#]+", " ", masked).split()
+    return " ".join(words[:RELAY_TEMPLATE_WORDS])
+
+
+def _human_turn_text(line: str) -> Optional[str]:
+    """The human's own words from one transcript line, or None.
+
+    Tool results are also `type: user` rows and outnumber real turns by more
+    than ten to one, so they are rejected by substring before any JSON parse --
+    this function runs on every line of a file that can reach hundreds of MB.
+    """
+    if '"type":"user"' not in line and '"type": "user"' not in line:
+        return None
+    if '"toolUseResult"' in line:
+        return None
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    if row.get("type") != "user" or row.get("isMeta"):
+        return None
+    content = (row.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(c, dict) and c.get("type") == "tool_result"
+               for c in content):
+            return None
+        text = " ".join(c.get("text", "") for c in content
+                        if isinstance(c, dict))
+    elif isinstance(content, str):
+        text = content
+    else:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # Not the human speaking. Anything in an angle-bracket envelope is injected
+    # by the harness or the substrate -- slash-command echoes, system reminders,
+    # `<paseo-system>` schedule firings, `<task-notification>` completions -- and
+    # an interrupt artifact is not a message at all. All of these cluster
+    # perfectly, so leaving them in would forge the very signal being measured,
+    # and none of them is work a front desk could absorb: they are the
+    # orchestrator's own event feed, not the human acting as a router.
+    if text.startswith("<") or text.startswith("[Request interrupted"):
+        return None
+    return text
+
+
 def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     """Summarise a harness transcript's model calls.
 
@@ -1257,9 +1340,17 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     cost = 0.0
     recent: List[Tuple[int, float]] = []          # (context, cost) per step
     models: Dict[str, int] = {}
+    turn_shapes: Dict[str, int] = {}              # relay template -> count
+    human_turns = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                turn = _human_turn_text(line)
+                if turn is not None:
+                    human_turns += 1
+                    if len(turn) <= RELAY_MAX_CHARS:
+                        shape = _relay_template(turn)
+                        turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
                 if '"usage"' not in line:
                     continue
                 try:
@@ -1301,6 +1392,8 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
         "tokens": totals,
         "cost": cost,
         "context": window[-1][0] if window else 0,
+        "human_turns": human_turns,
+        "relay_turns": max(turn_shapes.values()) if turn_shapes else 0,
         "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
         "models": models,
         "shares": {k: (totals[k] * rate_for(max(models, key=models.get) if models else "",
@@ -1470,6 +1563,9 @@ def cmd_cost(args: argparse.Namespace) -> int:
         stale = rotation_advisory(load_rotation(repo_key, program))
         if stale:
             advisories.insert(0, stale)
+        desk = frontdesk_advisory(repo_key, program, usage, open_entries)
+        if desk:
+            advisories.append(desk)
 
     if args.format == "json":
         print(json.dumps({**usage, "advisories": advisories,
@@ -1484,6 +1580,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
                 "context.\n\n%s\n" % (usage["cost"], usage["cost_per_step"],
                                       usage["context"] // 1000,
                                       "\n\n".join(advisories)))
+        _mark_frontdesk_suggested(repo_key, program, advisories)
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "Stop", "additionalContext": text}}))
         return 0
@@ -1504,6 +1601,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
         print("open work    %d dispatches" % open_entries)
     if budget.get("limit"):
         print("budget       $%s" % budget["limit"])
+    _mark_frontdesk_suggested(repo_key, program, advisories)
     for line in advisories:
         print("\n! %s" % line)
     if not advisories:
@@ -1660,6 +1758,63 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _frontdesk_marker(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "frontdesk-suggested.json")
+
+
+def frontdesk_advisory(repo_key: str, program: str, usage: Dict[str, Any],
+                       dispatches: int) -> Optional[str]:
+    """Propose a front desk once the human has become the router.
+
+    Every other threshold in this skill is enforced here rather than described
+    in prose, and this one was the exception: the trigger existed only as a
+    paragraph in `SKILL.md`, so across ten recorded programs a front desk was
+    never once proposed. This is that paragraph made measurable.
+
+    Pure -- it reads state but writes none, so a caller that decides not to
+    emit does not burn the one proposal. `_mark_frontdesk_suggested` does that.
+    """
+    if _load_json(frontdesk_path(repo_key, program)).get("target"):
+        return None            # already has one
+    if _load_json(_frontdesk_marker(repo_key, program)):
+        return None            # already proposed once
+    relay = usage.get("relay_turns", 0)
+    turns = usage.get("human_turns", 0)
+    if (relay < FRONTDESK_RELAY_TURNS or turns < FRONTDESK_MIN_TURNS
+            or dispatches < FRONTDESK_DISPATCHES):
+        return None
+    return (
+        "FRONT-DESK — %d of the human's %d turns in this session are "
+        "near-identical routing messages, and %d dispatches are open. They are "
+        "acting as your router, which is work an agent can do. Offer a front "
+        "desk: a cheap agent that owns the human's inbox, answers status from "
+        "the tracker and the plan document, and queues only decisions for you. "
+        "Propose it and let them choose — then `orch frontdesk --set <handle>`. "
+        "Procedure: references/frontdesk.md."
+        % (relay, turns, dispatches)
+    )
+
+
+def _mark_frontdesk_suggested(repo_key: Optional[str], program: Optional[str],
+                              advisories: List[str]) -> None:
+    """Spend the one proposal, at the moment it is actually shown.
+
+    At most once per program, deliberately. An unwanted front desk suggestion
+    is expensive -- it asks the human to authorise a whole additional agent --
+    so a declined proposal must not return every turn. The other advisories
+    restate a condition that is still true; this one asks for a decision the
+    human may have already made.
+    """
+    if not repo_key or not program:
+        return
+    if not any(a.startswith("FRONT-DESK") for a in advisories):
+        return
+    try:
+        _save_json(_frontdesk_marker(repo_key, program), {"at": _now()})
+    except OSError:
+        pass
+
+
 def cmd_frontdesk(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -1685,6 +1840,25 @@ def cmd_frontdesk(args: argparse.Namespace) -> int:
 
 GUARD_BYTES = int(os.environ.get("ORCH_GUARD_BYTES", 6000))
 GUARD_COOLDOWN_S = int(os.environ.get("ORCH_GUARD_COOLDOWN", 600))
+# A document written inline through a shell heredoc gets its own, much lower
+# floor. Measured over one program's 42 heredoc-authored briefs: median 4.4KB,
+# min 1.4KB, 220KB in total, and 32 of the 42 sat UNDER GUARD_BYTES -- so the
+# byte floor that is right for an arbitrary large tool input let three quarters
+# of the single largest self-inflicted context item through. The shape is the
+# signal here, not the size: `cat > brief.md <<EOF` is a document being
+# authored by the orchestrator no matter how long it runs.
+GUARD_HEREDOC_BYTES = int(os.environ.get("ORCH_GUARD_HEREDOC_BYTES", 1200))
+_DOC_HEREDOC_RE = re.compile(
+    r"""(?:^|[;&|]|\bthen\b|\bdo\b)\s*(?:cat\s*>>?|tee\s*-?a?)\s*"""
+    r"""[^\s;&|<>]+\.(?:md|markdown|mdx)["']?\s*<<""",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def _is_doc_heredoc(name: str, tool_input: Dict[str, Any]) -> bool:
+    """Is this Bash call authoring a markdown document inline?"""
+    if name != "Bash":
+        return False
+    return bool(_DOC_HEREDOC_RE.search(str(tool_input.get("command", ""))))
 
 
 def _tool_input_size(name: str, tool_input: Dict[str, Any]) -> int:
@@ -1711,7 +1885,8 @@ def cmd_guard(args: argparse.Namespace) -> int:
     if not isinstance(name, str) or not isinstance(tool_input, dict):
         return 0
     size = _tool_input_size(name, tool_input)
-    if size < GUARD_BYTES:
+    heredoc = _is_doc_heredoc(name, tool_input)
+    if size < (GUARD_HEREDOC_BYTES if heredoc else GUARD_BYTES):
         return 0
     cwd = payload.get("cwd")
     try:
@@ -1721,26 +1896,49 @@ def cmd_guard(args: argparse.Namespace) -> int:
         return 0
     if not list_programs(repo_key):
         return 0
+    # Cooled down per KIND, so a brief authored by heredoc still speaks when an
+    # unrelated large edit has just warned. One shared timer let the rarer and
+    # more actionable signal be masked by the commoner one.
+    kind = "doc-heredoc" if heredoc else "large-input"
     marker = os.path.join(program_dir(repo_key, program), "guard-warned.json")
     prior = _load_json(marker)
+    stamps = prior.get("kinds")
+    if not isinstance(stamps, dict):
+        stamps = {}
     try:
-        last = datetime.fromisoformat(prior.get("at", "1970-01-01T00:00:00+00:00"))
+        last = datetime.fromisoformat(
+            stamps.get(kind, "1970-01-01T00:00:00+00:00"))
     except ValueError:
         last = datetime.fromtimestamp(0, timezone.utc)
     if (datetime.now(timezone.utc) - last).total_seconds() < GUARD_COOLDOWN_S:
         return 0
+    stamps[kind] = _now()
     try:
-        _save_json(marker, {"at": _now(), "tool": name, "bytes": size})
+        _save_json(marker, {"kinds": stamps, "tool": name, "bytes": size})
     except OSError:
         pass
-    text = (
-        "CONTEXT — this %s input is about %dKB, and it is now permanent context "
-        "for the rest of this session, re-read on every later model call. If it "
-        "is a document (brief body, review doc, plan patch, report), a doc-writer "
-        "worker at economy tier should author it from a one-paragraph spec, and "
-        "you should hold only the path. If it genuinely has to be yours, carry on."
-        % (name, size // 1024)
-    )
+    if heredoc:
+        text = (
+            "CONTEXT — you are authoring a document inline (about %dKB of "
+            "heredoc), and every byte of it is permanent context for the rest "
+            "of this session, re-read on every later model call. Briefs, review "
+            "docs, plan patches and reports are exactly the work to delegate: "
+            "give a doc-writer worker at economy tier a one-paragraph spec and "
+            "hold only the path it returns. Measured in one program: 42 briefs "
+            "written this way, 220KB, most of them small enough to look free. "
+            "If this one genuinely has to be yours, carry on."
+            % (size // 1024 or 1)
+        )
+    else:
+        text = (
+            "CONTEXT — this %s input is about %dKB, and it is now permanent "
+            "context for the rest of this session, re-read on every later model "
+            "call. If it is a document (brief body, review doc, plan patch, "
+            "report), a doc-writer worker at economy tier should author it from "
+            "a one-paragraph spec, and you should hold only the path. If it "
+            "genuinely has to be yours, carry on."
+            % (name, size // 1024)
+        )
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "additionalContext": text}}))
     return 0

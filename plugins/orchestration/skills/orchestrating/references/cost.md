@@ -84,6 +84,11 @@ The skill's turn-end hook runs `orch cost --format hook` and speaks **only** whe
 | Context, rotate now | 400K | `ORCH_CONTEXT_URGENT` |
 | Fan-out too wide to consume | 8 open dispatches | `ORCH_FANOUT_WARN` |
 | Budget | 75% and 100% of the limit | `orch budget --set` |
+| Offer the human a front desk | 6 repeated routing turns, 20 turns, 6 dispatches | `ORCH_FRONTDESK_RELAY` |
+
+The front desk advisory fires at most **once per program** rather than following the rule below —
+it asks the human to authorise another agent, and a declined offer must not come back. Conditions
+and the reasoning behind the relay measurement are in `frontdesk.md`.
 
 It repeats itself only when a *new* condition becomes true or the context has grown by half again,
 because a hook that nags on every turn gets switched off — and then it is worth nothing at the moment
@@ -177,8 +182,16 @@ Four rules follow, each checkable:
    template and the standing rules. A review document belongs to the lane that did the work. A plan
    patch is a doc writer's job with the ruling handed over verbatim. The PreToolUse hook in this
    skill's front matter says so at the moment a large input is about to land, once per ten minutes
-   (`ORCH_GUARD_BYTES`, `ORCH_GUARD_COOLDOWN`). It never blocks; sometimes the content is rightly
-   yours.
+   per kind (`ORCH_GUARD_BYTES`, `ORCH_GUARD_COOLDOWN`). It never blocks; sometimes the content is
+   rightly yours.
+
+   A document authored inline through a shell heredoc gets a **much lower floor** —
+   `ORCH_GUARD_HEREDOC_BYTES`, 1200 bytes, against 6000 for an arbitrary large input. The shape is
+   the signal there, not the size: `cat > brief.md <<EOF` is you writing a document, however short.
+   This matters because the sizes are deceptive. Of the 42 heredoc-authored briefs measured in one
+   program, the median was 4.4KB and **32 of the 42 sat under the ordinary 6000-byte floor** — so
+   the threshold that is right for a large tool input was letting three quarters of the single
+   biggest self-inflicted context item through unremarked.
 2. **Independent tool calls go in one message.** Each model call re-reads the whole context. Median
    twelve calls a turn, maximum sixty-one; every one avoided is the full context size saved.
 3. **Large reads happen in a worker.** The worker's context dies with it. Yours does not.
