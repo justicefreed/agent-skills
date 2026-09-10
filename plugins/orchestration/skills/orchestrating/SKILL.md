@@ -48,8 +48,7 @@ These six generate most of the rules. When a rule below seems arbitrary, it is o
    green, know what would have made it red — and prefer to have seen it red.
 5. **Only do what only you can do.** You are the most expensive agent in the program and the only
    one the human can reach. Work that merely *arrived* in your lap — landing a branch, patching a
-   document — is work you are badly placed to perform. Emergent work gets the same delegate-or-inline
-   decision as planned work, or it defaults to you forever.
+   document — is work you are badly placed to perform.
 6. **Your context is a tax on every remaining step.** It is re-read on every model call: 61% of a
    measured bill, against 3% for reasoning. A large read is a recurring charge, and rotating a
    bloated orchestrator is the cheapest saving available (`references/cost.md`).
@@ -73,9 +72,8 @@ Delegate when at least one holds:
 - you want only the *result*, not the process — the work would otherwise pollute your context
 - a cheaper model or lower effort can do it without materially worse output
 
-Do **not** delegate when the task is a single lookup you could do faster yourself, or when the
-delegation overhead exceeds the work. Fan-out is not free: each worker costs a brief, a record, an
-intake and a closeout.
+Do it inline when the dispatch costs more than the task — but weigh that against what the work's
+residue charges every remaining call, not just the dispatch (`references/delegation.md`).
 
 **Re-ask this question for work that arrives later.** A merge, a fix-up, a document patch — none were
 units of work when you planned, so none were ever marked. They surface at intake with your context
@@ -85,8 +83,8 @@ has a standing home in `references/integration.md`.
 **Keep turns bounded** so the human stays able to reach you. Rules of thumb, and the exceptions that
 justify a long turn, are in `references/availability.md`.
 
-Workers may themselves orchestrate. When a delegated task decomposes further, say so in the brief
-and tell the worker to load this skill. Recommend a fan-out shape rather than leaving it open.
+Workers may themselves orchestrate; a decomposing task says so in its brief and gets a recommended
+fan-out shape.
 
 See `references/delegation.md` for substrate choice, isolation choice, and the archetype catalog
 with model/effort guidance.
@@ -96,14 +94,8 @@ with model/effort guidance.
 ## Step 2 — Locate or mint program state
 
 Before the first dispatch, find the tracker: run `orch programs` (see the Reference map for the
-path). Then:
-
-- **Programs exist and one matches** → use it.
-- **None exist** → mint one. Derive the name from the plan document's directory if there is a plan
-  document, otherwise `default`. **Notify, do not ask.**
-- **Programs exist and none match** → **ask.** This is the one place minting warrants an
-  interruption, because a second namespace alongside an existing one splits your state, and each
-  half will look internally consistent.
+path). Use a matching program if one exists; otherwise mint one and **notify, do not ask**. `orch`
+refuses to guess when others already exist — that is the one place minting warrants an interruption.
 
 A plan document is optional. If one exists, link it and patch it **at the moment a decision is
 ruled** — a ruling that lives only in conversation is the defect. If none exists, the plan lives in
@@ -131,8 +123,8 @@ this worktree's inbox is claimed.
    restating them. A dispatch the tracker does not know about is undispatched work.
 3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree.
 
-Reference the project's standing-rules file; never restate its contents in a brief. Repeated prose
-costs your output tokens on every dispatch and goes stale the first time a rule is corrected.
+Reference the project's standing-rules file; never restate it — repeated prose costs output tokens
+every dispatch and goes stale on the first correction.
 
 **Done when:** a brief file exists, a tracker entry exists naming its worker handle, and the worker
 is running — in that order.
@@ -150,8 +142,8 @@ worker via `ESCALATE`. Peer questions are usually artifact reads in disguise —
 **Queued input.** Anything addressed to a busy agent — including you — goes to its inbox and is
 drained between turns. Nobody sends; senders append. `references/availability.md`.
 
-**Resources.** Global constraints (build capacity, one writer per worktree) are enforced against the
-operating system, never against a tracker or a peer's claim.
+**Resources.** Capacity gates are enforced against the operating system, never against a tracker or
+a peer's claim.
 
 **Rotate before you are expensive.** Compaction is the rotation mechanism, set to fire early; a
 session-start hook re-derives your state from disk afterwards. The turn-end hook warns when context,
@@ -224,20 +216,16 @@ Load these on demand, not up front.
 | `references/closeout.md` | commits, hygiene, resource reclamation |
 | `references/statusline.md` | the status surface for the human: status line, Paseo pill |
 
-**Tooling.** Tracker and inbox operations go through `scripts/orch.py`, resolved relative to this
-skill's base directory. Harness-specific path resolution is in
-`references/substrates/_capabilities.md`. Never edit tracker files by hand: the script enforces the
-required fields, and the enforcement is the point.
+**Tooling.** Tracker and inbox operations go through `scripts/orch.py`; path resolution per harness
+is in `references/substrates/_capabilities.md`. Never edit tracker files by hand — the script's field
+enforcement is the point. This skill's front matter registers hooks that drain, advise, re-derive
+state, check for a compaction loop and guard large inputs; all are silent when there is nothing to
+say. Export `ORCH_SKILL_DIR` if this skill lives somewhere their candidate list does not cover.
 
-**Status for the human.** Do not narrate the roster into chat — it becomes permanent context that
-is re-read on every later turn. `orch statusline` renders it into harness chrome instead, which the
-model never pays for: a Claude Code status line, or the Paseo pill in
-`assets/paseo-inbox-plugin/`. Install once per machine; `references/statusline.md`.
-
-This skill's front matter registers hooks: inbox drain and cost advisory at turn end, state
-re-derivation and a compaction-loop check after compaction, and a note when a large tool input is
-about to become permanent context. All are silent when there is nothing to say. Export `ORCH_SKILL_DIR` if this skill lives
-somewhere the hooks' candidate list does not cover.
+**Status for the human.** Do not narrate the roster into chat — it becomes permanent context re-read
+on every later turn. `orch statusline` renders it into harness chrome the model never pays for: a
+Claude Code status line, or the Paseo pill in `assets/paseo-inbox-plugin/`. Install once per
+machine; `references/statusline.md`.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
 build discipline, formatter exclusions, known traps, output-verbosity preferences. Generate it from
