@@ -149,16 +149,64 @@ checkable than "important."
 Closeout: explicit-path commits while agents are live, entry deletion as the completion criterion,
 resource reclamation by explicit name.
 
+## 9a. Availability, and why the orchestrator kept doing the work
+
+Measured from one three-hour program's transcript: 30 worker dispatches, **zero** integrators, and
+71 of 106 minutes of orchestrator busy time spent landing other agents' work across 20 of 35 turns.
+The orchestrator never *decided* to merge inline; merging arrived at intake and was simply done, on
+the program's most capable model, while the human's queued input waited.
+
+Two structural causes, and one fix each.
+
+**Emergent work never reached the delegate-or-inline decision.** Step 1 marks *planned* units of
+work. A merge, a doc patch, a re-verification are not units when you plan — they surface at intake
+with the orchestrator's context already loaded, which is exactly the condition under which inline is
+cheapest to start and most expensive to finish. Fixes: Principle 5, an explicit re-ask in Step 1, a
+meta-work archetype table, and a standing integrator lane so landing has a home.
+
+**Availability was not a named resource.** Optimising context alone permits a ten-minute inline
+merge, because a merge is cheap in tokens and ruinous in latency. Availability is now the third
+scarce resource, with bounded turns as the rule and stated exceptions for work that genuinely cannot
+be split.
+
+The review question that follows — if the orchestrator no longer reads every diff, who does — is
+answered by observing what `verification.md` actually protects: **two different readers**, not the
+orchestrator specifically. So the integrator is the second reader, at its own tier, and the
+`review:` mode is declared in the brief at dispatch rather than judged at landing time by the agent
+holding the finished diff. `in-brief` is the escape hatch for lanes whose own spec already required
+an independent or adversarial pass; it is honoured only when the report carries that pass's result,
+and escalates rather than silently downgrading when it does not.
+
+## 9b. The inbox
+
+Queued input is an append-only JSONL file per target plus a cursor, drained by the receiver at the
+end of a turn. It exists because §8 established that **no substrate offers a safe send to a running
+agent.** The inbox does not solve that; it removes the send. Senders append, the receiver drains, and
+there is no check-then-send window to lose.
+
+It is the only multi-writer state in the design, and the exception is bought rather than assumed:
+small appends land whole, lines are never mutated, and a line's index never changes — so the one
+mutable file, the cursor, still has exactly one writer, and Principle 3 holds where it decides
+correctness. One claimant per worktree, resting on the existing one-writer-per-worktree rule.
+
+Drain paths, in order of preference: a turn-end hook in this skill's own front matter (covers every
+Claude-harness agent including Paseo-hosted ones, registers on skill load, prints nothing on an empty
+inbox so an idle turn costs zero tokens); an optional bundled Paseo daemon plugin for providers with
+no turn-end hook; and `peek` by hand. The hook reads the working directory from the payload the
+harness pipes it, because a hook is not guaranteed to run where the agent is working.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.
 2. Write through, never write back — the record is a precondition, not a follow-up.
 3. Reduce every writer set to one. Concurrency is designed out, not solved.
 4. An unfalsifiable check is worse than no check.
+5. Only do what only you can do. Emergent work gets the same decision as planned work.
 
 Principles 1–3 generated most of the structure. Principle 4 is why the messaging table above was
 measured rather than inferred — and the measurement overturned two assumptions, including one taken
-from vendor documentation.
+from vendor documentation. Principle 5 was added after measuring a real program against the skill
+and finding the skill silent on its largest cost.
 
 ## 11. Deliberate non-goals
 

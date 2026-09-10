@@ -63,6 +63,23 @@ Effort rungs are likewise relative: **default** (what the model reports as its o
 | **Adversarial reviewer** | attacks a draft's premises | → route the workflow to a committee-style skill | contrasting family / default effort | the first pass found nothing, *and* you have specific reason to doubt that |
 | **Second opinion** | independent judgment on a decision | → route the workflow to an advisor-style skill | contrasting family / default effort | — |
 
+### Meta-work has archetypes too
+
+The work a program generates *about itself* — landing branches, patching plan documents, tidying the
+tracker — is where an orchestrator most often skips this table, because the work arrives at intake
+rather than in a plan. It is ordinary delegable work with ordinary tiers:
+
+| Meta-work | Archetype | Fallback start | Notes |
+|---|---|---|---|
+| Landing a lane; conflict resolution | integrator | default / default | one standing lane, not one worker per merge — `integration.md` |
+| Patching a plan document from a ruling | doc writer | economy / one below default | give it the ruling verbatim; it is transcription, not judgment |
+| Tracker hygiene, orphan sweeps, reclamation | inventory | minimal / lowest | never by glob |
+| Re-running a check someone else's report claimed | verifier | economy / one below default | must state which tree it ran in |
+| Ruling on an escalation; ordering history | **not delegable** | — | you hold the program's context; this is Principle 5's other half |
+
+The last row is the point of the table. Principle 5 cuts both ways: work that only you can do must
+stay with you, and everything else must not.
+
 **Why the defaults sit where they do, and why nothing starts above the provider default.**
 
 - **The provider default is the anchor, not a floor to improve on — on both dials.** In the program
@@ -136,3 +153,7 @@ global agent listing.
 Fan-out is not free — each worker costs a brief, a record, an intake, and a closeout. Do it inline
 when the task is a single lookup, when the delegation overhead exceeds the work, or when you would
 have to explain more context than the task contains.
+
+But weigh that against what inline work costs *you*, not just what the dispatch costs. An inline
+task is billed at your tier, and it makes you unreachable for as long as it runs. "Cheaper than a
+dispatch" is a claim about two numbers, and orchestrators routinely evaluate only one of them.

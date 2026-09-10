@@ -52,7 +52,14 @@ OPTIONAL_BRIEF_FIELDS = (
     "tracker_id",
     "parent_tracker",
     "plan_doc",
+    "review",
+    "review_waiver",
 )
+
+# Who reads this lane's diff before it lands. Declared at dispatch, because it
+# is a property of the spec -- not a judgment the integrator makes at landing
+# time with the work already in front of it and an incentive to wave it through.
+REVIEW_MODES = ("integrator", "in-brief", "none")
 
 # Values that look like compliance but carry no information. Rejecting these is
 # the difference between enforcement and ritual: a required field answered
@@ -378,6 +385,22 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
             % path
         )
 
+    if "review" in fields:
+        mode = str(fields["review"]).strip()
+        if mode not in REVIEW_MODES:
+            raise OrchError(
+                "brief %s: review must be one of %s. Got %r.\n"
+                "`in-brief` claims this lane's own spec requires an independent "
+                "pass, and the integrator will refuse to land unless the report "
+                "actually carries that pass's result." % (path, ", ".join(REVIEW_MODES), mode)
+            )
+        if mode == "none" and not str(fields.get("review_waiver", "")).strip():
+            raise OrchError(
+                "brief %s: review: none requires review_waiver: <why this needs "
+                "no second reader>.\nAn unreviewed lane is a decision someone "
+                "must be able to find later." % path
+            )
+
     if "progress_artifact" in fields:
         if is_placeholder(fields["progress_artifact"]):
             raise OrchError(
@@ -484,6 +507,8 @@ def cmd_open(args: argparse.Namespace) -> int:
         "agent_id": args.agent_id,
         "session_name": None,
         "archetype": fields.get("archetype"),
+        "review": fields.get("review", "integrator"),
+        "review_waiver": fields.get("review_waiver"),
         "model": fields.get("model"),
         "effort": fields.get("effort"),
         "child_tracker": None,
@@ -742,6 +767,344 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# inbox: queued input for a running agent
+# --------------------------------------------------------------------------- #
+#
+# The one place this file accepts MANY writers. Everything else here is
+# single-writer by design (Principle 3), and the inbox earns its exception two
+# ways:
+#
+#   * Appends only. A sender appends one line and never mutates another; a line
+#     once written never moves, so line INDEX is a stable name for an item.
+#     A single small append under O_APPEND lands whole, so concurrent senders
+#     interleave lines but never corrupt one.
+#   * One reader. Only the addressed agent drains, and the cursor -- the only
+#     mutable file -- therefore still has exactly one writer.
+#
+# That combination is what removes the race that makes sending to a running
+# agent unsafe: nobody sends, everybody appends, and the receiver decides when
+# to look. There is no check-then-send window to lose.
+
+INBOX_KINDS = ("approval", "correction", "task", "answer", "fyi")
+
+# A line is refused above this size rather than truncated. Single-write appends
+# are atomic only while they stay small, and an item too big for one line is a
+# document -- so it belongs in a file the item points at, exactly as a brief
+# does. Truncating instead would corrupt the item silently.
+MAX_ITEM_BYTES = 4000
+
+
+def inbox_dir(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "inbox")
+
+
+def inbox_slug(target: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", target.strip())
+    if not slug or slug in (".", "..") or len(slug) > 120:
+        raise OrchError("inbox target %r is not a usable name" % target)
+    return slug
+
+
+def inbox_paths(repo_key: str, program: str, target: str) -> Tuple[str, str]:
+    base = os.path.join(inbox_dir(repo_key, program), inbox_slug(target))
+    return base + ".jsonl", base + ".cursor"
+
+
+def claims_path(repo_key: str) -> str:
+    return os.path.join(state_root(), repo_key, "inbox-claims.json")
+
+
+def _load_claims(repo_key: str) -> Dict[str, Any]:
+    try:
+        with open(claims_path(repo_key), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _worktree_key(start: str) -> str:
+    """This agent's worktree, realpathed.
+
+    Sound as an identity only because of the skill's standing rule that a
+    worktree has exactly one writer. If that rule is broken, two agents claim
+    one inbox and both drain it -- which is why the rule is a rule.
+    """
+    return os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
+
+
+def resolve_target(args: argparse.Namespace, repo_key: str
+                   ) -> Tuple[Optional[str], Optional[str]]:
+    """Return (program, target), or (None, None) when this agent has no inbox.
+
+    Order: explicit flag, then environment, then the claim recorded for this
+    worktree. Never guessed: an agent that drains an inbox addressed to someone
+    else consumes input meant for another lane, and the sender has no way to
+    discover that it happened.
+    """
+    target = getattr(args, "to", None) or os.environ.get("ORCH_INBOX_TARGET")
+    program = getattr(args, "program", None)
+    if target:
+        return (program or resolve_program(repo_key, None)), target
+    claim = _load_claims(repo_key).get(_worktree_key(args.repo))
+    if not claim:
+        return None, None
+    return (program or claim.get("program") or "default"), claim.get("target")
+
+
+def _read_pending(log: str, cursor: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Return (undelivered items, total line count)."""
+    try:
+        with open(log, "r", encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except FileNotFoundError:
+        return [], 0
+    delivered = 0
+    try:
+        with open(cursor, "r", encoding="utf-8") as fh:
+            delivered = int(json.load(fh).get("delivered", 0))
+    except (FileNotFoundError, ValueError, TypeError):
+        delivered = 0
+    items = []
+    for index, line in enumerate(lines[delivered:], start=delivered + 1):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            item = {"kind": "fyi", "body": line, "malformed": True}
+        item["index"] = index
+        items.append(item)
+    return items, len(lines)
+
+
+def _advance_cursor(cursor: str, delivered: int) -> None:
+    os.makedirs(os.path.dirname(cursor), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cursor), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"delivered": delivered, "at": _now()}, fh)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, cursor)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def render_inbox(items: List[Dict[str, Any]], target: str) -> str:
+    head = "INBOX — %d queued item%s for `%s`, delivered now and cleared." % (
+        len(items), "" if len(items) == 1 else "s", target)
+    parts = [head, ""]
+    for item in items:
+        meta = [str(item.get("kind", "fyi"))]
+        if item.get("from"):
+            meta.append("from %s" % item["from"])
+        if item.get("at"):
+            meta.append(str(item["at"]))
+        if item.get("ref"):
+            meta.append("ref %s" % item["ref"])
+        parts.append("[%d] %s" % (item.get("index", 0), " · ".join(meta)))
+        parts.append(str(item.get("body", "")).strip())
+        parts.append("")
+    # The steer matters more than the items. This is the exact moment an
+    # orchestrator starts doing the work itself, because it has just been handed
+    # something small and its context is already loaded.
+    parts.append(
+        "These are queued inputs, not a brief. Route each through the "
+        "delegate-or-inline decision before acting, and keep this turn bounded."
+    )
+    return "\n".join(parts).strip() + "\n"
+
+
+def cmd_inbox_claim(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    worktree = _worktree_key(args.repo)
+    claims = _load_claims(repo_key)
+    prior = claims.get(worktree)
+    if prior and prior.get("target") != args.target and not args.force:
+        raise OrchError(
+            "worktree %s is already claimed by %r (program %r).\n"
+            "Two agents draining one inbox split its items; pass --force only "
+            "if you know the prior claimant is gone."
+            % (worktree, prior.get("target"), prior.get("program"))
+        )
+    claims[worktree] = {"target": args.target, "program": program,
+                        "at": _now()}
+    path = claims_path(repo_key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(claims, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    print("inbox for %s claimed by %r (program %s)"
+          % (worktree, args.target, program))
+    return 0
+
+
+def cmd_inbox_send(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    if not args.to:
+        raise OrchError("--to is required when sending; a sender never guesses "
+                        "whose inbox it is writing to")
+    program = resolve_program(repo_key, args.program)
+    if is_placeholder(args.body):
+        raise OrchError("--body must say something actionable")
+    item = {
+        "at": _now(),
+        "kind": args.kind,
+        "from": args.sender or os.environ.get("ORCH_INBOX_TARGET") or "unknown",
+        "body": args.body,
+    }
+    if args.ref:
+        item["ref"] = args.ref
+    line = json.dumps(item, sort_keys=True) + "\n"
+    encoded = line.encode("utf-8")
+    if len(encoded) > MAX_ITEM_BYTES:
+        raise OrchError(
+            "item is %d bytes, over the %d-byte line limit.\n"
+            "Write the detail to a file and send a body that points at it -- "
+            "the same reason a brief is a file." % (len(encoded), MAX_ITEM_BYTES)
+        )
+    log, _ = inbox_paths(repo_key, program, args.to)
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    # One open, one write, one close: appends interleave but never tear.
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, encoded)
+    finally:
+        os.close(fd)
+    if not args.quiet:
+        print("queued %s for %s" % (args.kind, args.to))
+    return 0
+
+
+def cmd_inbox_peek(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program, target = resolve_target(args, repo_key)
+    if not target:
+        if not args.quiet:
+            print("no inbox claimed for this worktree")
+        return 3
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, _ = _read_pending(log, cursor)
+    if not items:
+        if not args.quiet:
+            print("inbox for %s is empty" % target)
+        return 3
+    if not args.quiet:
+        kinds = ", ".join(sorted({str(i.get("kind", "fyi")) for i in items}))
+        print("%d pending for %s (%s)" % (len(items), target, kinds))
+    return 0
+
+
+def cmd_inbox_drain(args: argparse.Namespace) -> int:
+    """Print undelivered items and advance the cursor.
+
+    Silent and successful when there is nothing to do, because this runs from a
+    turn-end hook on every turn. A drain that printed or failed when idle would
+    make the hook cost tokens forever, and the first thing anyone would do is
+    remove the hook.
+    """
+    if args.format == "hook" and args.repo == ".":
+        # A turn-end hook is not guaranteed to run in the directory the agent is
+        # working in, and the harness says so by putting `cwd` in the payload it
+        # pipes to the hook. Trusting the process cwd instead is how the hook
+        # silently drains the wrong repo's inbox, or none at all.
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program, target = resolve_target(args, repo_key)
+    except OrchError:
+        # A hook fires everywhere, including outside a repo and in sessions
+        # that never orchestrated anything. Refusing loudly there would train
+        # the human to delete the hook.
+        if args.format == "hook":
+            return 0
+        raise
+    if not target:
+        return 0
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, total = _read_pending(log, cursor)
+    if not items:
+        return 0
+    text = render_inbox(items, target)
+    # Cursor advances only after the text is in hand, and the caller must
+    # deliver what it printed: a drain whose output is discarded loses the
+    # items. That is why nothing but the receiver may drain.
+    _advance_cursor(cursor, total)
+    if args.format == "json":
+        print(json.dumps({"target": target, "items": items}, indent=2))
+    elif args.format == "hook":
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": text,
+        }}))
+    else:
+        print(text, end="")
+    return 0
+
+
+def _hook_cwd() -> Optional[str]:
+    """The working directory a turn-end hook payload reports, if any.
+
+    Silent on every failure path: an interactive invocation has a terminal on
+    stdin and must not block, and a payload that is absent or unparseable is
+    simply not a hook invocation.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        raw = sys.stdin.read(65536)
+    except (OSError, ValueError):
+        return None
+    if not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
+
+
+def cmd_inbox_list(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program, target = resolve_target(args, repo_key)
+    if not target:
+        raise OrchError("no inbox target; pass --to or run `orch inbox claim`")
+    log, cursor = inbox_paths(repo_key, program, target)
+    items, total = _read_pending(log, cursor)
+    pending_from = total - len(items) + 1
+    if not args.all:
+        print("%s: %d delivered, %d pending" % (target, total - len(items),
+                                                len(items)))
+        for item in items:
+            line = "  [%d] %s %s" % (item.get("index", 0), item.get("kind"),
+                                     item.get("body", ""))
+            print(line[:200])
+        return 0
+    try:
+        with open(log, "r", encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except FileNotFoundError:
+        lines = []
+    for index, line in enumerate(lines, start=1):
+        mark = "pending " if index >= pending_from else "delivered"
+        print("%s [%d] %s" % (mark, index, line[:400]))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # cli
 # --------------------------------------------------------------------------- #
 
@@ -816,6 +1179,50 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--recursive", action="store_true")
     common(sp)
     sp.set_defaults(func=cmd_prune)
+
+    sp = sub.add_parser("inbox", help="queued input for a running agent")
+    isub = sp.add_subparsers(dest="inbox_command", required=True)
+
+    ip = isub.add_parser("claim",
+                         help="record that this worktree drains a given target")
+    ip.add_argument("--as", dest="target", required=True,
+                    help="inbox name this agent answers to, e.g. root")
+    ip.add_argument("--program")
+    ip.add_argument("--force", action="store_true",
+                    help="override an existing claim on this worktree")
+    ip.set_defaults(func=cmd_inbox_claim)
+
+    ip = isub.add_parser("send", help="append one item to a target's inbox")
+    ip.add_argument("--to", required=True)
+    ip.add_argument("--body", required=True)
+    ip.add_argument("--kind", default="fyi", choices=INBOX_KINDS)
+    ip.add_argument("--ref", help="tracker entry or item this concerns")
+    ip.add_argument("--from", dest="sender")
+    ip.add_argument("--program")
+    ip.add_argument("--quiet", action="store_true")
+    ip.set_defaults(func=cmd_inbox_send)
+
+    ip = isub.add_parser("peek",
+                         help="report pending count; exit 3 when empty")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--quiet", action="store_true")
+    ip.set_defaults(func=cmd_inbox_peek)
+
+    ip = isub.add_parser("drain",
+                         help="print pending items and mark them delivered")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--format", default="text",
+                    choices=("text", "json", "hook"))
+    ip.set_defaults(func=cmd_inbox_drain)
+
+    ip = isub.add_parser("list", help="show the inbox log")
+    ip.add_argument("--to")
+    ip.add_argument("--program")
+    ip.add_argument("--all", action="store_true",
+                    help="include already-delivered items")
+    ip.set_defaults(func=cmd_inbox_list)
 
     return p
 

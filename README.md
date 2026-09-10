@@ -35,7 +35,7 @@ Coordinating work across multiple agents.
 
 | Skill | Invocation | What it does |
 |---|---|---|
-| [`orchestrating`](./plugins/orchestration/skills/orchestrating/SKILL.md) | model-invoked | Decide whether to delegate, choose substrate and isolation, select model and effort, write briefs, track dispatches, verify results |
+| [`orchestrating`](./plugins/orchestration/skills/orchestrating/SKILL.md) | model-invoked | Decide whether to delegate, choose substrate and isolation, select model and effort, write briefs, track dispatches, land finished work, verify results |
 
 Design record: [`docs/DESIGN.md`](./docs/DESIGN.md).
 
@@ -61,6 +61,8 @@ don't need one, and handles only dispatching, tracking and verifying delegated w
 | **Your context compacts mid-program** | Every fact is written down before the action that needs it, so a crash leaves a findable orphan rather than an unknown agent. Nothing re-derivable is stored — liveness is always re-checked, never remembered. |
 | **A worker gets interrupted** | Briefs name a progress file and carry resume instructions, so the worker can work out where it left off. The skill also documents what is genuinely unrecoverable, so you design around it. |
 | **Progress tracking turns into mush** | Two separate things stay separate: the tracker holds open dispatches and deletes them once used; your plan holds items and lives in your repo. One field links them. A plan is optional. |
+| **The orchestrator ends up doing the work** | Merging and landing arrive after planning, so they never get the delegate-or-inline decision and default to the priciest agent you have. Landing gets a standing lane, emergent work is re-decided explicitly, and each brief declares who reads its diff before it lands. |
+| **You wait to tell it something** | Input for a busy agent goes to an append-only inbox and is delivered at the end of its turn, so nothing races a running task and nothing has to be timed. A turn-end hook ships with the skill and costs nothing when the inbox is empty. |
 
 ### Substrates
 

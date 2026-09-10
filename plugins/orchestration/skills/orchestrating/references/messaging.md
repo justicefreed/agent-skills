@@ -25,10 +25,11 @@ Consequences, in order of importance:
 | | Path | Why here |
 |---|---|---|
 | 1 | **Read the artifact, don't ask** | Most cross-lane questions ("what was your suite result?") are answerable from that lane's log or detail file. Zero interruption, zero race, no coordination. |
-| 2 | **Harness-native peer message**, where the worker is also a native session | Queues inside the receiver and drains at end of turn — **race-free by construction**, N senders enqueue in order. Requires the worker be addressable natively, which excludes workers on non-native providers. |
-| 3 | **Deferred send via the tracker** | Provider-agnostic. Park it (`orch update E --pending-message`), send on the finish notification. Not race-free; see below. |
-| 4 | **Direct send to a worker confirmed idle** | Acceptable when you have just verified idle state and are the only sender. |
-| 5 | **Explicit cancel, then re-dispatch** | The honest option when a running worker must be corrected *now*. Destroys work, but says so. |
+| 2 | **Append to the receiver's inbox** | Nobody sends, so there is no check-then-send window to lose. Substrate-independent, N senders, and the receiver drains between turns. Needs the receiver to have a drain path — see `availability.md`. |
+| 3 | **Harness-native peer message**, where the worker is also a native session | Queues inside the receiver and drains at end of turn — **race-free by construction**, N senders enqueue in order. Requires the worker be addressable natively, which excludes workers on non-native providers. |
+| 4 | **Deferred send via the tracker** | Provider-agnostic. Park it (`orch update E --pending-message`), send on the finish notification. Not race-free; see below. |
+| 5 | **Direct send to a worker confirmed idle** | Acceptable when you have just verified idle state and are the only sender. Wait for idle, pause about a second, and re-check — a human who typed in that gap must win. |
+| 6 | **Explicit cancel, then re-dispatch** | The honest option when a running worker must be corrected *now*. Destroys work, but says so. |
 
 Never: a direct send to a running worker as a way of "just asking something."
 

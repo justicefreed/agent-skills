@@ -1,0 +1,8 @@
+{
+  "name": "orch-inbox",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "@getpaseo/plugin": "^0.8.0"
+  }
+}

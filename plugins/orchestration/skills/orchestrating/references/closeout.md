@@ -10,8 +10,13 @@ regardless of who else wrote to the tree, which is precisely why it is dangerous
 a running worker's unstaged work into an unrelated commit, and it cannot fail in a way that warns
 you.
 
-The worker does not commit; the orchestrator does. That keeps the decision about what belongs in
-history with the agent that knows what else is in flight.
+The lane's worker does not commit its own landing. The decision about what belongs in history, and
+in what order, stays with the orchestrator — it is the only agent that knows what else is in flight.
+
+**Authority and labor are separable, and only authority is yours.** Performing the merge, resolving
+the conflict and staging the paths is the integrator lane's job (`integration.md`); ruling on order
+and inclusion is yours. An orchestrator that does both has quietly become the most expensive
+integrator available, and it is unreachable for the duration.
 
 **Ordering rule for paired updates:** patch the **source of truth first**, then any derived or
 presentational copy, then any revision marker. Doing it the other way round produced an inconsistent

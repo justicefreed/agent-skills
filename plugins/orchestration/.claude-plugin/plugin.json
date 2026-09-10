@@ -1,7 +1,7 @@
 {
   "name": "orchestration",
-  "version": "0.1.0",
-  "description": "Orchestrate multi-agent work: decide whether to delegate, choose substrate and isolation, select model and effort, write briefs, track dispatches, and verify results.",
+  "version": "0.2.0",
+  "description": "Orchestrate multi-agent work: decide whether to delegate, choose substrate and isolation, select model and effort, write briefs, track dispatches, land finished work through a standing integrator lane, and verify results.",
   "author": {
     "name": "Justice Reed"
   },

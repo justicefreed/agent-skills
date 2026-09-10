@@ -1,12 +1,18 @@
 ---
 name: orchestrating
-description: Orchestrate work across multiple agents — decide whether to delegate at all, choose the execution substrate and isolation, pick model and effort, write briefs, track dispatches, and verify what comes back. Use when the user wants work fanned out to subagents or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, is deciding whether a task is worth delegating, or when another skill needs the delegation and brief-contract rules.
+description: Orchestrate work across multiple agents — decide whether to delegate at all, choose the execution substrate and isolation, pick model and effort, write briefs, track dispatches, land finished work, and verify what comes back. Use when the user wants work fanned out to subagents or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, is deciding whether a task is worth delegating, needs queued input delivered to a busy agent, or when another skill needs the delegation and brief-contract rules.
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
 ---
 
 # Orchestrating
 
-You are coordinating work that other agents perform. Your scarce resources are **your own context**
-and **the human's attention**. Everything below exists to spend those two well.
+You are coordinating work that other agents perform. Your scarce resources are **your own context**,
+**the human's attention**, and **your own availability** — how long until their next input is acted
+on. Everything below exists to spend those three well.
 
 This skill names no tools. It speaks in **capability verbs**; one substrate adapter maps them to
 concrete calls. If you find yourself reaching for a specific tool before Step 0 has bound an
@@ -14,7 +20,7 @@ adapter, stop — you are about to hard-code the substrate.
 
 ## Principles
 
-These four generate most of the rules. When a rule below seems arbitrary, it is one of these.
+These five generate most of the rules. When a rule below seems arbitrary, it is one of these.
 
 1. **Persist what cannot be re-derived; re-derive what can.** A stored copy of derivable state is
    not a convenience, it is a liability — it competes with the source of truth and wins on cost.
@@ -26,6 +32,10 @@ These four generate most of the rules. When a rule below seems arbitrary, it is 
    sender per worker. Concurrency here is designed out, not solved.
 4. **An unfalsifiable check is worse than no check.** It manufactures confidence. Before believing a
    green, know what would have made it red — and prefer to have seen it red.
+5. **Only do what only you can do.** You are the most expensive agent in the program and the only
+   one the human can reach. Work that merely *arrived* in your lap — landing a branch, sweeping a
+   tree, patching a document — is the work you are worst placed to perform. Emergent work gets the
+   same delegate-or-inline decision as planned work, or it silently defaults to you forever.
 
 ## Step 0 — Bind a substrate
 
@@ -49,6 +59,15 @@ Delegate when at least one holds:
 Do **not** delegate when the task is a single lookup you could do faster yourself, or when the
 delegation overhead exceeds the work. Fan-out is not free: each worker costs a brief, a record, an
 intake and a closeout.
+
+**Re-ask this question for work that arrives later.** A merge, a fix-up, a document patch, a
+re-verification — none of these were units of work when you planned, so none of them were ever
+marked. They surface at intake with your context already loaded, which is exactly why they get done
+inline. Route them back through this step. Landing in particular has a standing home: see
+`references/integration.md`.
+
+**Keep turns bounded** so the human stays able to reach you. Rules of thumb and the exceptions that
+justify a long turn are in `references/availability.md`.
 
 Workers may themselves orchestrate. When a delegated task decomposes further, say so in the brief
 and tell the worker to load this skill. Recommend a fan-out shape rather than leaving it open.
@@ -74,7 +93,11 @@ A plan document is optional. If one exists, link it and patch it **at the moment
 ruled** — a ruling that lives only in conversation is the defect. If none exists, the plan lives in
 session context; say so, and point the human at a handoff skill if they need to transfer it.
 
-**Done when:** exactly one program is bound, and its plan-document link is set or explicitly absent.
+Then **claim your inbox** — `orch inbox claim --as root` — so queued input reaches you at the end of
+a turn instead of racing your current one. One call, once per program.
+
+**Done when:** exactly one program is bound, its plan-document link is set or explicitly absent, and
+this worktree's inbox is claimed.
 
 ## Step 3 — Compose the dispatch, in this order
 
@@ -83,7 +106,9 @@ session context; say so, and point the human at a handoff skill if they need to 
 1. **Write the brief to a file.** Not into the spawn prompt. A file is single-sourced with the
    tracker, survives the worker's own context loss, gives a replacement worker byte-identical
    instructions, and is the only way an interrupted worker can recover its task. Use
-   `assets/BRIEF.template.md`; the contract is in `references/briefs.md`.
+   `assets/BRIEF.template.md`; the contract is in `references/briefs.md`. Set `review:` here — who
+   reads this lane's diff before it lands is a property of the spec, not a call made later with the
+   finished diff in hand (`references/integration.md`).
 2. **Record it**, passing the brief so its front matter supplies the required fields rather than you
    restating them. A dispatch the tracker does not know about is undispatched work.
 3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree.
@@ -105,6 +130,9 @@ short version: mid-task correction does not exist on any substrate, so a correct
 destroys work, or comes from the worker via `ESCALATE`. Peer questions are usually artifact reads in
 disguise — ask the filesystem, not the agent.
 
+**Queued input.** Anything addressed to a busy agent — including you — goes to that agent's inbox
+and is drained between turns. Nobody sends; senders append. See `references/availability.md`.
+
 **Resources.** Global constraints (build capacity, one writer per worktree) are enforced against the
 operating system, never against a tracker or a peer's claim.
 
@@ -122,16 +150,20 @@ For every returned report:
    that context could have failed.
 3. **Escalate to independent verification** when both hold: the same agent authored the change *and*
    its check, and the change is hard to reverse. Not merely "important."
-4. **Graduate the provenance** — what was commissioned, what it produced, what was ruled — into a
+4. **Hand the landing to the integrator lane**, with the report and the brief's `review:` mode.
+   Reading a worker's diff to decide whether it may land is the second reader's job, and the second
+   reader need not be you — `references/integration.md`. What stays yours is this list.
+5. **Graduate the provenance** — what was commissioned, what it produced, what was ruled — into a
    durable in-repo artifact. Then patch the plan document if a ruling came out of it.
 
-**Done when:** the report's central claim is falsifiable and either falsified or corroborated, and
-its provenance lives somewhere durable.
+**Done when:** the report's central claim is falsifiable and either falsified or corroborated, its
+landing is commissioned or ruled unnecessary, and its provenance lives somewhere durable.
 
 ## Step 6 — Closeout
 
 - **Commit with explicit paths** whenever any worker is live. A commit-everything always succeeds,
-  including at sweeping up another lane's uncommitted work.
+  including at sweeping up another lane's uncommitted work. You hold the *authority* over what enters
+  history and in what order; the integrator does the *labor*.
 - **`CLOSE`** the worker, then delete its tracker entry. An entry you cannot delete is an output
   nobody consumed — that is the signal, not a nuisance.
 - **Reclaim resources by explicit name, never by glob**, and never while any build is running.
@@ -147,6 +179,8 @@ Load these on demand, not up front.
 | `references/substrates/_capabilities.md` | Step 0, always — verb vocabulary and detection |
 | `references/substrates/*.md` | the one adapter Step 0 selects |
 | `references/delegation.md` | substrate, isolation, archetype, model and effort |
+| `references/availability.md` | bounded turns, and the inbox for queued input |
+| `references/integration.md` | the standing integrator lane, and who reviews before landing |
 | `references/briefs.md` | brief front matter, body, and report contract |
 | `references/state.md` | tracker layout, ids, and the `orch` command surface |
 | `references/liveness.md` | notifications, heartbeats, reconciliation |
@@ -154,10 +188,14 @@ Load these on demand, not up front.
 | `references/verification.md` | the checks-that-cannot-fail catalog |
 | `references/closeout.md` | commits, hygiene, resource reclamation |
 
-**Tooling.** Tracker operations go through `scripts/orch.py`, resolved relative to this skill's base
-directory. Harness-specific path resolution is in `references/substrates/_capabilities.md`. Never
-edit tracker files by hand: the script enforces the required fields, and the enforcement is the
-point.
+**Tooling.** Tracker and inbox operations go through `scripts/orch.py`, resolved relative to this
+skill's base directory. Harness-specific path resolution is in
+`references/substrates/_capabilities.md`. Never edit tracker files by hand: the script enforces the
+required fields, and the enforcement is the point.
+
+This skill's front matter registers a turn-end hook that drains your inbox. It is silent when the
+inbox is empty, so it costs nothing on an idle turn. Export `ORCH_SKILL_DIR` if this skill lives
+somewhere the hook's candidate list does not cover.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
 build discipline, formatter exclusions, known traps, output-verbosity preferences. Generate it from

@@ -22,6 +22,11 @@ There is deliberately no `NUDGE`. Mid-task instruction of a running worker is no
 any substrate examined — see `../messaging.md` for the evidence. Corrections arrive via `ESCALATE`,
 wait for the worker to finish, or destroy work explicitly.
 
+There is also no verb for the **inbox**. Queuing is a filesystem append and a turn-end drain, so it
+needs no adapter and is available even under `none.md` — which is why it is the preferred way to get
+anything to a busy agent. What *is* substrate-specific is how the drain gets triggered
+(`../availability.md`), and an adapter should say which of those paths it supports.
+
 ## Detection procedure
 
 Run in order and stop at the first match. Bind exactly one adapter.

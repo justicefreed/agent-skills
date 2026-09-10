@@ -76,6 +76,11 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch render [--recursive]` | the same, as markdown |
 | `orch whoami [--worktree P]` | recover a sub-orchestrator's tracker id |
 | `orch prune --alive <ids> [--dry-run]` | drop entries whose agent is gone |
+| `orch inbox claim --as T` | record that this worktree drains inbox `T` |
+| `orch inbox send --to T --body B [--kind K] [--ref E] [--from W]` | append one queued item |
+| `orch inbox peek [--to T]` | pending count; exit 3 when empty |
+| `orch inbox drain [--to T] [--format text\|json\|hook]` | print pending items and mark delivered |
+| `orch inbox list [--to T] [--all]` | the inbox log, delivered items included |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that
 boundary is why the adapters stay swappable. `prune` likewise takes the live agent set as an
@@ -95,9 +100,21 @@ in that worker's brief front matter. A child recovers its id from its brief, or 
 when it has its own worktree. If neither works it must **ask, never mint** — two tracker files for
 one job is a split-brain where each half is internally consistent and neither is complete.
 
+## The inbox is state with different rules
+
+The tracker is one-writer, mutable, and a working set. The inbox files under `<program>/inbox/` are
+the opposite on two of three counts: **many writers, append-only, never mutated.** They are the only
+multi-writer state here, and they are safe because appends of small lines land whole and a line's
+index never changes. The single mutable file per inbox is its `.cursor`, written only by the one
+agent that drains — so Principle 3 holds where it matters.
+
+They are also the one place a log is *wanted*: `orch inbox list --all` is a record of what was asked
+of a lane and when, which no other source of truth carries. See `availability.md` for the contract.
+
 ## Deferred send
 
-For a substrate whose send path replaces a running task (see `messaging.md`), park the message:
+Prefer the inbox: it needs no idle check and cannot lose a race. Where the receiver has no drain path
+at all, park the message on the entry instead:
 
 ```bash
 orch update e1 --pending-message "answer X, then resume per your brief"
