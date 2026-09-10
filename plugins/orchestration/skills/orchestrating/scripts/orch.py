@@ -1054,26 +1054,40 @@ def cmd_inbox_drain(args: argparse.Namespace) -> int:
     return 0
 
 
-def _hook_cwd() -> Optional[str]:
-    """The working directory a turn-end hook payload reports, if any.
+_HOOK_PAYLOAD: Optional[Dict[str, Any]] = None
+_HOOK_PAYLOAD_READ = False
 
-    Silent on every failure path: an interactive invocation has a terminal on
-    stdin and must not block, and a payload that is absent or unparseable is
-    simply not a hook invocation.
+
+def hook_payload() -> Dict[str, Any]:
+    """The turn-end hook's JSON payload, or {} when not running as a hook.
+
+    Read at most once, because stdin is not re-readable. Silent on every
+    failure path: an interactive invocation has a terminal on stdin and must not
+    block, and a payload that is absent or unparseable is simply not a hook
+    invocation.
     """
+    global _HOOK_PAYLOAD, _HOOK_PAYLOAD_READ
+    if _HOOK_PAYLOAD_READ:
+        return _HOOK_PAYLOAD or {}
+    _HOOK_PAYLOAD_READ = True
     try:
         if sys.stdin is None or sys.stdin.isatty():
-            return None
-        raw = sys.stdin.read(65536)
+            return {}
+        raw = sys.stdin.read(1 << 20)
     except (OSError, ValueError):
-        return None
+        return {}
     if not raw.strip():
-        return None
+        return {}
     try:
-        payload = json.loads(raw)
+        parsed = json.loads(raw)
     except ValueError:
-        return None
-    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+        return {}
+    _HOOK_PAYLOAD = parsed if isinstance(parsed, dict) else None
+    return _HOOK_PAYLOAD or {}
+
+
+def _hook_cwd() -> Optional[str]:
+    cwd = hook_payload().get("cwd")
     return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else None
 
 
@@ -1101,6 +1115,325 @@ def cmd_inbox_list(args: argparse.Namespace) -> int:
     for index, line in enumerate(lines, start=1):
         mark = "pending " if index >= pending_from else "delivered"
         print("%s [%d] %s" % (mark, index, line[:400]))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# cost: what the orchestrator's own context is charging per step
+# --------------------------------------------------------------------------- #
+#
+# Measured on a real program: identical work cost $0.42 per model call while the
+# orchestrator carried 118K of context, $1.35 at 668K, and $0.23 after an
+# auto-compaction dropped it to 88K. Cache reads were 61% of the bill, output
+# 16%, and reasoning tokens only ~3%.
+#
+# The consequence is the point of this section: an orchestrator's context is not
+# a private convenience, it is a **tax on every remaining step of the program**.
+# A 20K tool result read once is 20K re-read on every subsequent call. Nothing
+# in a token count makes that visible, so the numbers are computed here instead.
+
+# Per-million-token rates, USD. An ESTIMATE for advisory purposes, current as of
+# 2026-09; override with ORCH_RATES (JSON) or <program>/rates.json rather than
+# editing this table, so a price change does not need a code change.
+DEFAULT_RATES = {
+    "default":  {"in": 15.0, "out": 75.0, "cache_write": 18.75, "cache_read": 1.5},
+    "haiku":    {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
+    "sonnet":   {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
+}
+
+# Context thresholds, in tokens. The first is where the per-step tax starts to
+# dominate; the second is where rotating is almost always cheaper than continuing.
+CONTEXT_WARN = int(os.environ.get("ORCH_CONTEXT_WARN", 250_000))
+CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
+# Fan-out width past which a program is usually generating more intake than it
+# can consume. Advisory only -- there is no safe universal cap.
+FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
+
+
+def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
+    override = os.environ.get("ORCH_RATES")
+    if override:
+        try:
+            return {**DEFAULT_RATES, **json.loads(override)}
+        except ValueError:
+            pass
+    if repo_key and program:
+        path = os.path.join(program_dir(repo_key, program), "rates.json")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return {**DEFAULT_RATES, **json.load(fh)}
+        except (OSError, ValueError):
+            pass
+    return dict(DEFAULT_RATES)
+
+
+def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
+    name = (model or "").lower()
+    for key, value in rates.items():
+        if key != "default" and key in name:
+            return value
+    return rates["default"]
+
+
+def project_dir_for(cwd: str) -> Optional[str]:
+    """The harness transcript directory for a working directory, if it exists."""
+    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))
+    path = os.path.join(base, slug)
+    return path if os.path.isdir(path) else None
+
+
+def find_transcript(args: argparse.Namespace) -> Optional[str]:
+    if getattr(args, "transcript", None):
+        return args.transcript
+    from_hook = hook_payload().get("transcript_path")
+    if isinstance(from_hook, str) and os.path.isfile(os.path.expanduser(from_hook)):
+        return os.path.expanduser(from_hook)
+    pdir = project_dir_for(args.repo if os.path.isdir(args.repo) else ".")
+    if not pdir:
+        return None
+    files = [os.path.join(pdir, f) for f in os.listdir(pdir) if f.endswith(".jsonl")]
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarise a harness transcript's model calls.
+
+    Reads the file streaming and keeps only aggregates, because the whole point
+    is to answer a question about a large file without carrying it anywhere.
+    """
+    totals = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}
+    steps = 0
+    cost = 0.0
+    recent: List[Tuple[int, float]] = []          # (context, cost) per step
+    models: Dict[str, int] = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                message = row.get("message") or {}
+                usage = message.get("usage") or {}
+                if not usage:
+                    continue
+                model = message.get("model") or ""
+                rate = rate_for(model, rates)
+                models[model] = models.get(model, 0) + 1
+                fields = {
+                    "in": usage.get("input_tokens", 0) or 0,
+                    "out": usage.get("output_tokens", 0) or 0,
+                    "cache_write": usage.get("cache_creation_input_tokens", 0) or 0,
+                    "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+                }
+                step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
+                for key, value in fields.items():
+                    totals[key] += value
+                cost += step_cost
+                steps += 1
+                context = fields["in"] + fields["cache_write"] + fields["cache_read"]
+                recent.append((context, step_cost))
+                if len(recent) > 25:
+                    recent.pop(0)
+    except OSError:
+        return {}
+    if not steps:
+        return {}
+    window = recent[-25:]
+    return {
+        "transcript": path,
+        "steps": steps,
+        "tokens": totals,
+        "cost": cost,
+        "context": window[-1][0] if window else 0,
+        "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
+        "models": models,
+        "shares": {k: (totals[k] * rate_for(max(models, key=models.get) if models else "",
+                                           rates)[k] / 1e6 / cost if cost else 0)
+                   for k in totals},
+    }
+
+
+def budget_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "budget.json")
+
+
+def load_budget(repo_key: str, program: str) -> Dict[str, Any]:
+    try:
+        with open(budget_path(repo_key, program), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
+                    open_entries: int) -> List[str]:
+    """Only things worth interrupting for, and each with the action attached."""
+    out = []
+    context = usage.get("context", 0)
+    per_step = usage.get("cost_per_step", 0.0)
+    if context >= CONTEXT_URGENT:
+        out.append(
+            "CONTEXT %dK — every further model call costs about $%.2f, and a "
+            "typical turn is a dozen calls. Rotate now: write a handoff note, "
+            "then hand the program to a fresh orchestrator, which resumes from "
+            "the tracker, the briefs and the plan document. Measured: the same "
+            "work runs ~5x cheaper at a low context."
+            % (context // 1000, per_step)
+        )
+    elif context >= CONTEXT_WARN:
+        out.append(
+            "CONTEXT %dK — at about $%.2f per model call and rising. Stop "
+            "reading anything large into this session; delegate reads and keep "
+            "only conclusions. Plan a rotation."
+            % (context // 1000, per_step)
+        )
+    limit = budget.get("limit")
+    if isinstance(limit, (int, float)) and limit > 0:
+        spent = usage.get("cost", 0.0)
+        if spent >= limit:
+            out.append("BUDGET — about $%.0f spent against a $%.0f limit for this "
+                       "session. Say so plainly and let the human decide whether "
+                       "to continue." % (spent, limit))
+        elif spent >= 0.75 * limit:
+            out.append("BUDGET — about $%.0f of $%.0f used." % (spent, limit))
+    if open_entries >= FANOUT_WARN:
+        out.append(
+            "FAN-OUT %d open dispatches — each one returns a report you must "
+            "read, and intake is what grows this context. Land and close what "
+            "is finished before dispatching more." % open_entries
+        )
+    return out
+
+
+def cmd_cost(args: argparse.Namespace) -> int:
+    quiet = args.format == "hook"
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        repo_key, program = None, None
+    rates = load_rates(repo_key, program)
+    path = find_transcript(args)
+    if not path:
+        if quiet:
+            return 0
+        raise OrchError("no transcript found; pass --transcript")
+    usage = read_usage(path, rates)
+    if not usage:
+        if quiet:
+            return 0
+        raise OrchError("no model calls found in %s" % path)
+
+    open_entries = 0
+    budget: Dict[str, Any] = {}
+    if repo_key and program:
+        budget = load_budget(repo_key, program)
+        try:
+            for _, data in _read_all_trackers(repo_key, program, True, "root"):
+                open_entries += len(data.get("entries", []))
+        except OrchError:
+            pass
+
+    advisories = cost_advisories(usage, budget, open_entries)
+
+    if args.format == "json":
+        print(json.dumps({**usage, "advisories": advisories,
+                          "open_entries": open_entries}, indent=2))
+        return 0
+
+    if quiet:
+        if not advisories or not _should_warn(repo_key, program, usage,
+                                              advisories):
+            return 0
+        text = ("COST — $%.0f this session, ~$%.2f per model call at %dK "
+                "context.\n\n%s\n" % (usage["cost"], usage["cost_per_step"],
+                                      usage["context"] // 1000,
+                                      "\n\n".join(advisories)))
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop", "additionalContext": text}}))
+        return 0
+
+    t = usage["tokens"]
+    print("transcript   %s" % usage["transcript"])
+    print("model calls  %d" % usage["steps"])
+    print("context now  %dK tokens" % (usage["context"] // 1000))
+    print("tokens       in %s · out %s · cache write %s · cache read %s"
+          % tuple("{:,}".format(t[k]) for k in
+                  ("in", "out", "cache_write", "cache_read")))
+    print("cost (est)   $%.2f total · $%.2f per model call (last 25)"
+          % (usage["cost"], usage["cost_per_step"]))
+    print("cost share   %s" % " · ".join(
+        "%s %.0f%%" % (k.replace("_", " "), v * 100)
+        for k, v in sorted(usage["shares"].items(), key=lambda x: -x[1])))
+    if open_entries:
+        print("open work    %d dispatches" % open_entries)
+    if budget.get("limit"):
+        print("budget       $%s" % budget["limit"])
+    for line in advisories:
+        print("\n! %s" % line)
+    if not advisories:
+        print("\nno advisories: context and fan-out are within thresholds.")
+    return 0
+
+
+def _should_warn(repo_key: Optional[str], program: Optional[str],
+                 usage: Dict[str, Any], advisories: List[str]) -> bool:
+    """Warn when something new is true, or when it got materially worse.
+
+    A hook that repeats itself gets switched off, and then it is worth nothing
+    at the moment it would have mattered. The signature is the *set* of
+    advisory kinds, so a newly-blown budget still speaks even if a context
+    warning already fired at this level.
+    """
+    if not repo_key or not program:
+        return True
+    path = os.path.join(program_dir(repo_key, program), "cost-warned.json")
+    context = usage.get("context", 0)
+    signature = "|".join(sorted(a.split(" ")[0] for a in advisories))
+    if context >= CONTEXT_URGENT:
+        signature += "|urgent"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            prior = json.load(fh)
+    except (OSError, ValueError):
+        prior = {}
+    if (prior.get("signature") == signature
+            and context < prior.get("context", 0) * 1.5):
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"signature": signature, "context": context,
+                       "at": _now()}, fh)
+    except OSError:
+        pass
+    return True
+
+
+def cmd_budget(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = budget_path(repo_key, program)
+    if args.limit is None:
+        data = load_budget(repo_key, program)
+        print("budget for %s: %s" % (program,
+                                     ("$%s" % data["limit"]) if data.get("limit")
+                                     else "none set"))
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"limit": args.limit, "at": _now()}, fh)
+        fh.write("\n")
+    print("budget for %s set to $%s" % (program, args.limit))
     return 0
 
 
@@ -1223,6 +1556,18 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--all", action="store_true",
                     help="include already-delivered items")
     ip.set_defaults(func=cmd_inbox_list)
+
+    sp = sub.add_parser("cost", help="what this session is spending, and why")
+    sp.add_argument("--transcript", help="harness transcript (found if omitted)")
+    sp.add_argument("--program")
+    sp.add_argument("--format", default="text", choices=("text", "json", "hook"))
+    sp.set_defaults(func=cmd_cost)
+
+    sp = sub.add_parser("budget", help="show or set this program's spend limit")
+    sp.add_argument("--set", dest="limit", type=float,
+                    help="USD; omit to show the current limit")
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_budget)
 
     return p
 

@@ -195,6 +195,37 @@ inbox so an idle turn costs zero tokens); an optional bundled Paseo daemon plugi
 no turn-end hook; and `peek` by hand. The hook reads the working directory from the payload the
 harness pipes it, because a hook is not guaranteed to run where the agent is working.
 
+## 9c. Cost, measured
+
+Same program, 1,632 model calls, ~$1,100 estimated. Cache reads — re-reading the context on every
+model call — were **61%** of it, output 16%, cache writes 23%, fresh input ~0%. Reasoning tokens were
+about **3%**.
+
+The load-bearing measurement is one orchestrator at three points in one session: $0.42 per model
+call at 118K of context, $1.35 at 668K, and $0.23 after an auto-compaction dropped it to 88K. Same
+agent, same kind of work, 5.9x. By composition that context was 35% tool results, 29% its own
+tool-call text, 32% its own prose and reasoning, and 4% worker notifications — **self-inflicted, not
+imposed by the workers.**
+
+Hence Principle 6: an orchestrator's context is a tax on every remaining step, so a large read is a
+recurring charge. Three consequences the skill did not previously draw:
+
+- **Rotation is a practice, not a recovery path.** The tracker, brief files and plan document already
+  exist to make an orchestrator replaceable; §9 treated that as insurance against compaction. Used
+  deliberately at ~200K, it is the largest available saving.
+- **The effort dial is a trap.** It is the most visible knob and worth ~3%. Turning it down buys
+  almost nothing and makes every decision worse. Say so explicitly, because it is the first thing
+  anyone reaches for.
+- **Fan-out width is an intake problem.** Every open dispatch is a report that must be read, and
+  intake is what grows the context. Width beyond what can be landed is deferred intake, not
+  parallelism.
+
+`orch cost` derives all of this from the harness transcript, so measuring costs no model tokens, and
+the turn-end hook speaks only when a threshold trips — context, fan-out width, or a budget the human
+set. It re-speaks only on a *new* condition or 1.5x growth: a hook that nags gets switched off, and
+then it is worth nothing at the moment it would have mattered. Rates are an overridable estimate,
+never stored as truth.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.
@@ -202,6 +233,7 @@ harness pipes it, because a hook is not guaranteed to run where the agent is wor
 3. Reduce every writer set to one. Concurrency is designed out, not solved.
 4. An unfalsifiable check is worse than no check.
 5. Only do what only you can do. Emergent work gets the same decision as planned work.
+6. Your context is a tax on every remaining step. A large read is a recurring charge.
 
 Principles 1–3 generated most of the structure. Principle 4 is why the messaging table above was
 measured rather than inferred — and the measurement overturned two assumptions, including one taken

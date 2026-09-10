@@ -155,5 +155,10 @@ when the task is a single lookup, when the delegation overhead exceeds the work,
 have to explain more context than the task contains.
 
 But weigh that against what inline work costs *you*, not just what the dispatch costs. An inline
-task is billed at your tier, and it makes you unreachable for as long as it runs. "Cheaper than a
-dispatch" is a claim about two numbers, and orchestrators routinely evaluate only one of them.
+task is billed at your tier, it makes you unreachable for as long as it runs, and — the term nobody
+counts — whatever it leaves in your context is re-read on **every remaining model call of the
+program**. Measured, that residue is the single largest line in an orchestration bill. "Cheaper than
+a dispatch" is a claim about three numbers, and orchestrators routinely evaluate one.
+
+A worker, by contrast, carries a small context and then dies, so its own re-read tax never
+accumulates. See `cost.md` for the measurements.

@@ -63,6 +63,7 @@ don't need one, and handles only dispatching, tracking and verifying delegated w
 | **Progress tracking turns into mush** | Two separate things stay separate: the tracker holds open dispatches and deletes them once used; your plan holds items and lives in your repo. One field links them. A plan is optional. |
 | **The orchestrator ends up doing the work** | Merging and landing arrive after planning, so they never get the delegate-or-inline decision and default to the priciest agent you have. Landing gets a standing lane, emergent work is re-decided explicitly, and each brief declares who reads its diff before it lands. |
 | **You wait to tell it something** | Input for a busy agent goes to an append-only inbox and is delivered at the end of its turn, so nothing races a running task and nothing has to be timed. A turn-end hook ships with the skill and costs nothing when the inbox is empty. |
+| **The bill balloons and you find out late** | `orch cost` reads the harness transcript, so measuring is free. The same turn-end hook warns when the orchestrator's context, the fan-out width, or a budget you set crosses a threshold — and stays quiet otherwise. Cache reads, not reasoning, are the line that grows; the skill says which levers actually move it. |
 
 ### Substrates
 

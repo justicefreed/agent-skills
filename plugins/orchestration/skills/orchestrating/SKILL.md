@@ -6,6 +6,8 @@ hooks:
     - hooks:
         - type: command
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" cost --format hook; done; exit 0'
 ---
 
 # Orchestrating
@@ -20,7 +22,7 @@ adapter, stop — you are about to hard-code the substrate.
 
 ## Principles
 
-These five generate most of the rules. When a rule below seems arbitrary, it is one of these.
+These six generate most of the rules. When a rule below seems arbitrary, it is one of these.
 
 1. **Persist what cannot be re-derived; re-derive what can.** A stored copy of derivable state is
    not a convenience, it is a liability — it competes with the source of truth and wins on cost.
@@ -33,9 +35,12 @@ These five generate most of the rules. When a rule below seems arbitrary, it is 
 4. **An unfalsifiable check is worse than no check.** It manufactures confidence. Before believing a
    green, know what would have made it red — and prefer to have seen it red.
 5. **Only do what only you can do.** You are the most expensive agent in the program and the only
-   one the human can reach. Work that merely *arrived* in your lap — landing a branch, sweeping a
-   tree, patching a document — is the work you are worst placed to perform. Emergent work gets the
-   same delegate-or-inline decision as planned work, or it silently defaults to you forever.
+   one the human can reach. Work that merely *arrived* in your lap — landing a branch, patching a
+   document — is work you are badly placed to perform. Emergent work gets the same delegate-or-inline
+   decision as planned work, or it defaults to you forever.
+6. **Your context is a tax on every remaining step.** It is re-read on every model call: 61% of a
+   measured bill, against 3% for reasoning. A large read is a recurring charge, and rotating a
+   bloated orchestrator is the cheapest saving available (`references/cost.md`).
 
 ## Step 0 — Bind a substrate
 
@@ -60,14 +65,13 @@ Do **not** delegate when the task is a single lookup you could do faster yoursel
 delegation overhead exceeds the work. Fan-out is not free: each worker costs a brief, a record, an
 intake and a closeout.
 
-**Re-ask this question for work that arrives later.** A merge, a fix-up, a document patch, a
-re-verification — none of these were units of work when you planned, so none of them were ever
-marked. They surface at intake with your context already loaded, which is exactly why they get done
-inline. Route them back through this step. Landing in particular has a standing home: see
-`references/integration.md`.
+**Re-ask this question for work that arrives later.** A merge, a fix-up, a document patch — none were
+units of work when you planned, so none were ever marked. They surface at intake with your context
+already loaded, which is exactly why they get done inline. Route them back through this step; landing
+has a standing home in `references/integration.md`.
 
-**Keep turns bounded** so the human stays able to reach you. Rules of thumb and the exceptions that
-justify a long turn are in `references/availability.md`.
+**Keep turns bounded** so the human stays able to reach you. Rules of thumb, and the exceptions that
+justify a long turn, are in `references/availability.md`.
 
 Workers may themselves orchestrate. When a delegated task decomposes further, say so in the brief
 and tell the worker to load this skill. Recommend a fan-out shape rather than leaving it open.
@@ -94,7 +98,9 @@ ruled** — a ruling that lives only in conversation is the defect. If none exis
 session context; say so, and point the human at a handoff skill if they need to transfer it.
 
 Then **claim your inbox** — `orch inbox claim --as root` — so queued input reaches you at the end of
-a turn instead of racing your current one. One call, once per program.
+a turn instead of racing your current one. One call, once per program. If the human named a spend
+limit, record it with `orch budget --set <usd>` so the warning is measured against their intent
+rather than a default.
 
 **Done when:** exactly one program is bound, its plan-document link is set or explicitly absent, and
 this worktree's inbox is claimed.
@@ -135,6 +141,11 @@ and is drained between turns. Nobody sends; senders append. See `references/avai
 
 **Resources.** Global constraints (build capacity, one writer per worktree) are enforced against the
 operating system, never against a tracker or a peer's claim.
+
+**Rotate before you are expensive.** The turn-end hook warns when your context, your fan-out width,
+or a set budget crosses a threshold. Act at a seam, not mid-request: land and close what is finished,
+patch the plan document, write a handoff note, start a fresh orchestrator on it. See
+`references/cost.md`.
 
 **Tuning.** `RETUNE` changes a running worker's model or effort without touching its instructions.
 It is the only safe way to influence work already underway; prefer starting cheap and escalating.
@@ -180,6 +191,7 @@ Load these on demand, not up front.
 | `references/substrates/*.md` | the one adapter Step 0 selects |
 | `references/delegation.md` | substrate, isolation, archetype, model and effort |
 | `references/availability.md` | bounded turns, and the inbox for queued input |
+| `references/cost.md` | what a program actually spends, and rotation |
 | `references/integration.md` | the standing integrator lane, and who reviews before landing |
 | `references/briefs.md` | brief front matter, body, and report contract |
 | `references/state.md` | tracker layout, ids, and the `orch` command surface |

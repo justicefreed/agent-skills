@@ -81,6 +81,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch inbox peek [--to T]` | pending count; exit 3 when empty |
 | `orch inbox drain [--to T] [--format text\|json\|hook]` | print pending items and mark delivered |
 | `orch inbox list [--to T] [--all]` | the inbox log, delivered items included |
+| `orch cost [--transcript P] [--json]` | calls, context, cost per call, share by component |
+| `orch budget [--set N]` | show or set this program's spend limit in USD |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that
 boundary is why the adapters stay swappable. `prune` likewise takes the live agent set as an
@@ -123,6 +125,13 @@ orch update e1 --pending-message "answer X, then resume per your brief"
 On the worker's finish notification, drain **one** message, send it, then verify the turn that
 started is yours; if not, restore it — there is no atomic send, so a lost race looks exactly like a
 delivery. `roster` flags `MSG-QUEUED`.
+
+## Cost state is derived, not stored
+
+`orch cost` reads the harness's own transcript and computes. Nothing about spend is recorded in the
+tracker, because all of it is re-derivable from a file the harness already writes — Principle 1. The
+only stored pieces are the two that are *decisions*: the program's budget, and which advisory was
+last spoken, so the hook does not repeat itself. Both live beside the tracker, not inside it.
 
 ## Deliberate non-goals
 
