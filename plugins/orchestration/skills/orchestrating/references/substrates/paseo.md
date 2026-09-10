@@ -11,9 +11,9 @@ orchestration policy.
 
 | Verb | Call | Semantics | Evidence |
 |---|---|---|---|
-| `SPAWN` | `create_agent` (`title`, `provider`, `initialPrompt`, `settings`, `workspaceId`) | agent-scoped calls create *your* subagent; omit `workspaceId` for your own workspace | documented |
+| `SPAWN` | `create_agent` (`title`, `provider`, `initialPrompt`, `settings`, `workspaceId`) | agent-scoped calls create *your* subagent; omit `workspaceId` for your own workspace. **Always pass `settings.modeId`** — see below | documented |
 | `ISOLATE` | `create_workspace` (`isolation: "worktree"`, `mode: branch-off\|checkout-branch\|checkout-pr`) | **placement never changes parentage** — a cross-workspace child is still your subagent | documented |
-| `POLL` | `get_agent_status` → `status`, `activeTurn`, `attentionReason` | the only reliable idle/running signal available | observed |
+| `POLL` | `get_agent_status` → `status`, `activeTurn`, `attentionReason`, `pendingPermissions` | the only reliable idle/running signal available. `status: running` with a non-empty `pendingPermissions` is a **stalled** worker, not a working one | observed |
 | `HARVEST` | the finish notification's `agent-response`, plus artifacts on disk | | documented |
 | `CLOSE` | `archive_agent` | interrupts if running | documented |
 | `ESCALATE` | worker → parent; see `../messaging.md` for the safe path | | observed |
@@ -21,6 +21,51 @@ orchestration policy.
 | `RETUNE` | `update_agent` (`settings.model`, `thinkingOptionId`, `modeId`) | changes config on a **running** agent; does not touch instructions | documented |
 | `WAKE` | `create_heartbeat` | prompts *you* on a cadence; no update tool — delete and recreate | documented |
 | `SCHEDULE` | `create_schedule` | spawns a **fresh** agent per firing | documented |
+| `ROTATE` | `create_agent` with `workspaceId` **omitted**, then the successor calls `archive_agent` on you | omitting `workspaceId` places the successor in your own workspace, which is both the same worktree and the same tab strip the human was watching. There is no replace-in-place API | documented |
+
+On `ROTATE`, two Paseo facts do the deciding. `archive_agent` **interrupts if running**, so an agent
+that archives itself never reaches its next line and cannot observe the result — the successor must
+be the one to call it. And an agent-scoped `create_agent` already defaults to the caller's workspace,
+so the correct placement is the default one: pass `initialPrompt` verbatim from `orch rotate begin`
+and pass no `workspaceId`. Full order in `../rotation.md`.
+
+## Session mode — the one setting whose default is wrong
+
+`../delegation.md` decides *which* mode a worker gets. Two Paseo facts decide how you pass it.
+
+**Omitting `settings.modeId` does not give you the provider's advertised default.** `list_providers`
+reports `defaultMode: auto` for `claude` and `claude-cursor`. A worker created with no `settings`
+nevertheless comes up `currentModeId: "default"` — whose label is **Always Ask**. Observed directly
+on four subagents halted at the same moment: three on the first `Read` of their own brief, one on a
+reference the brief sent it to. Pass the id explicitly, every time; `orch open` prints the fragment.
+
+**Mode ids are provider-specific, and `inspect_provider` is the only authority.** Do not guess one
+from a label. As observed: `claude` and `claude-cursor` expose `plan`, `default` (Always Ask),
+`acceptEdits`, `auto`, `bypassPermissions`; `cursor` exposes `agent`, `plan`, `ask` plus an
+`auto_accept` toggle under `features` that is **off** by default, so a Cursor worker prompts on ACP
+requests until it is turned on.
+
+### Catching one that got through
+
+A stalled worker reports `status: running` with an empty `attentionReason`, so nothing about its
+lifecycle looks wrong and it is indistinguishable from a worker thinking hard. The permission request
+is the only tell:
+
+| Want | Call |
+|---|---|
+| Sweep every worker at once | `list_pending_permissions` — returns the request, the agent, and a suggested allow rule |
+| One worker | `get_agent_status` → `pendingPermissions` |
+| Be told as it happens | leave `notifyOnFinish` true at `SPAWN`; it fires on **needs permission** as well as on finish |
+
+Treat that notification as a **defect report, not a question to answer and forget**. Answering it
+clears one prompt and leaves the cause in place, so make the two repairs as well: `update_agent`
+(`settings.modeId`) or `set_agent_mode` on the running worker, and `orch permissions --install` so
+the brief read stops prompting for every worker after this one. Then `orch update <e> --mode <id>`,
+so the tracker stops claiming a mode the worker is not in.
+
+Answering on the human's behalf is a judgement, not a formality — the rule in `../messaging.md` about
+laundering permission decisions applies to your own subagents too. A read of a brief you wrote is
+yours to approve. Anything else goes to the human.
 
 ## Send semantics — verified by experiment
 
@@ -55,6 +100,12 @@ Paseo-hosted Claude agents get the turn-end hook from this skill's front matter,
 the baseline and needs no Paseo-specific setup. For agents on providers with no turn-end hook, or for
 a target sitting idle with no turn coming, install `../../assets/paseo-inbox-plugin/`: a daemon-side
 plugin that injects `ORCH_INBOX_TARGET` on session open and drains on `agent.turn_ended`.
+
+The same plugin is also how a Paseo-hosted agent gets an early auto-compact window: it asks
+`orch compaction window` at session open and sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only for a
+long-lived role on a Claude Code provider (`claude`, `claude-cursor`) with a safe measured number.
+Nothing else can set that variable — it is read at launch, so no running session can change its own
+window. See `../cost.md`.
 
 Two facts about it worth knowing before relying on it. There is **no idle event and no timer** in the
 plugin API, so an agent that never takes another turn never drains — the orchestrator must peek on

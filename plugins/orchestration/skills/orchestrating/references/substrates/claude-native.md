@@ -7,7 +7,7 @@ not the process — and for short-lived work where a fresh restart is cheap.
 
 | Verb | Call | Semantics | Evidence |
 |---|---|---|---|
-| `SPAWN` | the subagent-launch tool, with a named agent type; `run_in_background` for long work | **does not survive this session ending** | documented |
+| `SPAWN` | the subagent-launch tool, with a named agent type; `run_in_background` for long work | **does not survive this session ending**; there is no mode parameter — a subagent runs under *your* session's permission mode, so `paseo.md`'s Always Ask trap cannot occur here | documented |
 | `ISOLATE` | that tool's `isolation: "worktree"` option | **temporary and auto-cleaned** — enough for isolation, not for human review | documented |
 | `POLL` | the peer/agent listing tool; the background-task output tool | listing rows observed to show only `interactive · started Nm ago` — **no busy/idle field**, despite the docs describing one | observed |
 | `HARVEST` | the subagent's final report, or its background-task output | the final message is not shown to the user — relay what matters | documented |
@@ -17,6 +17,14 @@ not the process — and for short-lived work where a fresh restart is cheap.
 | `RETUNE` | none | model is fixed at spawn; **no effort dial** — effort comes from the agent definition | documented |
 | `WAKE` | the wakeup/cron scheduling tools | | documented |
 | `SCHEDULE` | the cron-creation tool | | documented |
+| `ROTATE` | **not available for yourself.** A subagent cannot replace its parent, and a session cannot spawn its own successor | a subagent dies with this session, so a "successor" spawned here is not a replacement | documented |
+
+`ROTATE` is the one verb this substrate cannot supply, and the reason is the same one that makes it
+second choice in the detection order: its agents do not outlive the session. Rotating an orchestrator
+here means the **human** starts a fresh session on the handoff note — so `orch rotate begin` still
+applies (write the note, record the rotation), and the new session runs `orch rotate claim` and then
+`orch rotate complete --assume-none-alive`, because ending the old session *is* the close. Tell the
+human that explicitly; it is a step only they can take. See `../rotation.md`.
 
 ## The messaging asymmetry
 

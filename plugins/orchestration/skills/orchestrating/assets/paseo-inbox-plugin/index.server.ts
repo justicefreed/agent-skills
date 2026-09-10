@@ -19,9 +19,78 @@ import { statusRead } from "./shared/status";
 // message outranks an inbox item. This delay is the whole mechanism for that.
 const SETTLE_DELAY_MS = 1000;
 
-// Tokens. Empty string disables. Must be a plain integer between 100000 and
-// 1000000; the harness clamps anything else to its minimum.
-const AUTOCOMPACT_WINDOW = process.env.ORCH_AUTOCOMPACT_WINDOW ?? "200000";
+// Set empty to disable the compaction window entirely. Any other value is
+// ignored: the window is a policy decision, and `orch compaction window` owns
+// it so there is one place to correct rather than two that can disagree.
+const AUTOCOMPACT_ENABLED = process.env.ORCH_AUTOCOMPACT_WINDOW !== "";
+
+// Deny by default. Only a Claude Code harness reads
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW; `claude-cursor` is Claude Code over the
+// Cursor bridge and does read it, while `cursor` is Cursor's own agent and does
+// not. Setting it for a provider that ignores it is merely useless; the reason
+// this list is explicit is the reverse case -- a future Claude-family provider
+// silently inheriting a window nobody measured for it.
+const CLAUDE_HARNESS_PROVIDERS = new Set(
+  (process.env.ORCH_AUTOCOMPACT_PROVIDERS ?? "claude,claude-cursor")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean),
+);
+
+// The harness's own accepted range. Anything outside it is CLAMPED TO THE
+// MINIMUM rather than rejected, which is the failure this bound exists to
+// prevent: a window at or below a session's context floor compacts, lands back
+// above the trigger, and compacts again -- a loop that hangs the agent instead
+// of erroring. `orch` already refuses to recommend such a number; this is the
+// second wall, because a plugin that sets a bad window breaks agents silently.
+const WINDOW_MIN = 100_000;
+const WINDOW_MAX = 1_000_000;
+
+// A session open waits on this. Paseo's hook timeout is 30s and a before hook
+// that fails takes the pending operation down with it, so the subprocess gets a
+// small budget of its own and every failure below degrades to "set no window".
+const WINDOW_TIMEOUT_MS = 5_000;
+
+/**
+ * The auto-compact window this worktree should launch with, or null for none.
+ *
+ * The decision is entirely `orch`'s: it gates on the worktree's claimed inbox
+ * role (only a long-lived orchestrator or front desk benefits from an early
+ * window) and on the measured context floor. Exit 3 means "no window for this
+ * one" and is the ordinary answer, not an error.
+ */
+async function resolveWindow(repo: string, signal: AbortSignal): Promise<number | null> {
+  let stdout = "";
+  try {
+    const result = await orchRun(
+      ["--repo", repo, "compaction", "window", "--explain"],
+      { signal, timeout: WINDOW_TIMEOUT_MS },
+    );
+    stdout = result.stdout;
+    if (result.stderr.trim()) console.log(`[orch-inbox] ${repo}: ${result.stderr.trim()}`);
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    // Exit 3 is the documented "this worktree gets no window" answer. Its
+    // reasoning goes to stderr under --explain, which is worth logging once.
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
+    if (code === 3) {
+      if (stderr) console.log(`[orch-inbox] ${repo}: ${stderr}`);
+    } else {
+      console.error(`[orch-inbox] no compaction window for ${repo}: ${String(error)}`);
+    }
+    return null;
+  }
+  const window = Number(stdout.trim());
+  if (!Number.isInteger(window) || window < WINDOW_MIN || window > WINDOW_MAX) {
+    console.error(
+      `[orch-inbox] REFUSING unsafe compaction window ${JSON.stringify(stdout.trim())} for ` +
+        `${repo}: not an integer in [${WINDOW_MIN}, ${WINDOW_MAX}]. The harness would clamp it ` +
+        `to the minimum, which can compaction-loop the agent. Setting no window instead.`,
+    );
+    return null;
+  }
+  return window;
+}
 
 // Deliveries already in flight. A second delivery for the same agent would `send`
 // while the first send's turn is still running, and a prompt landing mid-turn
@@ -69,34 +138,62 @@ type HookContext = {
   signal: AbortSignal;
 };
 
+
+
 export default function contribute(server: PluginServerContext) {
   // The status surface. Read-only, and the only thing in this plugin the human
   // drives directly: the client pins a composer pill whose label is the same
   // line `orch statusline` prints into a terminal status bar.
   server.handle(statusRead, handleStatusRead);
 
-  server.before("agent.session_open", ({ request }: { request: any }) => {
-    // Lets a worker address its own inbox without the parent having to tell it its id.
-    const existing = request.env?.ORCH_INBOX_TARGET;
-    const target = existing ?? request.agentId;
-    targets.set(request.agentId, target);
+  server.before("agent.session_open", async ({ request }: { request: any }, context: HookContext) => {
+    // Everything in here is wrapped, because a before hook that throws fails the
+    // session open -- a misconfigured tracker must not make agents unlaunchable.
+    try {
+      // Lets a worker address its own inbox without the parent having to tell it its id.
+      const existing = request.env?.ORCH_INBOX_TARGET;
+      const target = existing ?? request.agentId;
+      targets.set(request.agentId, target);
 
-    const env: Record<string, string> = { ...request.env };
-    let changed = false;
-    if (!existing) {
-      env.ORCH_INBOX_TARGET = target;
-      changed = true;
+      const env: Record<string, string> = { ...request.env };
+      let changed = false;
+      if (!existing) {
+        env.ORCH_INBOX_TARGET = target;
+        changed = true;
+      }
+
+      // Compaction is the cheap rotation. Measured, the same orchestrator cost
+      // 5.9x more per model call at 668K of context than at 88K, and the harness
+      // only compacts near the window limit unless told otherwise. But an early
+      // window is not free and not universally safe: below about three times a
+      // session's context floor it loops, and a worker's context dies with its
+      // task anyway. So this asks rather than assumes, and sets nothing unless a
+      // safe number comes back for an agent that will actually benefit.
+      if (AUTOCOMPACT_ENABLED && CLAUDE_HARNESS_PROVIDERS.has(request.provider) && request.cwd) {
+        const window = await resolveWindow(request.cwd, context.signal);
+        // RAISE ONLY. Paseo injects a default window of its own, so "leave it
+        // alone if something already set it" would make this hook a no-op
+        // exactly where it is needed -- an inherited default is the most likely
+        // source of a too-low window, not a deliberate choice. We move it up
+        // toward safety and never down: a window someone raised on purpose is
+        // theirs to keep, and lowering one is the direction that loops.
+        // `ORCH_AUTOCOMPACT_WINDOW=` empty opts out of all of this.
+        const inherited = Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? "");
+        if (window && !(Number.isFinite(inherited) && inherited >= window)) {
+          if (inherited) {
+            console.log(
+              `[orch-inbox] raising compaction window ${inherited} -> ${window} for ${request.cwd}`,
+            );
+          }
+          env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(window);
+          changed = true;
+        }
+      }
+      return changed ? { ...request, env } : undefined;
+    } catch (error) {
+      console.error(`[orch-inbox] session_open hook failed, launching unchanged: ${String(error)}`);
+      return undefined;
     }
-    // Compaction is the cheap rotation. Measured, the same orchestrator cost 5.9x
-    // more per model call at 668K of context than at 88K, and the harness only
-    // compacts near the window limit unless told otherwise. A low window makes
-    // every Claude agent rotate before the tax bites; a worker with a brief and a
-    // progress artifact loses nothing to it.
-    if (AUTOCOMPACT_WINDOW && !env.CLAUDE_CODE_AUTO_COMPACT_WINDOW && request.provider === "claude") {
-      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = AUTOCOMPACT_WINDOW;
-      changed = true;
-    }
-    return changed ? { ...request, env } : undefined;
   });
 
   server.on("agent.turn_ended", async (event: any, context: HookContext) => {

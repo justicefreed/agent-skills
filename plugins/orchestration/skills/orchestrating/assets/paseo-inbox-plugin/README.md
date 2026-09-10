@@ -16,17 +16,28 @@ in `references/statusline.md`. Both render the same JSON from the same collector
 hook running `orch inbox drain --format hook`. Prefer it. Install this plugin for delivery only
 when:
 
-- the target agent runs on a provider with no Stop hook (Codex, Cursor-hosted models); or
+- the target agent runs on a provider with no Stop hook (`codex`, `cursor` — Cursor's own agent, not
+  Claude Code over the Cursor bridge, which is the `claude-cursor` provider and does run hooks); or
 - the target is idle, so no turn will end inside the target's own harness to trigger its hook.
 
 What the delivery half does:
 
 - On `agent.session_open`, injects `ORCH_INBOX_TARGET` (the agent id) into the launch env unless one
-  is already set, so an agent can address its own inbox without being told its id. For Claude agents
-  it also sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` unless already set, so the agent compacts at
-  about 200K tokens rather than near the window limit — measured, the same orchestrator cost 5.9x
-  more per model call at 668K of context than at 88K. Override with `ORCH_AUTOCOMPACT_WINDOW` in the
-  daemon environment; set it empty to disable.
+  is already set, so an agent can address its own inbox without being told its id.
+- On the same hook, sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` — but only when it has been told to. The
+  plugin decides nothing itself: it runs `orch compaction window --repo <cwd>` and sets whatever
+  integer comes back. It **raises only**: Paseo injects a window of its own, so skipping when the
+  variable is already set would make this a no-op precisely where it matters — an inherited default
+  is the likeliest source of a too-low window. A window already at or above the recommendation is
+  left alone. `orch` gates on the worktree's claimed inbox role and on the session's measured
+  context floor, and exits 3 — print nothing — when this agent should keep the harness default. See
+  the skill's `references/cost.md` for the policy and why an early window is not universally safe.
+
+  Everything about that call fails toward *no window*: a missing tracker, a timeout (5s), a
+  non-integer, or a number outside 100K–1M is logged and skipped. That direction matters because the
+  harness **clamps an out-of-range window to its minimum** instead of rejecting it, and a window at
+  or below a session's context floor compacts, lands back above the trigger, and compacts again — a
+  loop that hangs the agent rather than erroring.
 - On `agent.turn_ended`, waits a short settle delay, then drains and sends the drained text to that
   same agent as a new turn. A `canceled` outcome is skipped entirely — a cancelled turn means a human
   is driving. There is no separate `peek`: a drain on an empty inbox prints nothing and advances
@@ -59,6 +70,15 @@ Python process on the daemon and zero tokens.
 What it does *not* show: work items, gates, or a critical path. That is agent-track's job. The one
 number borrowed from it is "awaiting a human", which `orch` reads through the `track` CLI, caches
 for 15s, and omits entirely when the repo has no `.track/`.
+
+## Daemon environment
+
+| Variable | Effect |
+|---|---|
+| `ORCH_INBOX_ORCH_BIN` | override the tracker executable |
+| `ORCH_SKILL_DIR` | first candidate directory for `scripts/orch.py` |
+| `ORCH_AUTOCOMPACT_WINDOW=` | **empty string only** — disables the compaction window entirely. A non-empty value is ignored; the number is `orch`'s to decide |
+| `ORCH_AUTOCOMPACT_PROVIDERS` | providers that read `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; default `claude,claude-cursor`, deny-by-default |
 
 ## Install
 
@@ -98,6 +118,9 @@ keeps an install failure from being the first place it shows up.
 - **There is no idle event and no timer event.** Delivery is driven only by a turn ending, so an
   agent that never takes another turn never drains its inbox. Wake it yourself, or drain from the
   requester side.
+- **A before hook that throws fails the session open.** Paseo's contract, so the whole
+  `session_open` callback is wrapped: any unexpected error is logged and the agent launches
+  unchanged. A misconfigured tracker must never make agents unlaunchable.
 - **Claude-hosted agents get both paths.** If the Stop hook is also installed, whichever fires first
   drains; the other finds an empty inbox. That is harmless but means delivery order across the two
   mechanisms is not guaranteed.

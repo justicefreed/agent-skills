@@ -24,6 +24,25 @@ Outside the repository, never committed:
 - **A commit-everything cannot sweep it.** Untracked orchestration state living inside a repo is
   how an unrelated commit acquires another lane's files.
 
+**The one cost of living outside the repo, and how it is paid.** Briefs live here too, so a brief is
+outside the worktree of the worker that must read it — and in Claude Code a read outside the working
+directory raises a permission prompt under every session mode except `bypassPermissions`. The first
+instruction of a brief-driven spawn is therefore the thing most likely to stall it, and a worker
+halted on a prompt looks exactly like a worker thinking. Four were found stopped this way at once:
+three on a brief, one on a *reference* — the skill's own `references/` corpus is outside the worktree
+for the same reason and stalls a worker the same way.
+
+Choosing a better mode does not fix either; only scope does. `orch permissions --install` adds one
+narrow `Read(//<dir>/**)` rule per directory to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`),
+covering the state root and the installed skill, which settles it for every worker in every
+repository. Run it once per machine; `orch permissions` alone checks and exits 3. Three details are
+deliberate: both spellings of each directory are granted, since the installed skill is a symlink into
+a checkout and a rule for one spelling need not match a read of the other; the skill path comes from
+where the skill is *installed* rather than from where the script is running, so a throwaway worktree
+never earns a permanent rule; and a settings file that does not parse is never rewritten. `orch open`
+warns when the rules are absent. Settings are read at launch, so a grant reaches the next worker
+spawned, not one already stalled.
+
 Durable *provenance* — what was commissioned, what it produced, what was ruled — graduates into
 in-repo artifacts at harvest. The tracker is not the record of what happened; it is the record of
 what is **still open**.
@@ -58,6 +77,15 @@ If the process dies between them, you are left with a `pending` entry naming a b
 — enough to find the orphan. Recording *after* the spawn instead would leave an agent nobody knows
 exists. `orch roster` flags `NO-AGENT-ID` for exactly this.
 
+The mode is decided here too, not at the spawn. `open` fills in `ORCH_WORKER_MODE` (default `auto`)
+unless the brief's front matter or `--mode` says otherwise, refuses a mode that stops to ask a human
+without `--ask-mode-ok`, and prints the `settings` fragment to pass — because a field that has to be
+remembered at spawn time is a field that gets forgotten, and forgetting this one selects Always Ask.
+`roster` then flags `ASK-MODE:<id>` on any entry recorded in a blocking mode, and `NO-MODE` on one
+recorded before the mode was tracked. Use `orch update <e> --mode <id>` to record what a worker is
+*actually* in; `update` does not refuse a blocking mode, because the repair path has to be able to
+write down the bad state before anyone can report it.
+
 Required brief front matter — `title`, `worktree`, `expected_artifacts`, `advances`,
 `consumption` — is read from the file, never retyped. `orch` rejects placeholders (`unknown`,
 `tbd`, `n/a`, …): a required field answered with a placeholder is an omission in costume.
@@ -68,8 +96,9 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | Command | Purpose |
 |---|---|
 | `orch programs` | what programs exist for this repo |
-| `orch open --brief P [--agent-id ID] [--program N] [--tracker ID]` | record a dispatch |
-| `orch update E [--agent-id] [--session-name] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch open --brief P [--agent-id ID] [--mode M] [--program N] [--tracker ID]` | record a dispatch |
+| `orch update E [--agent-id] [--session-name] [--mode] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch permissions [--install]` | check, or grant, the one read a worker needs to start |
 | `orch mint-child E` | allocate a sub-orchestrator's tracker id (idempotent) |
 | `orch close E --consumed "<what happened>"` | delete a consumed entry |
 | `orch roster [--recursive] [--json]` | open entries, with flags |
@@ -86,6 +115,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
 | `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
+| `orch compaction measure\|check\|window` | context floor and safe auto-compact window; `check` is the session-start loop detector; `window` is what a launcher asks |
+| `orch rotate begin\|claim\|complete\|status\|abort` | replace a live agent; see `../rotation.md` for the order and who runs which |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that
 boundary is why the adapters stay swappable. `prune` likewise takes the live agent set as an
@@ -104,6 +135,29 @@ The parent is the **only minter**. `orch mint-child e1` returns `root.1`; put `t
 in that worker's brief front matter. A child recovers its id from its brief, or via `orch whoami`
 when it has its own worktree. If neither works it must **ask, never mint** — two tracker files for
 one job is a split-brain where each half is internally consistent and neither is complete.
+
+## Records that are neither tracker nor inbox
+
+`compaction.json` and `rotation.json` sit beside the tracker in the program directory, and both are
+there for the same reason: they carry a fact **the next session cannot re-derive**.
+
+A session cannot measure its own context floor before it has one, and it cannot change its own
+auto-compact window at all — that is read at launch. So the measured floor is recorded for whoever
+launches next. It only ever grows: a floor that shrank would be a smaller reading of the same
+irreducible context, not a smaller context.
+
+A rotation record is the obligation the *successor* inherits — which inbox to take, which agent to
+close — and it must survive the predecessor going away mid-handoff, which is precisely the case it
+exists for. It is deleted on `rotate complete`, and a record still pending after ten minutes raises
+an advisory on the turn-end hook. That is the dangling-session detector.
+
+Seven smaller sidecars share that directory — `budget.json`, `rates.json`, `transcripts.json`,
+`frontdesk.json`, and the fire-once markers `cost-warned.json`, `guard-warned.json` and
+`frontdesk-suggested.json`. **Only files named `root`, `root.1`, `root.1.2` are trackers**, and the
+recursive reader filters on exactly that grammar. It has to: a sidecar has no tracker schema
+version, so a reader that globbed `*.json` aborted on the first one it met. Callers that swallowed
+the error then saw an empty program, which is why the fan-out advisory silently reported zero open
+dispatches once a program acquired any sidecar at all. Add a sidecar freely; never name one `root*`.
 
 ## The inbox is state with different rules
 

@@ -28,6 +28,7 @@ advances: [3.1, 3.4, 3.7]                        # required; or the literal `non
 consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
 archetype: integrator                            # optional, provenance
+mode: auto                                       # optional; session mode to spawn with
 review: integrator                               # optional; integrator | in-brief | none
 tracker_id: root.1                                # only for a sub-orchestrator
 plan_doc: docs/migration-2026-09/PLAN.md          # optional

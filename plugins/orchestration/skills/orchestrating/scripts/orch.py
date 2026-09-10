@@ -50,6 +50,7 @@ OPTIONAL_BRIEF_FIELDS = (
     "archetype",
     "model",
     "effort",
+    "mode",
     "progress_artifact",
     "tracker_id",
     "parent_tracker",
@@ -72,6 +73,24 @@ PLACEHOLDERS = {
 }
 
 STATUSES = ("pending", "running", "harvested")
+
+# Session modes that stop a worker to ask a human. `default` deserves naming
+# precisely, because everything about it misleads: the id reads like "whatever
+# the sensible default is", the label it actually carries is **Always Ask**, and
+# it is what a Paseo spawn gets when `settings.modeId` is OMITTED -- even though
+# the provider advertises `defaultMode: auto`. Verified on a live stalled
+# worker: created with no mode, came up `currentModeId: "default"`, halted on
+# its first tool call. A worker has no human watching its session, so Always Ask
+# is not caution there; it is a deadlock that looks like a hang.
+BLOCKING_MODES = {"default", "plan", "ask"}
+
+# What a worker should launch with instead. `auto` runs a classifier over
+# permission prompts rather than skipping them -- the moderate tier, and already
+# what orchestrators chose in 145 of 164 recorded spawns, so this makes the
+# common choice the automatic one. `bypassPermissions` never prompts and is the
+# unattended answer, but it is a real security decision: set it per dispatch,
+# deliberately, never as a default.
+WORKER_MODE_DEFAULT = os.environ.get("ORCH_WORKER_MODE") or "auto"
 
 # An unfilled template slot -- `<one line, imperative>` -- is the likeliest form
 # of copy-the-template-without-reading-it, so it is rejected as a placeholder.
@@ -136,6 +155,72 @@ def program_dir(repo_key: str, program: str) -> str:
     return os.path.join(state_root(), repo_key, program)
 
 
+def claude_settings_path() -> str:
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude")
+    return os.path.join(base, "settings.json")
+
+
+def read_dirs() -> List[str]:
+    """Every directory a worker is told to read but cannot reach unprompted.
+
+    Two of them, failing for one reason: a read outside the working directory
+    prompts. The state root holds the briefs. The skill's own directory holds
+    the references a brief points at -- observed stalling a worker on
+    `references/substrates/_capabilities.md` just as another stalled on a brief.
+
+    Both spellings of each are returned, because a rule written for one does not
+    match a read of the other and the installed skill is normally a symlink into
+    a checkout.
+
+    The skill directory is taken from where the skill is *installed*, not from
+    where this file happens to be running. `scripts/link-skills.sh` links into
+    `~/.claude/skills` and `~/.agents/skills`, and those are the copies a worker
+    reads; deriving it from `__file__` instead would write a permanent rule for
+    whichever throwaway worktree the orchestrator was in at the time.
+    """
+    installed = [os.path.join(os.path.expanduser("~"), base, "skills",
+                              "orchestrating")
+                 for base in (".claude", ".agents")]
+    skills = [d for d in installed if os.path.exists(d)]
+    if not skills:      # not linked; the running copy is the only one there is
+        skills = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+
+    out: List[str] = []
+    for path in [state_root()] + skills:
+        for spelling in (path, os.path.realpath(path)):
+            spelling = os.path.normpath(spelling).rstrip("/")
+            if spelling and spelling != "/" and spelling not in out:
+                out.append(spelling)
+    return out
+
+
+def read_rule(directory: str) -> str:
+    return "Read(//%s/**)" % directory.lstrip("/")
+
+
+def missing_read_rules() -> List[str]:
+    """The rules a worker needs that the human's settings do not yet grant.
+
+    A *broader* existing rule counts: someone who has allowed `//Users/**` has
+    already made this decision, and asking again would be noise.
+    """
+    settings = _load_json(claude_settings_path())
+    allow = (settings.get("permissions") or {}).get("allow") or []
+    prefixes = []
+    for rule in allow:
+        if not isinstance(rule, str) or not rule.startswith("Read("):
+            continue
+        pattern = rule[len("Read("):].rstrip(")").strip()
+        if not pattern.startswith("//"):
+            continue            # relative to a project, so not one of these
+        prefix = "/" + pattern[2:].split("*", 1)[0].rstrip("/")
+        if prefix != "/":
+            prefixes.append(prefix)
+    return [read_rule(d) for d in read_dirs()
+            if not any(d == p or d.startswith(p + "/") for p in prefixes)]
+
+
 def list_programs(repo_key: str) -> List[Dict[str, Any]]:
     root = os.path.join(state_root(), repo_key)
     if not os.path.isdir(root):
@@ -145,11 +230,17 @@ def list_programs(repo_key: str) -> List[Dict[str, Any]]:
         pdir = os.path.join(root, name)
         if not os.path.isdir(pdir):
             continue
-        trackers = [f for f in os.listdir(pdir) if f.endswith(".json")]
+        # Tracker-shaped names only -- the third site where globbing `*.json`
+        # counted sidecars as trackers. Here it did not raise, it just lied
+        # quietly: a program with one tracker and seven sidecars reported
+        # trackers=8, and `updated` came from whichever sidecar was touched
+        # last, so a program whose only recent activity was a cost advisory
+        # writing its warn marker looked freshly dispatched.
+        names = tracker_names(pdir)
         open_entries = 0
         newest = 0.0
-        for fname in trackers:
-            path = os.path.join(pdir, fname)
+        for tname in names:
+            path = os.path.join(pdir, tname + ".json")
             newest = max(newest, os.path.getmtime(path))
             try:
                 with open(path, "r", encoding="utf-8") as fh:
@@ -159,7 +250,7 @@ def list_programs(repo_key: str) -> List[Dict[str, Any]]:
         found.append({
             "program": name,
             "path": pdir,
-            "trackers": len(trackers),
+            "trackers": len(names),
             "open_entries": open_entries,
             "updated": datetime.fromtimestamp(newest, timezone.utc).isoformat(
                 timespec="seconds") if newest else None,
@@ -443,6 +534,13 @@ def entry_summary(entry: Dict[str, Any]) -> str:
     brief = entry.get("brief_path")
     if brief and not os.path.exists(brief):
         flags.append("BRIEF-MISSING")
+    # A worker in a blocking mode is not slow, it is waiting for someone who is
+    # not coming. Flagged rather than hidden, because from the outside it looks
+    # exactly like a long task -- which is why it went unnoticed for so long.
+    if entry.get("mode") in BLOCKING_MODES:
+        flags.append("ASK-MODE:" + entry["mode"])
+    elif not entry.get("mode"):
+        flags.append("NO-MODE")
     return "  ".join(filter(None, [
         entry["entry"],
         entry["status"],
@@ -470,10 +568,102 @@ def cmd_programs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_permissions(args: argparse.Namespace) -> int:
+    """Check -- or grant -- the one read a brief-driven worker cannot start without.
+
+    A brief lives in the orchestration state directory, which is deliberately
+    outside every repository (`references/state.md` says why). That is right for
+    the state and wrong for the reader: in Claude Code a read outside the working
+    directory raises a permission prompt under every mode except
+    `bypassPermissions`, so the first instruction in a brief-driven spawn is
+    exactly the thing that stalls it. The skill's own reference corpus is
+    outside the worktree for the same reason and stalls workers the same way.
+    Choosing a better mode does not fix either -- only scope does. Four workers
+    were found halted here at once: three on a brief, one on a reference.
+
+    A rule per directory settles it for every worker, in every repository,
+    permanently.
+    """
+    path = claude_settings_path()
+    missing = missing_read_rules()
+
+    if not missing:
+        print("ok       briefs and references read without a prompt")
+        for directory in read_dirs():
+            print("         %s" % read_rule(directory))
+        print("         via %s" % path)
+        return 0
+
+    if not args.install:
+        print("MISSING  %d rule(s); a worker will stall on its first read"
+              % len(missing))
+        print("         a read outside the working directory prompts under every")
+        print("         mode except bypass, and neither the briefs nor the")
+        print("         skill's references are inside any worktree.")
+        for rule in missing:
+            print("         %s" % rule)
+        print("         grant them once:  orch permissions --install")
+        print("         or add to %s by hand under permissions.allow" % path)
+        return 3
+
+    # Never rewrite a settings file that did not parse. It is the human's own
+    # configuration, it is not ours to reformat, and a file that fails to load is
+    # far likelier to be mid-edit than to be empty.
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise OrchError(
+                "%s did not parse (%s). Refusing to rewrite it -- add\n  %s\n"
+                "to permissions.allow by hand."
+                % (path, exc, "\n  ".join(missing)))
+        if not isinstance(data, dict):
+            raise OrchError("%s is not a JSON object. Refusing to rewrite it."
+                            % path)
+    else:
+        data = {}
+
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        perms = {}
+    allow = perms.get("allow")
+    if not isinstance(allow, list):
+        allow = []
+    for rule in missing:
+        if rule not in allow:
+            allow.append(rule)
+    perms["allow"] = allow
+    data["permissions"] = perms
+    _save_json(path, data)
+
+    for rule in missing:
+        print("granted  %s" % rule)
+    print("         in %s" % path)
+    print("settings are read at launch, so this reaches the next worker spawned "
+          "and not one already stalled. Answer that one's prompt by hand.",
+          file=sys.stderr)
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     repo_key, root, common = repo_identity(args.repo)
     fields = parse_front_matter(args.brief)
     validate_brief(fields, args.brief)
+
+    # Decide the session mode HERE, before the spawn, and record it. Left to the
+    # spawn call it is a field that can be forgotten, and forgetting it is not
+    # neutral -- it selects Always Ask. Deciding it at dispatch means the mode is
+    # something the tracker can be asked about afterwards.
+    mode = str(args.mode or fields.get("mode") or WORKER_MODE_DEFAULT).strip()
+    if mode in BLOCKING_MODES and not args.ask_mode_ok:
+        raise OrchError(
+            "mode %r stops the worker to ask a human, and nobody is watching a "
+            "worker's session. It will halt on its first tool call -- usually "
+            "the read of this very brief -- and present as a hang rather than "
+            "as a question.\nSpawn with settings.modeId=%r instead. Pass "
+            "--ask-mode-ok if this dispatch genuinely is meant to stop and "
+            "wait." % (mode, WORKER_MODE_DEFAULT))
 
     if args.program:
         program = args.program
@@ -520,6 +710,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         "review_waiver": fields.get("review_waiver"),
         "model": fields.get("model"),
         "effort": fields.get("effort"),
+        "mode": mode,
         "child_tracker": None,
         "pending_message": None,
         "opened_at": _now(),
@@ -533,9 +724,20 @@ def cmd_open(args: argparse.Namespace) -> int:
 
     print(entry_id)
     if not args.agent_id:
-        print("recorded before spawn. After spawning, run:\n"
+        # The settings fragment is printed rather than described, because the
+        # failure this prevents is a forgotten field and a description is
+        # something you can read and still forget to copy.
+        print("recorded before spawn. Spawn with settings %s -- omit the mode "
+              "and the worker comes up in Always Ask, which halts it on its "
+              "first tool call. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>"
-              % entry_id, file=sys.stderr)
+              % (json.dumps({"modeId": mode}), entry_id), file=sys.stderr)
+    if missing_read_rules():
+        print("warning: this brief, and the skill references it points at, sit "
+              "outside the worker's worktree and are not allow-listed, so the "
+              "worker's first act -- reading them -- will prompt whatever mode "
+              "it runs in. Settle it once for every future worker:\n"
+              "  orch permissions --install", file=sys.stderr)
     return 0
 
 
@@ -560,6 +762,13 @@ def cmd_update(args: argparse.Namespace) -> int:
             raise OrchError("status must be one of %s" % ", ".join(STATUSES))
         entry["status"] = args.status
         changed.append("status")
+    if args.mode:
+        # No BLOCKING_MODES refusal here, deliberately. `update` is the repair
+        # path: an agent already stalled in Always Ask has to be recorded as
+        # such before it can be reported, and refusing the write would leave
+        # the tracker describing a worker that does not exist.
+        entry["mode"] = args.mode.strip()
+        changed.append("mode")
     if args.pending_message is not None:
         entry["pending_message"] = args.pending_message or None
         changed.append("pending_message")
@@ -628,16 +837,35 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def tracker_names(pdir: str) -> List[str]:
+    """Tracker ids in a program directory, by NAME and never by parseability.
+
+    The program directory is also home to nine sidecar records -- budget.json,
+    compaction.json, rotation.json, transcripts.json and the warn markers -- and
+    `load_tracker` rejects anything without a matching schema version, so code
+    that listed every `*.json` here treated a sidecar as a tracker. Two callers
+    did, and each failed differently: the recursive reader aborted its whole
+    comprehension on the first sidecar it met (callers swallowing OrchError then
+    saw an empty program, which is why the FAN-OUT advisory reported zero open
+    dispatches from the moment a program acquired any sidecar, and why `whoami`
+    failed with a complaint about budget.json), while the not-found message
+    offered `compaction` as a tracker id the reader could pass.
+
+    Filtering on the name is what makes a genuinely corrupt tracker still raise.
+    """
+    if not os.path.isdir(pdir):
+        return []
+    return sorted(f[:-5] for f in os.listdir(pdir)
+                  if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
+
+
 def _read_all_trackers(repo_key: str, program: str,
                        recursive: bool, tracker_id: str
                        ) -> List[Tuple[str, Dict[str, Any]]]:
     pdir = program_dir(repo_key, program)
     if recursive:
-        if not os.path.isdir(pdir):
-            return []
-        names = sorted(f[:-5] for f in os.listdir(pdir)
-                       if f.endswith(".json") and TRACKER_ID.fullmatch(f[:-5]))
-        return [(n, load_tracker(os.path.join(pdir, n + ".json"))) for n in names]
+        return [(n, load_tracker(os.path.join(pdir, n + ".json")))
+                for n in tracker_names(pdir)]
 
     # Named tracker: a bad id or a never-minted one must FAIL, not read as an
     # empty program. Those two look identical to the caller otherwise, which is
@@ -645,8 +873,10 @@ def _read_all_trackers(repo_key: str, program: str,
     check_tracker_id(tracker_id)
     path = os.path.join(pdir, tracker_id + ".json")
     if not os.path.exists(path):
-        existing = sorted(f[:-5] for f in os.listdir(pdir)) \
-            if os.path.isdir(pdir) else []
+        # Tracker-shaped names only, for the same reason the recursive branch
+        # filters: listing every `*.json` here named the sidecars as trackers and
+        # invited the reader to pass `--tracker compaction`.
+        existing = tracker_names(pdir)
         raise OrchError(
             "no tracker %r in program %r. Existing trackers: %s"
             % (tracker_id, program, ", ".join(existing) or "(none)")
@@ -847,19 +1077,32 @@ def resolve_target(args: argparse.Namespace, repo_key: str
                    ) -> Tuple[Optional[str], Optional[str]]:
     """Return (program, target), or (None, None) when this agent has no inbox.
 
-    Order: explicit flag, then environment, then the claim recorded for this
-    worktree. Never guessed: an agent that drains an inbox addressed to someone
-    else consumes input meant for another lane, and the sender has no way to
-    discover that it happened.
+    Order: explicit flag, then the claim recorded for this worktree, then the
+    environment. Never guessed: an agent that drains an inbox addressed to
+    someone else consumes input meant for another lane, and the sender has no
+    way to discover that it happened.
+
+    The claim outranks ORCH_INBOX_TARGET deliberately. A claim is something an
+    agent did on purpose with a role name; the environment variable is a default
+    injected per-agent by the substrate, carrying the agent's own id. Ranking
+    the injected default higher meant an orchestrator that claimed `root` still
+    drained a UUID nobody addresses -- and worse, an agent-id target cannot be
+    handed to a successor, because the successor has a different id. The
+    environment stays as the fallback for agents that never claim, which is the
+    case it was added for: a worker addressing its own inbox without having been
+    told its id.
     """
-    target = getattr(args, "to", None) or os.environ.get("ORCH_INBOX_TARGET")
     program = getattr(args, "program", None)
-    if target:
-        return (program or resolve_program(repo_key, None)), target
+    explicit = getattr(args, "to", None)
+    if explicit:
+        return (program or resolve_program(repo_key, None)), explicit
     claim = _load_claims(repo_key).get(_worktree_key(args.repo))
-    if not claim:
-        return None, None
-    return (program or claim.get("program") or "default"), claim.get("target")
+    if claim and claim.get("target"):
+        return (program or claim.get("program") or "default"), claim["target"]
+    from_env = os.environ.get("ORCH_INBOX_TARGET")
+    if from_env:
+        return (program or resolve_program(repo_key, None)), from_env
+    return None, None
 
 
 def _read_pending(log: str, cursor: str) -> Tuple[List[Dict[str, Any]], int]:
@@ -927,21 +1170,7 @@ def render_inbox(items: List[Dict[str, Any]], target: str) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
-def cmd_inbox_claim(args: argparse.Namespace) -> int:
-    repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
-    worktree = _worktree_key(args.repo)
-    claims = _load_claims(repo_key)
-    prior = claims.get(worktree)
-    if prior and prior.get("target") != args.target and not args.force:
-        raise OrchError(
-            "worktree %s is already claimed by %r (program %r).\n"
-            "Two agents draining one inbox split its items; pass --force only "
-            "if you know the prior claimant is gone."
-            % (worktree, prior.get("target"), prior.get("program"))
-        )
-    claims[worktree] = {"target": args.target, "program": program,
-                        "at": _now()}
+def _write_claims(repo_key: str, claims: Dict[str, Any]) -> None:
     path = claims_path(repo_key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
@@ -956,8 +1185,49 @@ def cmd_inbox_claim(args: argparse.Namespace) -> int:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def cmd_inbox_claim(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    worktree = _worktree_key(args.repo)
+    claims = _load_claims(repo_key)
+    prior = claims.get(worktree)
+    if prior and prior.get("target") != args.target and not args.force:
+        raise OrchError(
+            "worktree %s is already claimed by %r (program %r).\n"
+            "Two agents draining one inbox split its items; pass --force only "
+            "if you know the prior claimant is gone."
+            % (worktree, prior.get("target"), prior.get("program"))
+        )
+    # The claim is keyed by worktree, so a second worktree claiming the same
+    # TARGET is not a conflict this map can represent -- both entries are valid
+    # and both agents drain. That is the failure a rotation into a fresh
+    # worktree produces, and it is silent from either side, so it is refused
+    # here rather than warned about. `orch rotate claim` is the sanctioned
+    # takeover: it removes the predecessor's claim in the same write.
+    others = [w for w, c in claims.items()
+              if c.get("target") == args.target and w != worktree]
+    if others and not args.force:
+        raise OrchError(
+            "%r is already claimed by another worktree:\n  %s\n"
+            "Claiming it here would leave two claimants for one inbox, and "
+            "while both agents live both drain it -- items split, and no sender "
+            "can tell. If you are replacing that agent, use the rotation "
+            "protocol (`orch rotate begin` in the predecessor, `orch rotate "
+            "claim` here) which transfers the claim instead of duplicating it. "
+            "Pass --force only if that worktree's agent is already gone."
+            % (args.target, "\n  ".join(others))
+        )
+    for stale in others:                      # only reachable under --force
+        claims.pop(stale, None)
+    claims[worktree] = {"target": args.target, "program": program,
+                        "at": _now()}
+    _write_claims(repo_key, claims)
     print("inbox for %s claimed by %r (program %s)"
           % (worktree, args.target, program))
+    if others:
+        print("released stale claim(s): %s" % ", ".join(others))
     return 0
 
 
@@ -1158,6 +1428,15 @@ CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
 # Fan-out width past which a program is usually generating more intake than it
 # can consume. Advisory only -- there is no safe universal cap.
 FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
+# Conditions for PROPOSING a front desk. Calibrated against seven recorded
+# programs: the largest relay cluster was 8 in the one program where the human
+# had visibly become the router, and <=5 in every other, so 6 separates them
+# with room either side. The floor on total turns stops a three-message session
+# from firing on a coincidence, and the dispatch floor keeps the suggestion away
+# from programs too small to need a relay.
+FRONTDESK_RELAY_TURNS = int(os.environ.get("ORCH_FRONTDESK_RELAY", 6))
+FRONTDESK_MIN_TURNS = int(os.environ.get("ORCH_FRONTDESK_MIN_TURNS", 20))
+FRONTDESK_DISPATCHES = int(os.environ.get("ORCH_FRONTDESK_DISPATCHES", 6))
 
 
 def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
@@ -1206,6 +1485,70 @@ def find_transcript(args: argparse.Namespace) -> Optional[str]:
     return max(files, key=os.path.getmtime) if files else None
 
 
+# A human turn that is one of many near-identical messages is RELAY traffic:
+# the human standing between two agents and forwarding pointers by hand. That is
+# precisely what a front desk exists to absorb, and it is measurable with no
+# model tokens -- normalise each human turn to its opening words with digits
+# masked, then count the largest cluster. Substantive short asks ("add X to
+# gitignore") do not cluster; "[track] T-025 is done. Run: ..." does.
+RELAY_TEMPLATE_WORDS = int(os.environ.get("ORCH_RELAY_WORDS", 4))
+# A routing pointer is short. Measured across three programs, the clustered
+# human messages were 124-201 characters ("[track] T-015 was ruled resolved.
+# Run: ...") while every genuine piece of human prose was unique -- human
+# writing simply does not repeat its opening four words. The cap keeps a long
+# clustered message, which cannot be a pointer, out of the numerator.
+RELAY_MAX_CHARS = int(os.environ.get("ORCH_RELAY_MAX_CHARS", 600))
+
+
+def _relay_template(text: str) -> str:
+    masked = re.sub(r"\d+", "#", text.lower())
+    words = re.sub(r"[^a-z#]+", " ", masked).split()
+    return " ".join(words[:RELAY_TEMPLATE_WORDS])
+
+
+def _human_turn_text(line: str) -> Optional[str]:
+    """The human's own words from one transcript line, or None.
+
+    Tool results are also `type: user` rows and outnumber real turns by more
+    than ten to one, so they are rejected by substring before any JSON parse --
+    this function runs on every line of a file that can reach hundreds of MB.
+    """
+    if '"type":"user"' not in line and '"type": "user"' not in line:
+        return None
+    if '"toolUseResult"' in line:
+        return None
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    if row.get("type") != "user" or row.get("isMeta"):
+        return None
+    content = (row.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(c, dict) and c.get("type") == "tool_result"
+               for c in content):
+            return None
+        text = " ".join(c.get("text", "") for c in content
+                        if isinstance(c, dict))
+    elif isinstance(content, str):
+        text = content
+    else:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # Not the human speaking. Anything in an angle-bracket envelope is injected
+    # by the harness or the substrate -- slash-command echoes, system reminders,
+    # `<paseo-system>` schedule firings, `<task-notification>` completions -- and
+    # an interrupt artifact is not a message at all. All of these cluster
+    # perfectly, so leaving them in would forge the very signal being measured,
+    # and none of them is work a front desk could absorb: they are the
+    # orchestrator's own event feed, not the human acting as a router.
+    if text.startswith("<") or text.startswith("[Request interrupted"):
+        return None
+    return text
+
+
 def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     """Summarise a harness transcript's model calls.
 
@@ -1217,9 +1560,17 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     cost = 0.0
     recent: List[Tuple[int, float]] = []          # (context, cost) per step
     models: Dict[str, int] = {}
+    turn_shapes: Dict[str, int] = {}              # relay template -> count
+    human_turns = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                turn = _human_turn_text(line)
+                if turn is not None:
+                    human_turns += 1
+                    if len(turn) <= RELAY_MAX_CHARS:
+                        shape = _relay_template(turn)
+                        turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
                 if '"usage"' not in line:
                     continue
                 try:
@@ -1261,6 +1612,8 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
         "tokens": totals,
         "cost": cost,
         "context": window[-1][0] if window else 0,
+        "human_turns": human_turns,
+        "relay_turns": max(turn_shapes.values()) if turn_shapes else 0,
         "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
         "models": models,
         "shares": {k: (totals[k] * rate_for(max(models, key=models.get) if models else "",
@@ -1426,6 +1779,13 @@ def cmd_cost(args: argparse.Namespace) -> int:
             pass
 
     advisories = cost_advisories(usage, budget, open_entries)
+    if repo_key and program:
+        stale = rotation_advisory(load_rotation(repo_key, program))
+        if stale:
+            advisories.insert(0, stale)
+        desk = frontdesk_advisory(repo_key, program, usage, open_entries)
+        if desk:
+            advisories.append(desk)
 
     if args.format == "json":
         print(json.dumps({**usage, "advisories": advisories,
@@ -1440,6 +1800,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
                 "context.\n\n%s\n" % (usage["cost"], usage["cost_per_step"],
                                       usage["context"] // 1000,
                                       "\n\n".join(advisories)))
+        _mark_frontdesk_suggested(repo_key, program, advisories)
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "Stop", "additionalContext": text}}))
         return 0
@@ -1460,6 +1821,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
         print("open work    %d dispatches" % open_entries)
     if budget.get("limit"):
         print("budget       $%s" % budget["limit"])
+    _mark_frontdesk_suggested(repo_key, program, advisories)
     for line in advisories:
         print("\n! %s" % line)
     if not advisories:
@@ -1561,6 +1923,24 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
             if pending else "empty"))
     else:
         lines.append("inbox: none claimed for this worktree — run `orch inbox claim --as root`")
+    rotation = load_rotation(repo_key, program)
+    if rotation.get("state") in ("pending", "claimed"):
+        old = rotation.get("from") or {}
+        lines.append("ROTATION %s — replacing %r (agent %s). Handoff note: %s"
+                     % (rotation["state"], old.get("handle"),
+                        (old.get("agent_id") or "-")[:8],
+                        rotation.get("handoff")))
+        lines.append("  outstanding: %s"
+                     % ("`orch rotate claim`, then CLOSE the predecessor, then "
+                        "`orch rotate complete --alive <ids>`"
+                        if rotation["state"] == "pending"
+                        else "CLOSE the predecessor, then `orch rotate complete "
+                             "--alive <ids>`"))
+    cmp_rec = _load_json(compaction_path(repo_key, program))
+    if cmp_rec.get("floor"):
+        lines.append("context floor %dK · this program should launch with "
+                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d"
+                     % (int(cmp_rec["floor"]) // 1000, cmp_rec.get("window") or 0))
     fd = _load_json(frontdesk_path(repo_key, program))
     if fd.get("target"):
         lines.append("front desk: `%s` — human input arrives through it; answer it "
@@ -1598,6 +1978,63 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _frontdesk_marker(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "frontdesk-suggested.json")
+
+
+def frontdesk_advisory(repo_key: str, program: str, usage: Dict[str, Any],
+                       dispatches: int) -> Optional[str]:
+    """Propose a front desk once the human has become the router.
+
+    Every other threshold in this skill is enforced here rather than described
+    in prose, and this one was the exception: the trigger existed only as a
+    paragraph in `SKILL.md`, so across ten recorded programs a front desk was
+    never once proposed. This is that paragraph made measurable.
+
+    Pure -- it reads state but writes none, so a caller that decides not to
+    emit does not burn the one proposal. `_mark_frontdesk_suggested` does that.
+    """
+    if _load_json(frontdesk_path(repo_key, program)).get("target"):
+        return None            # already has one
+    if _load_json(_frontdesk_marker(repo_key, program)):
+        return None            # already proposed once
+    relay = usage.get("relay_turns", 0)
+    turns = usage.get("human_turns", 0)
+    if (relay < FRONTDESK_RELAY_TURNS or turns < FRONTDESK_MIN_TURNS
+            or dispatches < FRONTDESK_DISPATCHES):
+        return None
+    return (
+        "FRONT-DESK — %d of the human's %d turns in this session are "
+        "near-identical routing messages, and %d dispatches are open. They are "
+        "acting as your router, which is work an agent can do. Offer a front "
+        "desk: a cheap agent that owns the human's inbox, answers status from "
+        "the tracker and the plan document, and queues only decisions for you. "
+        "Propose it and let them choose — then `orch frontdesk --set <handle>`. "
+        "Procedure: references/frontdesk.md."
+        % (relay, turns, dispatches)
+    )
+
+
+def _mark_frontdesk_suggested(repo_key: Optional[str], program: Optional[str],
+                              advisories: List[str]) -> None:
+    """Spend the one proposal, at the moment it is actually shown.
+
+    At most once per program, deliberately. An unwanted front desk suggestion
+    is expensive -- it asks the human to authorise a whole additional agent --
+    so a declined proposal must not return every turn. The other advisories
+    restate a condition that is still true; this one asks for a decision the
+    human may have already made.
+    """
+    if not repo_key or not program:
+        return
+    if not any(a.startswith("FRONT-DESK") for a in advisories):
+        return
+    try:
+        _save_json(_frontdesk_marker(repo_key, program), {"at": _now()})
+    except OSError:
+        pass
+
+
 def cmd_frontdesk(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -1623,6 +2060,25 @@ def cmd_frontdesk(args: argparse.Namespace) -> int:
 
 GUARD_BYTES = int(os.environ.get("ORCH_GUARD_BYTES", 6000))
 GUARD_COOLDOWN_S = int(os.environ.get("ORCH_GUARD_COOLDOWN", 600))
+# A document written inline through a shell heredoc gets its own, much lower
+# floor. Measured over one program's 42 heredoc-authored briefs: median 4.4KB,
+# min 1.4KB, 220KB in total, and 32 of the 42 sat UNDER GUARD_BYTES -- so the
+# byte floor that is right for an arbitrary large tool input let three quarters
+# of the single largest self-inflicted context item through. The shape is the
+# signal here, not the size: `cat > brief.md <<EOF` is a document being
+# authored by the orchestrator no matter how long it runs.
+GUARD_HEREDOC_BYTES = int(os.environ.get("ORCH_GUARD_HEREDOC_BYTES", 1200))
+_DOC_HEREDOC_RE = re.compile(
+    r"""(?:^|[;&|]|\bthen\b|\bdo\b)\s*(?:cat\s*>>?|tee\s*-?a?)\s*"""
+    r"""[^\s;&|<>]+\.(?:md|markdown|mdx)["']?\s*<<""",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def _is_doc_heredoc(name: str, tool_input: Dict[str, Any]) -> bool:
+    """Is this Bash call authoring a markdown document inline?"""
+    if name != "Bash":
+        return False
+    return bool(_DOC_HEREDOC_RE.search(str(tool_input.get("command", ""))))
 
 
 def _tool_input_size(name: str, tool_input: Dict[str, Any]) -> int:
@@ -1649,7 +2105,8 @@ def cmd_guard(args: argparse.Namespace) -> int:
     if not isinstance(name, str) or not isinstance(tool_input, dict):
         return 0
     size = _tool_input_size(name, tool_input)
-    if size < GUARD_BYTES:
+    heredoc = _is_doc_heredoc(name, tool_input)
+    if size < (GUARD_HEREDOC_BYTES if heredoc else GUARD_BYTES):
         return 0
     cwd = payload.get("cwd")
     try:
@@ -1659,26 +2116,49 @@ def cmd_guard(args: argparse.Namespace) -> int:
         return 0
     if not list_programs(repo_key):
         return 0
+    # Cooled down per KIND, so a brief authored by heredoc still speaks when an
+    # unrelated large edit has just warned. One shared timer let the rarer and
+    # more actionable signal be masked by the commoner one.
+    kind = "doc-heredoc" if heredoc else "large-input"
     marker = os.path.join(program_dir(repo_key, program), "guard-warned.json")
     prior = _load_json(marker)
+    stamps = prior.get("kinds")
+    if not isinstance(stamps, dict):
+        stamps = {}
     try:
-        last = datetime.fromisoformat(prior.get("at", "1970-01-01T00:00:00+00:00"))
+        last = datetime.fromisoformat(
+            stamps.get(kind, "1970-01-01T00:00:00+00:00"))
     except ValueError:
         last = datetime.fromtimestamp(0, timezone.utc)
     if (datetime.now(timezone.utc) - last).total_seconds() < GUARD_COOLDOWN_S:
         return 0
+    stamps[kind] = _now()
     try:
-        _save_json(marker, {"at": _now(), "tool": name, "bytes": size})
+        _save_json(marker, {"kinds": stamps, "tool": name, "bytes": size})
     except OSError:
         pass
-    text = (
-        "CONTEXT — this %s input is about %dKB, and it is now permanent context "
-        "for the rest of this session, re-read on every later model call. If it "
-        "is a document (brief body, review doc, plan patch, report), a doc-writer "
-        "worker at economy tier should author it from a one-paragraph spec, and "
-        "you should hold only the path. If it genuinely has to be yours, carry on."
-        % (name, size // 1024)
-    )
+    if heredoc:
+        text = (
+            "CONTEXT — you are authoring a document inline (about %dKB of "
+            "heredoc), and every byte of it is permanent context for the rest "
+            "of this session, re-read on every later model call. Briefs, review "
+            "docs, plan patches and reports are exactly the work to delegate: "
+            "give a doc-writer worker at economy tier a one-paragraph spec and "
+            "hold only the path it returns. Measured in one program: 42 briefs "
+            "written this way, 220KB, most of them small enough to look free. "
+            "If this one genuinely has to be yours, carry on."
+            % (size // 1024 or 1)
+        )
+    else:
+        text = (
+            "CONTEXT — this %s input is about %dKB, and it is now permanent "
+            "context for the rest of this session, re-read on every later model "
+            "call. If it is a document (brief body, review doc, plan patch, "
+            "report), a doc-writer worker at economy tier should author it from "
+            "a one-paragraph spec, and you should hold only the path. If it "
+            "genuinely has to be yours, carry on."
+            % (name, size // 1024)
+        )
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "additionalContext": text}}))
     return 0
@@ -2178,6 +2658,619 @@ def cmd_statusline(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# compaction: measure the floor, and catch a window set too low
+# --------------------------------------------------------------------------- #
+#
+# Compaction is the rotation mechanism, so its threshold is a safety-critical
+# setting rather than a tuning knob. The failure it can cause is specific: a
+# session has an irreducible FLOOR -- system prompt, tool schemas, skill and
+# project instructions, plus the compaction summary and whatever the
+# session-start hooks print -- and a window set near that floor leaves almost no
+# working room. The session then compacts, lands back at or above the trigger,
+# and compacts again. Measured across this machine's transcripts, session-open
+# floors ran 7K to 97K (p90 50K) and post-compaction floors in coding worktrees
+# ran 39K to 63K, so "200K" is safe in one repo and a loop in another.
+#
+# Everything here therefore works from a MEASURED floor rather than a constant,
+# and expresses the safeguard as a ratio. No model tokens are spent: the
+# transcript is read on disk, exactly as `orch cost` does.
+
+# Working room as a multiple of the floor. At 3, two thirds of the window is
+# usable, which is the smallest margin under which none of the observed floors
+# produces a loop.
+FLOOR_SAFETY_RATIO = float(os.environ.get("ORCH_FLOOR_RATIO", 3.0))
+
+# What to set when nothing has been measured yet. A blind default has to survive
+# the worst floor seen on this machine (97K at session open), not the median --
+# hence 300K rather than the 200K a measured floor of 50K would justify.
+WINDOW_BLIND_DEFAULT = int(os.environ.get("ORCH_AUTOCOMPACT_WINDOW", 300_000) or 0)
+
+# The smallest window this tool will ever recommend, whatever the floor says.
+# Everything here is a SAFETY device, and a safety device that recommends
+# lowering a setting has misunderstood its job: `cost.md` shows a lower window
+# is genuinely cheaper per unit of work, so choosing to go below this is a
+# deliberate cost decision, never something a floor measurement should trigger.
+# 200K is also where the harness was observed to fire by default in these repos.
+WINDOW_SAFE_MIN = int(os.environ.get("ORCH_WINDOW_MIN", 200_000))
+
+# The harness clamps the window into this range; a recommendation outside it
+# would silently become something else.
+WINDOW_FLOOR = 100_000
+WINDOW_CEILING = 1_000_000
+
+# What the compaction summary and the session-start hooks add on top of a
+# session-open floor. A floor measured before this session's first compaction
+# has not paid for the summary yet, so it understates the figure that actually
+# matters -- where the NEXT cycle starts. Measured, post-compaction floors ran
+# 5-15K above session-open floors in the same repos; this errs to the top of
+# that range because the consequence of erring low is a loop.
+SUMMARY_ALLOWANCE = int(os.environ.get("ORCH_SUMMARY_ALLOWANCE", 15_000))
+
+# Two compactions closer together than this are not a cycle, they are a loop.
+# Healthy cycles in the measured transcripts ran 76-140 model calls apart.
+LOOP_CALL_GAP = int(os.environ.get("ORCH_LOOP_CALL_GAP", 15))
+
+# The roles whose context ACCUMULATES, and therefore the only ones an early
+# compaction window helps. An orchestrator or a front desk lives for the whole
+# program; a worker carries a small context and dies at the end of its task, so
+# it has nothing to gain from an early window and a half-finished task to lose
+# to one. Membership is read from the worktree's inbox claim rather than from
+# anything passed at spawn: `agent.session_open` exposes no labels, and the
+# claim is a role name the skill already maintains (`root`, `frontdesk`).
+LONG_LIVED_ROLES = tuple(
+    r.strip() for r in os.environ.get(
+        "ORCH_AUTOCOMPACT_ROLES", "root,frontdesk,integrator").split(",")
+    if r.strip())
+
+# A call carrying less than this is a title generation or a similar side call,
+# not a step of the conversation, and would drag the floor estimate down.
+MIN_REAL_CONTEXT = 1_000
+
+
+def compaction_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "compaction.json")
+
+
+def scan_compaction(path: str) -> Dict[str, Any]:
+    """Floor, observed window and compaction spacing, from a transcript.
+
+    Streams the file and keeps only aggregates. A boundary appears twice in the
+    transcript (the summary message and the boundary metadata); consecutive
+    markers with no model call between them collapse to one event, which is why
+    `pending` is a latch rather than a counter.
+    """
+    calls = 0
+    prev = 0
+    first = None
+    events: List[Dict[str, Any]] = []
+    pending = False
+    peak = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line and "ompact" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (row.get("isCompactSummary")
+                        or row.get("subtype") == "compact_boundary"):
+                    if not pending:
+                        pending = True
+                        events.append({"at_call": calls, "before": prev,
+                                       "after": None})
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                usage = (row.get("message") or {}).get("usage") or {}
+                if not usage:
+                    continue
+                context = ((usage.get("input_tokens") or 0)
+                           + (usage.get("cache_creation_input_tokens") or 0)
+                           + (usage.get("cache_read_input_tokens") or 0))
+                if context < MIN_REAL_CONTEXT:
+                    continue
+                calls += 1
+                peak = max(peak, context)
+                if first is None:
+                    first = context
+                if pending:
+                    events[-1]["after"] = context
+                    pending = False
+                prev = context
+    except OSError:
+        return {}
+    if not calls:
+        return {}
+    landed = [e["after"] for e in events if e.get("after")]
+    # The floor that matters is where a cycle STARTS, so post-compaction beats
+    # session-open -- it carries the summary too. Take the worst observed, not
+    # the best: a margin computed from the friendliest cycle is not a margin.
+    floor = max(landed) if landed else (first or 0)
+    return {
+        "transcript": path,
+        "calls": calls,
+        "floor": floor,
+        "floor_source": "post-compaction" if landed else "session-open",
+        "open_floor": first or 0,
+        "peak": peak,
+        # Where the harness actually fired, which is the window in effect --
+        # more trustworthy than any setting we can read from here.
+        "observed_window": max([e["before"] for e in events if e.get("before")]
+                               or [0]),
+        "events": events,
+        "compactions": len(events),
+    }
+
+
+def effective_floor(scan: Dict[str, Any]) -> int:
+    """The floor the next cycle will actually start from."""
+    floor = int(scan.get("floor") or 0)
+    if scan.get("floor_source") != "post-compaction":
+        floor += SUMMARY_ALLOWANCE
+    return floor
+
+
+def recommend_window(floor: int) -> int:
+    want = max(floor * FLOOR_SAFETY_RATIO, WINDOW_SAFE_MIN)
+    want = min(max(want, WINDOW_FLOOR), WINDOW_CEILING)
+    return int(round(want / 50_000.0) * 50_000)
+
+
+def compaction_advisories(scan: Dict[str, Any], window: int,
+                          floor: int) -> List[str]:
+    """Only the two conditions that mean the window is wrong, not merely tight."""
+    out = []
+    events = scan.get("events", [])
+    effective = window or scan.get("observed_window", 0)
+    room = effective - floor if effective else 0
+
+    gaps = []
+    prev_call = 0
+    for event in events:
+        gaps.append(event["at_call"] - prev_call)
+        prev_call = event["at_call"]
+    tight = [g for g in gaps[1:] if g < LOOP_CALL_GAP]
+    if tight:
+        out.append(
+            "COMPACTION LOOP — %d of %d compactions in this session came less "
+            "than %d model calls after the previous one. That is not a rotation "
+            "cycle, it is a window set too close to this session's floor of "
+            "%dK. The window cannot be changed from inside a running session: "
+            "stop taking new work, finish the turn, and ROTATE into a fresh "
+            "session with the window at %dK (`references/rotation.md`)."
+            % (len(tight), len(events), LOOP_CALL_GAP, floor // 1000,
+               recommend_window(floor) // 1000)
+        )
+    elif effective and room < floor * (FLOOR_SAFETY_RATIO - 1):
+        out.append(
+            "COMPACTION HEADROOM — this session's floor is %dK against a %dK "
+            "window, leaving %dK of working room. One large tool result "
+            "triggers a compaction, and the next cycle starts from the same "
+            "floor. Raise the window to %dK for the next session; nothing can "
+            "change it in this one."
+            % (floor // 1000, effective // 1000, max(room, 0) // 1000,
+               recommend_window(floor) // 1000)
+        )
+    return out
+
+
+def cmd_compaction(args: argparse.Namespace) -> int:
+    quiet = getattr(args, "format", "text") == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        repo_key, program = None, None
+
+    # `window` answers from the record alone. It is called at session_open,
+    # before any transcript for the new session exists, so it must never depend
+    # on one. It prints a number only when this worktree SHOULD have a window
+    # set, and nothing otherwise -- the whole policy lives here rather than half
+    # here and half in a plugin, so there is one place to correct.
+    if args.action == "window":
+        if not (repo_key and program):
+            return 3
+        role = None
+        try:
+            claim = _load_claims(repo_key).get(_worktree_key(args.repo)) or {}
+            role = claim.get("target")
+        except OrchError:
+            role = None
+        if not args.any_role and role not in LONG_LIVED_ROLES:
+            if args.explain:
+                print("no window for this worktree: its inbox claim is %r, "
+                      "which is not a long-lived role (%s). A worker's context "
+                      "dies with its task, so an early window costs it a "
+                      "half-finished task and saves nothing."
+                      % (role, ", ".join(LONG_LIVED_ROLES)), file=sys.stderr)
+            return 3
+        recorded = _load_json(compaction_path(repo_key, program))
+        window = max(int(recorded.get("window") or 0), WINDOW_BLIND_DEFAULT)
+        if not window:
+            return 3
+        print(window)
+        if args.explain:
+            print("role %r · floor %sK measured · window %dK"
+                  % (role, (int(recorded.get("floor") or 0)) // 1000, window // 1000),
+                  file=sys.stderr)
+        return 0
+
+    path = find_transcript(args)
+    if not path:
+        if quiet:
+            return 0
+        raise OrchError("no transcript found; pass --transcript")
+    scan = scan_compaction(path)
+    if not scan:
+        if quiet:
+            return 0
+        raise OrchError("no model calls found in %s" % path)
+
+    env_window = os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    window = int(env_window) if (env_window or "").strip().isdigit() else 0
+    floor = effective_floor(scan)
+
+    if repo_key and program:
+        record = _load_json(compaction_path(repo_key, program))
+        # Keep the worst floor ever seen for this program. A floor only grows --
+        # skills and MCP servers get added, never removed mid-program -- and a
+        # window sized from a lucky low reading is the failure this prevents.
+        # A recorded floor is already effective -- the allowance was applied
+        # when it was written -- so it goes straight into the max.
+        floor = max(floor, int(record.get("floor") or 0))
+        _save_json(compaction_path(repo_key, program), {
+            "floor": floor,
+            "floor_source": scan["floor_source"],
+            "floor_is_effective": True,
+            "window": recommend_window(floor),
+            "observed_window": scan["observed_window"] or record.get("observed_window") or 0,
+            "compactions": scan["compactions"],
+            "measured_at": _now(),
+            "transcript": path,
+        })
+    recommended = recommend_window(floor)
+
+    advisories = compaction_advisories(scan, window, floor)
+
+    if quiet:
+        if not advisories:
+            return 0
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "\n\n".join(advisories) + "\n"}}))
+        return 0
+
+    if args.format == "json":
+        print(json.dumps({**scan, "effective_floor": floor,
+                          "recommended_window": recommended,
+                          "env_window": window,
+                          "advisories": advisories}, indent=2))
+        return 0
+
+    print("transcript   %s" % path)
+    print("floor        %dK tokens effective (%s; session-open was %dK%s)"
+          % (floor // 1000, scan["floor_source"], scan["open_floor"] // 1000,
+             ", + %dK summary allowance" % (SUMMARY_ALLOWANCE // 1000)
+             if scan["floor_source"] != "post-compaction" else ""))
+    print("peak         %dK tokens over %d model calls"
+          % (scan["peak"] // 1000, scan["calls"]))
+    print("compactions  %d%s" % (scan["compactions"],
+                                 (" · harness fired at ~%dK"
+                                  % (scan["observed_window"] // 1000))
+                                 if scan["observed_window"] else ""))
+    print("window       %s"
+          % ("%dK (CLAUDE_CODE_AUTO_COMPACT_WINDOW)" % (window // 1000)
+             if window else "not set in this session's environment"))
+    print("minimum safe %dK (max of floor x %.1f and the %dK floor this tool "
+          "will not go below)"
+          % (recommended // 1000, FLOOR_SAFETY_RATIO, WINDOW_SAFE_MIN // 1000))
+    if window and window < recommended:
+        print("             ^ the window in effect (%dK) is BELOW this."
+              % (window // 1000))
+    for line in advisories:
+        print("\n! %s" % line)
+    if not advisories:
+        print("\nno advisories: compaction spacing and headroom are healthy.")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# rotate: replace an agent without leaving a dangling one behind
+# --------------------------------------------------------------------------- #
+#
+# Two facts make self-managed rotation fail, and both are structural rather than
+# a matter of remembering to be careful:
+#
+#   * CLOSE interrupts the turn that calls it. An agent closing itself destroys
+#     the turn making the call, so it can never observe the result -- which is
+#     why the predecessor is the wrong owner of its own closure, and why the
+#     rotation observed in practice left the old agent alive.
+#   * The inbox claim is keyed by WORKTREE (see `_worktree_key`). A successor
+#     started in a fresh worktree does not inherit the claim; it claims the same
+#     target for a second worktree, and both agents then drain one inbox and
+#     split its items with no sender able to tell.
+#
+# So the protocol here inverts ownership -- the SUCCESSOR closes the
+# predecessor -- and makes the claim transfer an explicit, checked handover
+# rather than a second claim that happens to use the same name.
+
+# How long a rotation may sit unfinished before the turn-end hook calls it out.
+ROTATION_STALE_MINUTES = int(os.environ.get("ORCH_ROTATION_STALE", 10))
+
+
+def rotation_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "rotation.json")
+
+
+def load_rotation(repo_key: str, program: str) -> Dict[str, Any]:
+    return _load_json(rotation_path(repo_key, program))
+
+
+def pending_rotation_for(repo_key: str, program: str, target: str
+                         ) -> Dict[str, Any]:
+    """A rotation whose predecessor owned `target`, or {}."""
+    rotation = load_rotation(repo_key, program)
+    if rotation.get("state") in ("pending", "claimed") and \
+            (rotation.get("from") or {}).get("inbox_target") == target:
+        return rotation
+    return {}
+
+
+def _age_minutes(stamp: Any) -> Optional[float]:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        then = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() / 60.0
+
+
+def rotation_advisory(rotation: Dict[str, Any]) -> Optional[str]:
+    """The dangling-predecessor detector.
+
+    Fires in the successor's session, because that is where someone can act: the
+    predecessor is by then either interrupted or not listening.
+    """
+    if rotation.get("state") not in ("pending", "claimed"):
+        return None
+    age = _age_minutes(rotation.get("began_at"))
+    if age is None or age < ROTATION_STALE_MINUTES:
+        return None
+    old = rotation.get("from") or {}
+    return (
+        "ROTATION INCOMPLETE — a rotation away from %r (agent %s) has been open "
+        "for %d minutes and its predecessor was never closed. A live "
+        "predecessor is a second writer on this program: it still drains the "
+        "same inbox and still holds its worktree. Close it, then run "
+        "`orch rotate complete --alive <live ids>`; if it is already gone, "
+        "`orch rotate complete --assume-none-alive`."
+        % (old.get("handle") or "?", (old.get("agent_id") or "-")[:8], age)
+    )
+
+
+def _successor_checklist(rotation: Dict[str, Any]) -> str:
+    old = rotation.get("from") or {}
+    return "\n".join([
+        "Paste this into the successor's first prompt, verbatim:",
+        "",
+        "  You are replacing agent %s, which is still running and must not stay"
+        % (old.get("agent_id") or "<predecessor agent id>"),
+        "  running. Before any other work, in this order:",
+        "    1. Read the handoff note at %s." % (rotation.get("handoff") or "?"),
+        "    2. Load the orchestrating skill, then run:",
+        "         orch rotate claim",
+        "       It transfers the `%s` inbox to you and refuses if you are in the"
+        % (old.get("inbox_target") or "root"),
+        "       wrong worktree. Do not run `orch inbox claim` by hand.",
+        "    3. CLOSE agent %s (your substrate adapter's CLOSE verb)."
+        % (old.get("agent_id") or "<predecessor agent id>"),
+        "    4. Run `orch rotate complete --alive <live agent ids>` to prove",
+        "       it is gone. Only then start work.",
+    ])
+
+
+def cmd_rotate_begin(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    existing = load_rotation(repo_key, program)
+    if existing.get("state") in ("pending", "claimed") and not args.force:
+        raise OrchError(
+            "a rotation away from %r is already %s (began %s).\n"
+            "Two rotations in flight is two successors for one lane. Finish it "
+            "with `orch rotate complete`, drop it with `orch rotate abort`, or "
+            "pass --force if you know this record is stale."
+            % ((existing.get("from") or {}).get("handle"),
+               existing.get("state"), existing.get("began_at"))
+        )
+    handoff = os.path.abspath(os.path.expanduser(args.handoff))
+    if not os.path.isfile(handoff) or os.path.getsize(handoff) == 0:
+        raise OrchError(
+            "handoff note %s does not exist or is empty.\n"
+            "The note is the successor's only account of what is in flight that "
+            "is not already in the tracker or the plan document, and it must "
+            "exist before the successor does -- exactly as a brief must."
+            % handoff
+        )
+    worktree = _worktree_key(args.repo)
+    # Deliberately NOT resolve_target(): that prefers ORCH_INBOX_TARGET, which
+    # on Paseo is the agent's own id. An agent-id target is not transferable --
+    # the successor is a different agent with a different id, so anything queued
+    # to the old id becomes unreachable by anyone. The transferable identity is
+    # the role-named claim on this worktree, which is why Step 2 claims `root`
+    # rather than letting the injected default stand.
+    claim = _load_claims(repo_key).get(worktree) or {}
+    target = args.handle or claim.get("target")
+    env_target = os.environ.get("ORCH_INBOX_TARGET")
+    rotation = {
+        "state": "pending",
+        "began_at": _now(),
+        "handoff": handoff,
+        "reason": args.reason or "",
+        "from": {
+            "handle": target or "root",
+            "agent_id": args.agent_id,
+            "worktree": worktree,
+            "inbox_target": target,
+        },
+    }
+    _save_json(rotation_path(repo_key, program), rotation)
+    print("rotation recorded: %r -> successor pending (program %s)"
+          % (rotation["from"]["handle"], program))
+    if not target:
+        print("note: this worktree claims no inbox, so there is nothing to "
+              "transfer. If you have been draining one, you were reading an "
+              "agent-id target from the environment rather than a claim, and "
+              "it cannot be transferred -- claim a role name first:\n"
+              "  orch inbox claim --as root")
+    elif env_target and env_target != target:
+        log, cursor = inbox_paths(repo_key, program, env_target)
+        orphaned, _ = _read_pending(log, cursor)
+        print("WARNING: you also drain %r from ORCH_INBOX_TARGET, and that "
+              "target is your own agent id -- it does NOT follow a rotation.\n"
+              "%s\n"
+              % (env_target,
+                 ("%d item%s queued there will be unreachable once you are "
+                  "closed. Re-send them to %r before spawning."
+                  % (len(orphaned), "" if len(orphaned) == 1 else "s", target))
+                 if orphaned else
+                 "Nothing is queued there now, so nothing is lost -- but tell "
+                 "senders to address %r from here on." % target))
+    print("\nSPAWN the successor in THIS worktree (%s) and, on Paseo, in this\n"
+          "agent's own workspace -- the inbox claim is keyed by worktree, so a\n"
+          "successor elsewhere splits the inbox instead of inheriting it, and\n"
+          "the same workspace is also what puts it where the old tab was.\n"
+          % worktree)
+    print(_successor_checklist(rotation))
+    print("\nAfter spawning, do nothing further. Your closure is the "
+          "successor's job: CLOSE interrupts the turn that calls it, so you "
+          "cannot close yourself and observe that it worked.")
+    return 0
+
+
+def cmd_rotate_claim(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    rotation = load_rotation(repo_key, program)
+    if rotation.get("state") not in ("pending", "claimed"):
+        raise OrchError(
+            "no rotation is pending for program %r.\n"
+            "If you are a fresh orchestrator rather than a successor, claim "
+            "your inbox the ordinary way: `orch inbox claim --as root`."
+            % program
+        )
+    old = rotation.get("from") or {}
+    here = _worktree_key(args.repo)
+    if old.get("worktree") and os.path.realpath(old["worktree"]) != here \
+            and not args.force_different_worktree:
+        raise OrchError(
+            "this rotation's predecessor ran in\n  %s\nbut you are in\n  %s\n"
+            "The inbox claim is keyed by worktree, so claiming from here would "
+            "leave two worktrees claiming %r -- and while the predecessor "
+            "lives, both drain it and split its items with no sender able to "
+            "tell. Start the successor in the predecessor's worktree, or pass "
+            "--force-different-worktree if you have already closed the "
+            "predecessor and accept that queued items may have been split."
+            % (old["worktree"], here, old.get("inbox_target"))
+        )
+    target = old.get("inbox_target")
+    if target:
+        # Drop the predecessor's claim first. A takeover that adds a claim
+        # without removing one is the duplicate-drain bug, not a transfer.
+        claims = _load_claims(repo_key)
+        for worktree in [w for w, c in claims.items()
+                         if c.get("target") == target and w != here]:
+            claims.pop(worktree, None)
+        claims[here] = {"target": target, "program": program, "at": _now(),
+                        "rotated_from": old.get("worktree")}
+        _write_claims(repo_key, claims)
+        log, cursor = inbox_paths(repo_key, program, target)
+        pending, _ = _read_pending(log, cursor)
+        print("inbox %r transferred to %s (%d item%s still queued)"
+              % (target, here, len(pending), "" if len(pending) == 1 else "s"))
+    rotation["state"] = "claimed"
+    rotation["claimed_at"] = _now()
+    rotation["successor_worktree"] = here
+    _save_json(rotation_path(repo_key, program), rotation)
+    print("\nStill outstanding: CLOSE agent %s, then "
+          "`orch rotate complete --alive <live agent ids>`.\n"
+          "Until that runs, the predecessor is a second writer on this program."
+          % (old.get("agent_id") or "<predecessor>"))
+    return 0
+
+
+def cmd_rotate_complete(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    rotation = load_rotation(repo_key, program)
+    if rotation.get("state") not in ("pending", "claimed"):
+        print("no rotation in flight for %s" % program)
+        return 0
+    old = rotation.get("from") or {}
+    agent = old.get("agent_id")
+    alive = {a.strip() for a in (args.alive or "").split(",") if a.strip()}
+    if not alive and not args.assume_none_alive:
+        raise OrchError(
+            "pass --alive <id,id,...> with the substrate's live agent ids, or "
+            "--assume-none-alive.\n"
+            "This is the one check that the predecessor is actually gone, and "
+            "its own report cannot supply it: CLOSE interrupts the turn that "
+            "calls it, so a predecessor never reports its own closure."
+        )
+    if agent and agent in alive:
+        raise OrchError(
+            "predecessor %s is still in the live set. Closing it is the point "
+            "of the rotation -- a live predecessor still drains %r and still "
+            "holds %s. CLOSE it, re-derive the live set, and run this again."
+            % (agent[:8], old.get("inbox_target"), old.get("worktree"))
+        )
+    os.unlink(rotation_path(repo_key, program))
+    print("rotation complete: %r replaced, predecessor %s confirmed gone"
+          % (old.get("handle"), (agent or "-")[:8]))
+    return 0
+
+
+def cmd_rotate_status(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    rotation = load_rotation(repo_key, program)
+    if rotation.get("state") not in ("pending", "claimed"):
+        print("no rotation in flight for %s" % program)
+        return 3
+    old = rotation.get("from") or {}
+    print("rotation %s since %s" % (rotation["state"], rotation.get("began_at")))
+    print("  from      %s (agent %s)" % (old.get("handle"),
+                                         (old.get("agent_id") or "-")[:8]))
+    print("  worktree  %s" % old.get("worktree"))
+    print("  inbox     %s" % old.get("inbox_target"))
+    print("  handoff   %s" % rotation.get("handoff"))
+    advisory = rotation_advisory(rotation)
+    if advisory:
+        print("\n! %s" % advisory)
+    return 0
+
+
+def cmd_rotate_abort(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = rotation_path(repo_key, program)
+    if os.path.exists(path):
+        os.unlink(path)
+    print("rotation record cleared for %s. The predecessor keeps its inbox "
+          "claim; nothing was closed." % program)
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="orch",
@@ -2195,9 +3288,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("programs", help="list programs for this repo")
     sp.set_defaults(func=cmd_programs)
 
+    sp = sub.add_parser("permissions",
+                        help="check the one read a worker needs to start")
+    sp.add_argument("--install", action="store_true",
+                    help="add the rule to your Claude settings")
+    sp.set_defaults(func=cmd_permissions)
+
     sp = sub.add_parser("open", help="record a dispatch from its brief")
     sp.add_argument("--brief", required=True, help="path to the brief file")
     sp.add_argument("--agent-id", help="omit when recording before the spawn")
+    sp.add_argument("--mode",
+                    help="session mode to spawn with (default: %s; brief front "
+                         "matter `mode` overrides that)" % WORKER_MODE_DEFAULT)
+    sp.add_argument("--ask-mode-ok", action="store_true",
+                    help="allow a mode that stops to ask a human")
     common(sp)
     sp.set_defaults(func=cmd_open)
 
@@ -2205,6 +3309,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("entry", help="entry id or agent id")
     sp.add_argument("--agent-id")
     sp.add_argument("--session-name")
+    sp.add_argument("--mode", help="the session mode the agent is actually in")
     sp.add_argument("--status", choices=STATUSES)
     sp.add_argument("--pending-message",
                     help="message to deliver when the worker next goes idle")
@@ -2347,6 +3452,65 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--debug", action="store_true",
                     help="raise instead of rendering nothing")
     sp.set_defaults(func=cmd_statusline)
+
+    sp = sub.add_parser(
+        "compaction",
+        help="measure this session's context floor and check the window")
+    sp.add_argument("action", choices=("measure", "check", "window"),
+                    help="measure: floor and recommended window · "
+                         "check: SessionStart loop detector · "
+                         "window: the number this program should launch with")
+    sp.add_argument("--transcript",
+                    help="a harness transcript; defaults to this session's")
+    sp.add_argument("--program")
+    sp.add_argument("--format", default="text",
+                    choices=("text", "json", "hook"))
+    sp.add_argument("--any-role", action="store_true",
+                    help="`window`: answer even for a worker worktree")
+    sp.add_argument("--explain", action="store_true",
+                    help="`window`: say on stderr why, for a plugin log")
+    sp.set_defaults(func=cmd_compaction)
+
+    sp = sub.add_parser(
+        "rotate",
+        help="replace an agent without leaving a dangling one behind")
+    rsub = sp.add_subparsers(dest="rotate_action", required=True)
+
+    rp = rsub.add_parser("begin",
+                         help="predecessor: record the handoff before spawning")
+    rp.add_argument("--handoff", required=True,
+                    help="path to the handoff note; must already exist")
+    rp.add_argument("--agent-id", required=True,
+                    help="YOUR substrate agent id, so the successor can close you")
+    rp.add_argument("--handle", help="your inbox target (default: the claimed one)")
+    rp.add_argument("--reason")
+    rp.add_argument("--force", action="store_true",
+                    help="overwrite a rotation record you know is stale")
+    rp.add_argument("--to", help=argparse.SUPPRESS)
+    rp.add_argument("--program")
+    rp.set_defaults(func=cmd_rotate_begin)
+
+    rp = rsub.add_parser("claim",
+                         help="successor: take over the predecessor's inbox")
+    rp.add_argument("--force-different-worktree", action="store_true",
+                    help="accept a split inbox; only after closing the predecessor")
+    rp.add_argument("--program")
+    rp.set_defaults(func=cmd_rotate_claim)
+
+    rp = rsub.add_parser("complete",
+                         help="successor: prove the predecessor is gone")
+    rp.add_argument("--alive", help="comma-separated live agent ids")
+    rp.add_argument("--assume-none-alive", action="store_true")
+    rp.add_argument("--program")
+    rp.set_defaults(func=cmd_rotate_complete)
+
+    rp = rsub.add_parser("status", help="what rotation is in flight, if any")
+    rp.add_argument("--program")
+    rp.set_defaults(func=cmd_rotate_status)
+
+    rp = rsub.add_parser("abort", help="drop the record; closes nothing")
+    rp.add_argument("--program")
+    rp.set_defaults(func=cmd_rotate_abort)
 
     sp = sub.add_parser("budget", help="show or set this program's spend limit")
     sp.add_argument("--set", dest="limit", type=float,

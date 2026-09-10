@@ -54,9 +54,16 @@ item the item concerns.
 
 ### Rules that keep it correct
 
-- **One claimant per worktree.** The claim maps a worktree to an inbox name, which is sound only
-  because of the one-writer-per-worktree rule. Two agents draining one inbox split its items and
-  neither sender can tell.
+- **One claimant per worktree, and one worktree per name.** The claim maps a worktree to an inbox
+  name, which is sound only because of the one-writer-per-worktree rule. Two agents draining one
+  inbox split its items and neither sender can tell — so `orch inbox claim` now **refuses** a target
+  another worktree already claims, rather than quietly adding a second claimant. That refusal is why
+  taking over an inbox from a live agent is `orch rotate claim` and not a forced re-claim; see
+  `rotation.md`.
+- **A claim outranks `ORCH_INBOX_TARGET`.** When both exist, commands address the claim. The
+  environment variable is a substrate-injected default that usually carries an agent id, and an agent
+  id cannot be handed to anyone else; a claim is a deliberate act naming a role. `--to` still beats
+  both.
 - **Only the receiver drains.** Draining marks items delivered. A drain whose output is discarded
   loses them — the cursor has already moved. Never drain an inbox to *inspect* it; use `peek` or
   `list`.
