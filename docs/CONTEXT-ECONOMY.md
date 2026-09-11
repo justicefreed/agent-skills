@@ -132,6 +132,40 @@ skill directory to reach the plugin root, because the kernel resolves the symlin
 `..`. The `spend install` path is immune — it bakes in `os.path.realpath(__file__)` at install
 time.
 
+## 5a. The 1-hour cache-write tier (correction, 2026-09-11)
+
+Anthropic bills cache *writes* at two tiers: 5-minute at 1.25x input, 1-hour at
+**2x**. `cache_creation_input_tokens` is their sum and did not change when the
+`cache_creation: {ephemeral_5m, ephemeral_1h}` breakdown was added, so code
+reading only the flat field kept working, kept returning plausible numbers, and
+silently stopped being right.
+
+On this machine 91% of cache-creation tokens are the 1-hour tier -- paseo runs a
+1h TTL -- so the error was not marginal. Measured across 40 real transcripts:
+**a 10.3% understatement**. Every row carried the breakdown; the data was always
+there.
+
+Two consequences worth stating plainly. Absolute figures quoted from before this
+fix (the $1,140 audit, the 55% cache-read share) are low. Ratio-based
+conclusions survive, because both sides moved together -- the `economy` anchor
+argument still holds.
+
+The fix derives the 5m tier by subtracting 1h from the flat total, so the
+authoritative field stays authoritative and a transcript predating the breakdown
+degrades to the old answer rather than to zero. `rate_for` synthesizes
+`cache_write_1h` at 2x input when a rates table predates the tier, because
+falling back to the 5m rate would reintroduce the bug in exactly the
+configuration least likely to be looked at. Pinned in
+`scripts/test_spend.py`.
+
+**Parsing is now single-sourced too.** `orch.py` had its own copy of the pricing
+loop -- rates were shared, parsing was not -- so the first fix landed in one of
+the two and left the other wrong. `orch.read_usage` now calls
+`spend.read_usage` and passes an `on_line` observer for the relay and
+human-turn counts that are genuinely orchestration's. 62 lines of duplication
+removed. The seam is: anything true of a transcript in general lives in
+`spend.py`.
+
 ## 6. Always-on
 
 `spend install` writes the four hooks into `~/.claude/settings.json`, marked with

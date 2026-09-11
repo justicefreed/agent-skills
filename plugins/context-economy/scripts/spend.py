@@ -34,7 +34,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 SCHEMA_VERSION = 1
 
@@ -63,13 +63,16 @@ def env(name: str, default: Any = None) -> Any:
 # 580 measured Fable calls to Opus would have SAVED $0.26, because Fable prices
 # cache reads at $0.25/MTok against Opus's $0.50.
 DEFAULT_RATES = {
-    "default":    {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
-    "opus":       {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
-    "fable":      {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
-    "mythos":     {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
-    "sonnet-4-6": {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
-    "sonnet":     {"in": 2.0,  "out": 10.0, "cache_write": 2.5,   "cache_read": 0.2},
-    "haiku":      {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
+    # `cache_write` is the 5-minute tier (1.25x input); `cache_write_1h` is the
+    # 1-hour tier (2x input). Both are real and the split is per call -- see
+    # read_usage. A session on a 1h-TTL harness is overwhelmingly the 1h tier.
+    "default":    {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5},
+    "opus":       {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5},
+    "fable":      {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_write_1h": 20.0, "cache_read": 0.25},
+    "mythos":     {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_write_1h": 20.0, "cache_read": 0.25},
+    "sonnet-4-6": {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.3},
+    "sonnet":     {"in": 2.0,  "out": 10.0, "cache_write": 2.5,   "cache_write_1h": 4.0,  "cache_read": 0.2},
+    "haiku":      {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_write_1h": 2.0,  "cache_read": 0.1},
 }
 
 # Model RUNGS are relative to the provider, never absolute names. A name written
@@ -113,7 +116,13 @@ def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
         if key != "default" and key in name:
             if best is None or len(key) > len(best[0]):
                 best = (key, value)
-    return best[1] if best else rates["default"]
+    rate = best[1] if best else rates["default"]
+    if "cache_write_1h" not in rate:
+        # A rates.json written before the 1h tier existed prices every cache
+        # write at the 5m rate. Synthesize rather than fall back to it: the
+        # tier is 2x input, and silently undercharging is the bug this fixes.
+        rate = dict(rate, cache_write_1h=rate["in"] * 2.0)
+    return rate
 
 
 # --------------------------------------------------------------------------- #
@@ -269,8 +278,14 @@ def find_transcript(args: argparse.Namespace) -> Optional[str]:
     return max(files, key=os.path.getmtime) if files else None
 
 
-def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
+def read_usage(path: str, rates: Dict[str, Any],
+               on_line: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """Summarise a transcript's model calls. Streams; keeps only aggregates.
+
+    `on_line` is handed every raw line before parsing, so a caller needing its
+    own per-line tally (orchestration counts human turns and relay shapes) gets
+    it from this single pass instead of keeping a second copy of the pricing
+    loop -- which is how the two drifted apart on the 1h cache tier.
 
     **One API response can occupy several transcript lines.** The harness writes
     one line per content block, so a response holding thinking + text + tool_use
@@ -279,8 +294,9 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     session, 1,592 lines were 714 responses -- a 2.23x overstatement.
     `requestId` is the response identity.
     """
-    totals = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}
-    component_cost = {"in": 0.0, "out": 0.0, "cache_write": 0.0, "cache_read": 0.0}
+    totals = {"in": 0, "out": 0, "cache_write": 0, "cache_write_1h": 0,
+              "cache_read": 0}
+    component_cost = {k: 0.0 for k in totals}
     seen: Set[str] = set()
     steps = 0
     cost = 0.0
@@ -289,6 +305,8 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                if on_line is not None:
+                    on_line(line)
                 if '"usage"' not in line:
                     continue
                 try:
@@ -309,10 +327,21 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
                 model = message.get("model") or ""
                 rate = rate_for(model, rates)
                 models[model] = models.get(model, 0) + 1
+                # Cache writes bill at two tiers. `cache_creation_input_tokens`
+                # is their sum and stayed put when the breakdown was added, so
+                # reading only it prices the 1h tier at the 5m rate -- measured
+                # at a 10.3% understatement on a 1h-TTL harness, where 91% of
+                # writes are 1h. Derive 5m by subtraction so the flat field
+                # stays authoritative and an absent breakdown degrades to
+                # today's behaviour rather than to zero.
+                created = usage.get("cache_creation_input_tokens", 0) or 0
+                breakdown = usage.get("cache_creation") or {}
+                write_1h = breakdown.get("ephemeral_1h_input_tokens", 0) or 0
                 fields = {
                     "in": usage.get("input_tokens", 0) or 0,
                     "out": usage.get("output_tokens", 0) or 0,
-                    "cache_write": usage.get("cache_creation_input_tokens", 0) or 0,
+                    "cache_write": max(created - write_1h, 0),
+                    "cache_write_1h": write_1h,
                     "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
                 }
                 step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
@@ -322,6 +351,7 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
                 cost += step_cost
                 steps += 1
                 recent.append((fields["in"] + fields["cache_write"]
+                               + fields["cache_write_1h"]
                                + fields["cache_read"], step_cost))
                 if len(recent) > 25:
                     recent.pop(0)
@@ -443,9 +473,10 @@ def cmd_cost(args: argparse.Namespace) -> int:
     print("transcript   %s" % usage["transcript"])
     print("model calls  %d" % usage["steps"])
     print("context now  %dK tokens" % (usage["context"] // 1000))
-    print("tokens       in %s · out %s · cache write %s · cache read %s"
+    print("tokens       in %s · out %s · cache write %s (5m) + %s (1h) · "
+          "cache read %s"
           % tuple("{:,}".format(t[k]) for k in
-                  ("in", "out", "cache_write", "cache_read")))
+                  ("in", "out", "cache_write", "cache_write_1h", "cache_read")))
     print("cost (est)   $%.2f total · $%.2f per model call (last 25)"
           % (usage["cost"], usage["cost_per_step"]))
     print("cost share   %s" % " · ".join(

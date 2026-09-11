@@ -1700,94 +1700,32 @@ def _human_turn_text(line: str) -> Optional[str]:
 
 
 def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
-    """Summarise a harness transcript's model calls.
+    """Summarise a transcript, adding the relay/human-turn counts orch reports.
 
-    Reads the file streaming and keeps only aggregates, because the whole point
-    is to answer a question about a large file without carrying it anywhere.
-
-    **One API response can occupy several transcript lines.** The harness writes
-    one line per content block, so a response holding thinking + text + tool_use
-    is three lines -- each carrying an identical copy of the same `usage` object.
-    Summing lines therefore multiplies the bill by the average block count: on a
-    measured session, 1,592 lines were 714 responses, a 2.23x overstatement, and
-    463 of those responses were multi-block. `requestId` is the response
-    identity; every line after the first for a given id is a duplicate view of a
-    call already counted, not a new call.
+    The pricing loop -- requestId dedup, the 5m/1h cache-write split, per-call
+    rates -- lives in `spend.py` and is called, not copied. It was copied once,
+    and the copy silently kept pricing 1h cache writes at the 5m rate after
+    spend.py was fixed. Anything true of a transcript in general belongs there;
+    only the relay analysis below is orchestration's.
     """
-    totals = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}
-    component_cost = {"in": 0.0, "out": 0.0, "cache_write": 0.0, "cache_read": 0.0}
-    seen_requests: Set[str] = set()
-    steps = 0
-    cost = 0.0
-    recent: List[Tuple[int, float]] = []          # (context, cost) per step
-    models: Dict[str, int] = {}
-    turn_shapes: Dict[str, int] = {}              # relay template -> count
-    human_turns = 0
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                turn = _human_turn_text(line)
-                if turn is not None:
-                    human_turns += 1
-                    if len(turn) <= RELAY_MAX_CHARS:
-                        shape = _relay_template(turn)
-                        turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
-                if '"usage"' not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("type") != "assistant":
-                    continue
-                message = row.get("message") or {}
-                usage = message.get("usage") or {}
-                if not usage:
-                    continue
-                request_id = row.get("requestId") or message.get("id")
-                if request_id:
-                    if request_id in seen_requests:
-                        continue
-                    seen_requests.add(request_id)
-                model = message.get("model") or ""
-                rate = rate_for(model, rates)
-                models[model] = models.get(model, 0) + 1
-                fields = {
-                    "in": usage.get("input_tokens", 0) or 0,
-                    "out": usage.get("output_tokens", 0) or 0,
-                    "cache_write": usage.get("cache_creation_input_tokens", 0) or 0,
-                    "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
-                }
-                step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
-                for key, value in fields.items():
-                    totals[key] += value
-                    component_cost[key] += value * rate[key] / 1e6
-                cost += step_cost
-                steps += 1
-                context = fields["in"] + fields["cache_write"] + fields["cache_read"]
-                recent.append((context, step_cost))
-                if len(recent) > 25:
-                    recent.pop(0)
-    except OSError:
+    counts = {"human_turns": 0}
+    turn_shapes: Dict[str, int] = {}
+
+    def observe(line: str) -> None:
+        turn = _human_turn_text(line)
+        if turn is None:
+            return
+        counts["human_turns"] += 1
+        if len(turn) <= RELAY_MAX_CHARS:
+            shape = _relay_template(turn)
+            turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
+
+    usage = _spend_module().read_usage(path, rates, on_line=observe)
+    if not usage:
         return {}
-    if not steps:
-        return {}
-    window = recent[-25:]
-    return {
-        "transcript": path,
-        "steps": steps,
-        "tokens": totals,
-        "cost": cost,
-        "context": window[-1][0] if window else 0,
-        "human_turns": human_turns,
-        "relay_turns": max(turn_shapes.values()) if turn_shapes else 0,
-        "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
-        "models": models,
-        # Priced per call as it was read, not by re-pricing the totals at one
-        # model's rate -- a mixed-tier session has no single rate to use, and
-        # picking the most common model misattributed every other tier's spend.
-        "shares": {k: (component_cost[k] / cost if cost else 0) for k in totals},
-    }
+    usage["human_turns"] = counts["human_turns"]
+    usage["relay_turns"] = max(turn_shapes.values()) if turn_shapes else 0
+    return usage
 
 
 def budget_path(repo_key: str, program: str) -> str:
@@ -1977,9 +1915,11 @@ def cmd_cost(args: argparse.Namespace) -> int:
     print("transcript   %s" % usage["transcript"])
     print("model calls  %d" % usage["steps"])
     print("context now  %dK tokens" % (usage["context"] // 1000))
-    print("tokens       in %s · out %s · cache write %s · cache read %s"
+    print("tokens       in %s · out %s · cache write %s (5m) + %s (1h) · "
+          "cache read %s"
           % tuple("{:,}".format(t[k]) for k in
-                  ("in", "out", "cache_write", "cache_read")))
+                  ("in", "out", "cache_write", "cache_write_1h",
+                   "cache_read")))
     print("cost (est)   $%.2f total · $%.2f per model call (last 25)"
           % (usage["cost"], usage["cost_per_step"]))
     print("cost share   %s" % " · ".join(
