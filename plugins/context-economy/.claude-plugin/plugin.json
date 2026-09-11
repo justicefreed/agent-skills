@@ -1,0 +1,64 @@
+{
+  "name": "context-economy",
+  "version": "0.1.0",
+  "description": "Session cost, context hygiene and compaction safety for any session: measure what a session costs, guard large inputs and reads, prompt for a subagent model rung, and keep the auto-compact window clear of the session's floor.",
+  "author": {
+    "name": "Justice Reed"
+  },
+  "repository": "https://github.com/justicefreed/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "cost",
+    "context",
+    "compaction",
+    "subagents",
+    "model-selection",
+    "hooks"
+  ],
+  "skills": [
+    "./skills/delegating-economically"
+  ],
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for d in \"$SPEND_SKILL_DIR\" \"$CLAUDE_PLUGIN_ROOT\" \"$HOME/.claude/skills/delegating-economically/../..\" ; do [ -f \"$d/scripts/spend.py\" ] && exec python3 \"$d/scripts/spend.py\" cost --format hook; done; exit 0"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for d in \"$SPEND_SKILL_DIR\" \"$CLAUDE_PLUGIN_ROOT\" \"$HOME/.claude/skills/delegating-economically/../..\" ; do [ -f \"$d/scripts/spend.py\" ] && exec python3 \"$d/scripts/spend.py\" guard; done; exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for d in \"$SPEND_SKILL_DIR\" \"$CLAUDE_PLUGIN_ROOT\" \"$HOME/.claude/skills/delegating-economically/../..\" ; do [ -f \"$d/scripts/spend.py\" ] && exec python3 \"$d/scripts/spend.py\" rung; done; exit 0"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for d in \"$SPEND_SKILL_DIR\" \"$CLAUDE_PLUGIN_ROOT\" \"$HOME/.claude/skills/delegating-economically/../..\" ; do [ -f \"$d/scripts/spend.py\" ] && exec python3 \"$d/scripts/spend.py\" compaction check --format hook; done; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

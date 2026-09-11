@@ -1,6 +1,6 @@
 ---
 name: orchestrating
-description: Orchestrate work across multiple agents — decide whether to delegate at all, choose the execution substrate and isolation, pick model and effort, write briefs, track dispatches, land finished work, and verify what comes back. Use when the user wants work fanned out to subagents or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, is deciding whether a task is worth delegating, needs queued input delivered to a busy agent, wants a cheap front desk between themselves and a running orchestrator, or when another skill needs the delegation and brief-contract rules.
+description: Orchestrate work across multiple agents with tracked dispatches, briefs and verification. Use when the user wants work fanned out or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, needs input delivered to a busy agent, wants a front desk in front of an orchestrator, or when another skill needs the brief-contract rules.
 hooks:
   Stop:
     - hooks:

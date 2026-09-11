@@ -1523,15 +1523,55 @@ def cmd_inbox_list(args: argparse.Namespace) -> int:
 # `default` is deliberately the Opus row now: an unrecognised model is far more
 # likely to be a new frontier model than a cheap one, and erring high makes the
 # budget advisory fire early rather than never.
-DEFAULT_RATES = {
-    "default":    {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
-    "opus":       {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
-    "fable":      {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
-    "mythos":     {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
-    "sonnet-4-6": {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
-    "sonnet":     {"in": 2.0,  "out": 10.0, "cache_write": 2.5,   "cache_read": 0.2},
-    "haiku":      {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
-}
+# Rates live in the `context-economy` plugin's `spend.py`, which owns them for
+# every session rather than only for an orchestration program. There is
+# deliberately no fallback copy here: the measured failure this guards against
+# was a rate table three model generations stale in ONE place, reporting $1,025
+# for a session that cost $127. A second copy that silently takes over when the
+# first cannot be found reproduces exactly that bug, so a missing spend.py is an
+# error with a fix attached, not a quiet degradation.
+SPEND_SEARCH_DIRS = (
+    os.environ.get("SPEND_SKILL_DIR") or "",
+    os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT") or "", "..",
+                 "context-economy"),
+    # ../../../../.. from scripts/orch.py is plugins/, where a sibling plugin
+    # lives in a source checkout of this marketplace.
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.realpath(__file__)))))), "context-economy"),
+    os.path.join(os.path.expanduser("~"), ".claude", "plugins", "context-economy"),
+    os.path.join(os.path.expanduser("~"), ".agents", "plugins", "context-economy"),
+)
+
+
+def find_spend() -> Optional[str]:
+    for directory in SPEND_SEARCH_DIRS:
+        if not directory:
+            continue
+        path = os.path.join(directory, "scripts", "spend.py")
+        if os.path.isfile(path):
+            return os.path.realpath(path)
+    return None
+
+
+_SPEND_MODULE: Any = None
+
+
+def _spend_module():
+    global _SPEND_MODULE
+    if _SPEND_MODULE is not None:
+        return _SPEND_MODULE
+    path = find_spend()
+    if not path:
+        raise OrchError(
+            "cost reporting needs the `context-economy` plugin, which owns the "
+            "model rate table. Install it from this marketplace, or set "
+            "SPEND_SKILL_DIR to its plugin directory.")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("spend", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _SPEND_MODULE = module
+    return module
 
 # Context thresholds, in tokens. The first is where the per-step tax starts to
 # dominate; the second is where rotating is almost always cheaper than continuing.
@@ -1552,35 +1592,26 @@ FRONTDESK_DISPATCHES = int(os.environ.get("ORCH_FRONTDESK_DISPATCHES", 6))
 
 
 def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
-    override = os.environ.get("ORCH_RATES")
-    if override:
-        try:
-            return {**DEFAULT_RATES, **json.loads(override)}
-        except ValueError:
-            pass
+    """The shared table, with a program-local `rates.json` layered on top.
+
+    ORCH_RATES and SPEND_RATES are both honoured by spend.py itself; the only
+    thing added here is the per-program override, which is the one piece of rate
+    handling that genuinely belongs to an orchestration program.
+    """
+    rates = _spend_module().load_rates()
     if repo_key and program:
         path = os.path.join(program_dir(repo_key, program), "rates.json")
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                return {**DEFAULT_RATES, **json.load(fh)}
+                return {**rates, **json.load(fh)}
         except (OSError, ValueError):
             pass
-    return dict(DEFAULT_RATES)
+    return rates
 
 
 def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
-    """Longest key wins, so `sonnet-4-6` beats `sonnet` on a 4.6 model id.
-
-    Deliberately not first-match: that made the answer depend on dict insertion
-    order, which an ORCH_RATES override is free to change.
-    """
-    name = (model or "").lower()
-    best = None
-    for key, value in rates.items():
-        if key != "default" and key in name:
-            if best is None or len(key) > len(best[0]):
-                best = (key, value)
-    return best[1] if best else rates["default"]
+    """Longest key wins, so `sonnet-4-6` beats `sonnet` on a 4.6 model id."""
+    return _spend_module().rate_for(model, rates)
 
 
 def project_dir_for(cwd: str) -> Optional[str]:
