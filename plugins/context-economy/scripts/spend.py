@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import re
 import subprocess
 import sys
@@ -161,10 +162,22 @@ def _load_json(path: str) -> Dict[str, Any]:
 
 
 def _save_json(path: str, data: Dict[str, Any]) -> None:
+    """Write atomically, without widening the file's permissions.
+
+    os.replace takes the temp file's mode, and a fresh open() lands at
+    0666 & ~umask -- usually 0644. Applied to ~/.claude/settings.json, which
+    people put API keys in, a save would quietly turn an owner-only config
+    world-readable. Carry the existing mode over; default new files to 0600.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = 0o600
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
+    os.chmod(tmp, mode)
     os.replace(tmp, path)
 
 
