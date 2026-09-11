@@ -15,7 +15,7 @@ not the process — and for short-lived work where a fresh restart is cheap.
 | `ESCALATE` | the message tool addressed to `"main"` | **background subagents only** — so escalation-capable dispatch implies background dispatch | documented |
 | `PEER` | the message tool, addressed to a listed peer | **queues and drains at the receiver's next tool round**; race-free | documented |
 | `RETUNE` | none | model is fixed at spawn; **no effort dial** — effort comes from the agent definition | documented |
-| `WAKE` | the wakeup/cron scheduling tools | | documented |
+| `WAKE` | the wakeup/cron scheduling tools | pair with `orch wake register` / `orch wake clear` | documented |
 | `SCHEDULE` | the cron-creation tool | | documented |
 | `ROTATE` | **not available for yourself.** A subagent cannot replace its parent, and a session cannot spawn its own successor | a subagent dies with this session, so a "successor" spawned here is not a replacement | documented |
 

@@ -31,8 +31,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 SCHEMA_VERSION = 1
 
@@ -91,6 +91,39 @@ BLOCKING_MODES = {"default", "plan", "ask"}
 # unattended answer, but it is a real security decision: set it per dispatch,
 # deliberately, never as a default.
 WORKER_MODE_DEFAULT = os.environ.get("ORCH_WORKER_MODE") or "auto"
+
+# Model rungs, cheapest first. Relative to the provider and never absolute
+# names, for the reason `delegation.md` gives: a table of model names rots the
+# moment a provider ships a release. The ordering is what makes "escalate" and
+# "above economy" computable rather than a judgment call.
+MODEL_RUNGS = ("minimal", "economy", "default", "frontier")
+
+# The rung a dispatch gets when nothing says otherwise. It is `economy` and not
+# `default` because `default` is not a fixed point: it means whatever the
+# provider currently selects, and what it selects moved up a tier. The catalog
+# in `delegation.md` was derived from a program where every worker ran on the
+# provider default and 90% of tasks needed one round -- but that default was a
+# Sonnet-class model at the time and is an Opus-class one now, so the unchanged
+# sentence quietly became a 2.5x instruction. Measured over four days on one
+# machine: 6,509 Opus-class calls in lane worktrees cost $616 against $246 for
+# the same tokens one rung down, which is 39% of the whole bill riding on a word
+# whose meaning drifted.
+WORKER_MODEL_DEFAULT = os.environ.get("ORCH_WORKER_MODEL") or "economy"
+
+# Above this needs a reason recorded. Splitting "flag" from "refuse" is
+# deliberate: `default` is a defensible everyday choice that should still be
+# visible on the roster, whereas `frontier` is escalation-only by policy, so it
+# is the one rung `open` will not accept silently.
+MODEL_FLAG_ABOVE = "economy"
+MODEL_REFUSE_WITHOUT_REASON = {"frontier"}
+
+
+def rung_index(rung: str) -> int:
+    """Position in MODEL_RUNGS, or -1 for anything unrecognised."""
+    try:
+        return MODEL_RUNGS.index((rung or "").strip().lower())
+    except ValueError:
+        return -1
 
 # An unfilled template slot -- `<one line, imperative>` -- is the likeliest form
 # of copy-the-template-without-reading-it, so it is rejected as a placeholder.
@@ -501,6 +534,14 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
                 "must be able to find later." % path
             )
 
+    if "model" in fields and rung_index(fields["model"]) < 0:
+        raise OrchError(
+            "brief %s: model must be one of %s -- a RUNG, not a model name.\n"
+            "Names are resolved against the provider's live model list at spawn "
+            "time, because a name written into a brief is wrong the next time "
+            "the provider ships." % (path, ", ".join(MODEL_RUNGS))
+        )
+
     if "progress_artifact" in fields:
         if is_placeholder(fields["progress_artifact"]):
             raise OrchError(
@@ -541,6 +582,18 @@ def entry_summary(entry: Dict[str, Any]) -> str:
         flags.append("ASK-MODE:" + entry["mode"])
     elif not entry.get("mode"):
         flags.append("NO-MODE")
+    # Spend, unlike a stall, never announces itself: a lane on the top rung
+    # looks identical to a lane on the cheapest one until the invoice arrives.
+    # So the roster says it out loud, and says whether anyone justified it.
+    rung = entry.get("model")
+    if not rung:
+        flags.append("NO-MODEL")
+    elif rung_index(rung) > rung_index(MODEL_FLAG_ABOVE):
+        # `TIER:frontier` beside `HIGH-TIER:default` read as though `default`
+        # were the higher of the two. The rung is the fact; whether anyone
+        # justified it is the suffix.
+        flags.append("TIER:" + rung +
+                     ("" if entry.get("model_reason") else ":NO-REASON"))
     return "  ".join(filter(None, [
         entry["entry"],
         entry["status"],
@@ -665,6 +718,29 @@ def cmd_open(args: argparse.Namespace) -> int:
             "--ask-mode-ok if this dispatch genuinely is meant to stop and "
             "wait." % (mode, WORKER_MODE_DEFAULT))
 
+    # Same argument one dial over. A model rung left to the spawn call is a
+    # field that gets forgotten, and forgetting this one does not fail safe
+    # either -- it selects whatever the provider currently calls its default,
+    # which is the most expensive rung anyone reaches by accident.
+    model = str(args.model or fields.get("model") or WORKER_MODEL_DEFAULT).strip().lower()
+    if rung_index(model) < 0:
+        raise OrchError("--model must be one of %s. Got %r."
+                        % (", ".join(MODEL_RUNGS), model))
+    model_reason = (args.model_reason or fields.get("model_reason") or "").strip()
+    if model in MODEL_REFUSE_WITHOUT_REASON and not model_reason:
+        raise OrchError(
+            "model %r is escalation-only: it is the top of the dial, and "
+            "`delegation.md` starts no archetype there.\n"
+            "If this dispatch has earned it, say why: --model-reason \"<the "
+            "observed signal>\". A reason is required because the reasons are "
+            "the evidence -- `orch escalate --log` is how the rung defaults ever "
+            "get corrected by measurement instead of by feel.\n"
+            "Otherwise start at %r and escalate with `orch escalate` on a signal; "
+            "that costs one adjustment, and starting high costs every dispatch."
+            % (model, WORKER_MODEL_DEFAULT))
+    if is_placeholder(model_reason) and model_reason:
+        raise OrchError("--model-reason is a placeholder (%r)." % model_reason)
+
     if args.program:
         program = args.program
     elif list_programs(repo_key):
@@ -708,7 +784,8 @@ def cmd_open(args: argparse.Namespace) -> int:
         "archetype": fields.get("archetype"),
         "review": fields.get("review", "integrator"),
         "review_waiver": fields.get("review_waiver"),
-        "model": fields.get("model"),
+        "model": model,
+        "model_reason": model_reason or None,
         "effort": fields.get("effort"),
         "mode": mode,
         "child_tracker": None,
@@ -727,11 +804,13 @@ def cmd_open(args: argparse.Namespace) -> int:
         # The settings fragment is printed rather than described, because the
         # failure this prevents is a forgotten field and a description is
         # something you can read and still forget to copy.
-        print("recorded before spawn. Spawn with settings %s -- omit the mode "
-              "and the worker comes up in Always Ask, which halts it on its "
-              "first tool call. Then run:\n"
+        print("recorded before spawn. Spawn with settings %s and the %s rung of "
+              "the provider's model list -- omit the mode and the worker comes "
+              "up in Always Ask, which halts it on its first tool call; omit the "
+              "model and it comes up on the provider default, which is the "
+              "expensive rung. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>"
-              % (json.dumps({"modeId": mode}), entry_id), file=sys.stderr)
+              % (json.dumps({"modeId": mode}), model, entry_id), file=sys.stderr)
     if missing_read_rules():
         print("warning: this brief, and the skill references it points at, sit "
               "outside the worker's worktree and are not allow-listed, so the "
@@ -769,6 +848,17 @@ def cmd_update(args: argparse.Namespace) -> int:
         # the tracker describing a worker that does not exist.
         entry["mode"] = args.mode.strip()
         changed.append("mode")
+    if getattr(args, "model", None):
+        # Correcting the record, not escalating. Same reasoning as --mode above:
+        # a worker that is actually on a different rung than the tracker says
+        # has to be writable before anyone can report the discrepancy. Raising a
+        # rung deliberately goes through `escalate`, which demands a reason and
+        # keeps it.
+        rung = args.model.strip().lower()
+        if rung_index(rung) < 0:
+            raise OrchError("--model must be one of %s" % ", ".join(MODEL_RUNGS))
+        entry["model"] = rung
+        changed.append("model")
     if args.pending_message is not None:
         entry["pending_message"] = args.pending_message or None
         changed.append("pending_message")
@@ -826,6 +916,14 @@ def cmd_close(args: argparse.Namespace) -> int:
     data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
     save_tracker(path, data)
     print("closed %s (%s): %s" % (entry["entry"], entry["title"], args.consumed))
+
+    # A lane's liveness insurance dies with the lane. Reported here because
+    # closing is the last moment an agent is reliably looking at this entry --
+    # deferred to "housekeeping", it is the thing that gets deferred forever.
+    arm_wake_ticks(repo_key, program)
+    for line in wake_close_obligations(repo_key, program, args.tracker,
+                                       entry["entry"], len(data["entries"])):
+        print(line, file=sys.stderr)
     if entry.get("child_tracker"):
         child = tracker_path(repo_key, program, entry["child_tracker"])
         if os.path.exists(child):
@@ -840,8 +938,9 @@ def cmd_close(args: argparse.Namespace) -> int:
 def tracker_names(pdir: str) -> List[str]:
     """Tracker ids in a program directory, by NAME and never by parseability.
 
-    The program directory is also home to nine sidecar records -- budget.json,
-    compaction.json, rotation.json, transcripts.json and the warn markers -- and
+    The program directory is also home to eleven sidecar records -- budget.json,
+    compaction.json, rotation.json, transcripts.json, wake.json and the warn
+    markers -- and
     `load_tracker` rejects anything without a matching schema version, so code
     that listed every `*.json` here treated a sidecar as a tracker. Two callers
     did, and each failed differently: the recursive reader aborted its whole
@@ -1415,10 +1514,23 @@ def cmd_inbox_list(args: argparse.Namespace) -> int:
 # Per-million-token rates, USD. An ESTIMATE for advisory purposes, current as of
 # 2026-09; override with ORCH_RATES (JSON) or <program>/rates.json rather than
 # editing this table, so a price change does not need a code change.
+#
+# Keep a row for every tier actually in use. An earlier table carried only
+# `haiku` and `sonnet`, so every Opus and Fable call fell through to `default` --
+# which was still priced at the Claude 3/4 era $15/$75. Cache reads are the
+# majority of any orchestration bill, and that row had them at $1.50 against a
+# real $0.50, so `orch cost` overstated a measured session by 3x on rates alone.
+# `default` is deliberately the Opus row now: an unrecognised model is far more
+# likely to be a new frontier model than a cheap one, and erring high makes the
+# budget advisory fire early rather than never.
 DEFAULT_RATES = {
-    "default":  {"in": 15.0, "out": 75.0, "cache_write": 18.75, "cache_read": 1.5},
-    "haiku":    {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
-    "sonnet":   {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
+    "default":    {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
+    "opus":       {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_read": 0.5},
+    "fable":      {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
+    "mythos":     {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_read": 0.25},
+    "sonnet-4-6": {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_read": 0.3},
+    "sonnet":     {"in": 2.0,  "out": 10.0, "cache_write": 2.5,   "cache_read": 0.2},
+    "haiku":      {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_read": 0.1},
 }
 
 # Context thresholds, in tokens. The first is where the per-step tax starts to
@@ -1457,11 +1569,18 @@ def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any
 
 
 def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
+    """Longest key wins, so `sonnet-4-6` beats `sonnet` on a 4.6 model id.
+
+    Deliberately not first-match: that made the answer depend on dict insertion
+    order, which an ORCH_RATES override is free to change.
+    """
     name = (model or "").lower()
+    best = None
     for key, value in rates.items():
         if key != "default" and key in name:
-            return value
-    return rates["default"]
+            if best is None or len(key) > len(best[0]):
+                best = (key, value)
+    return best[1] if best else rates["default"]
 
 
 def project_dir_for(cwd: str) -> Optional[str]:
@@ -1554,8 +1673,19 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
 
     Reads the file streaming and keeps only aggregates, because the whole point
     is to answer a question about a large file without carrying it anywhere.
+
+    **One API response can occupy several transcript lines.** The harness writes
+    one line per content block, so a response holding thinking + text + tool_use
+    is three lines -- each carrying an identical copy of the same `usage` object.
+    Summing lines therefore multiplies the bill by the average block count: on a
+    measured session, 1,592 lines were 714 responses, a 2.23x overstatement, and
+    463 of those responses were multi-block. `requestId` is the response
+    identity; every line after the first for a given id is a duplicate view of a
+    call already counted, not a new call.
     """
     totals = {"in": 0, "out": 0, "cache_write": 0, "cache_read": 0}
+    component_cost = {"in": 0.0, "out": 0.0, "cache_write": 0.0, "cache_read": 0.0}
+    seen_requests: Set[str] = set()
     steps = 0
     cost = 0.0
     recent: List[Tuple[int, float]] = []          # (context, cost) per step
@@ -1583,6 +1713,11 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
                 usage = message.get("usage") or {}
                 if not usage:
                     continue
+                request_id = row.get("requestId") or message.get("id")
+                if request_id:
+                    if request_id in seen_requests:
+                        continue
+                    seen_requests.add(request_id)
                 model = message.get("model") or ""
                 rate = rate_for(model, rates)
                 models[model] = models.get(model, 0) + 1
@@ -1595,6 +1730,7 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
                 step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
                 for key, value in fields.items():
                     totals[key] += value
+                    component_cost[key] += value * rate[key] / 1e6
                 cost += step_cost
                 steps += 1
                 context = fields["in"] + fields["cache_write"] + fields["cache_read"]
@@ -1616,9 +1752,10 @@ def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
         "relay_turns": max(turn_shapes.values()) if turn_shapes else 0,
         "cost_per_step": sum(c for _, c in window) / len(window) if window else 0.0,
         "models": models,
-        "shares": {k: (totals[k] * rate_for(max(models, key=models.get) if models else "",
-                                           rates)[k] / 1e6 / cost if cost else 0)
-                   for k in totals},
+        # Priced per call as it was read, not by re-pricing the totals at one
+        # model's rate -- a mixed-tier session has no single rate to use, and
+        # picking the most common model misattributed every other tier's spend.
+        "shares": {k: (component_cost[k] / cost if cost else 0) for k in totals},
     }
 
 
@@ -1882,6 +2019,135 @@ def cmd_budget(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# model escalation -- the escape hatch, and the evidence it leaves behind
+# --------------------------------------------------------------------------- #
+#
+# Starting every lane low is only defensible if raising one is cheap, so this is
+# the other half of WORKER_MODEL_DEFAULT. `RETUNE` already changes a running
+# worker's model without touching its instructions, which means the cost of
+# guessing too low is one adjustment while the cost of guessing too high is paid
+# on every dispatch.
+#
+# The reason is mandatory, and the record outlives the entry. Those two choices
+# are the entire point. An escalation with no reason is indistinguishable from a
+# hunch, and a hunch cannot be checked later; a reason that dies with the
+# tracker at `close` teaches nothing about the *next* program. Kept, the log
+# answers the only question that matters here -- which archetypes actually earn
+# the higher rung -- with counts instead of impressions. It is the one fact in
+# this file that is genuinely not re-derivable: the tracker is deleted by
+# design, and no transcript records why a human raised a dial.
+
+def escalations_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "escalations.json")
+
+
+def load_escalations(repo_key: str, program: str) -> List[Dict[str, Any]]:
+    try:
+        with open(escalations_path(repo_key, program), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def cmd_escalate(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+
+    if args.log:
+        records = load_escalations(repo_key, program)
+        if args.json:
+            print(json.dumps(records, indent=2))
+            return 0
+        if not records:
+            print("no escalations recorded for %s.\n"
+                  "That is the expected state, and it is also the evidence: "
+                  "every lane so far has held at the rung it started on."
+                  % program)
+            return 0
+        by_archetype: Dict[str, List[Dict[str, Any]]] = {}
+        for rec in records:
+            by_archetype.setdefault(rec.get("archetype") or "(unrecorded)", []).append(rec)
+        print("%d escalation%s recorded for %s — which archetypes earned a "
+              "higher rung:" % (len(records), "" if len(records) == 1 else "s",
+                                program))
+        for archetype in sorted(by_archetype, key=lambda a: -len(by_archetype[a])):
+            group = by_archetype[archetype]
+            print("\n  %s — %d" % (archetype, len(group)))
+            for rec in group:
+                print("    %s  %s -> %s  %s"
+                      % (str(rec.get("at", ""))[:10], rec.get("from", "?"),
+                         rec.get("to", "?"), rec.get("reason", "")))
+        print("\nAn archetype that escalates every time is a wrong default, not "
+              "a run of bad luck. Fix its row in delegation.md.")
+        return 0
+
+    if not args.entry:
+        raise OrchError("name an entry to escalate, or pass --log to read the "
+                        "record")
+    if not args.to:
+        raise OrchError("--to <rung> is required; one of %s"
+                        % ", ".join(MODEL_RUNGS))
+    reason = (args.reason or "").strip()
+    if not reason or is_placeholder(reason):
+        raise OrchError(
+            "--reason is required, and it is not paperwork. Escalate on an "
+            "observed signal -- the archetype's failure signature in "
+            "`delegation.md`, a refuted premise, a worker that says it cannot "
+            "make its guard go red -- never on a hunch that the task feels "
+            "hard.\nThe reasons are the only evidence that ever corrects a rung "
+            "default; `orch escalate --log` is where they are read back.")
+
+    target = args.to.strip().lower()
+    if rung_index(target) < 0:
+        raise OrchError("--to must be one of %s. Got %r."
+                        % (", ".join(MODEL_RUNGS), args.to))
+
+    path = tracker_path(repo_key, program, args.tracker)
+    data = load_tracker(path)
+    entry = find_entry(data, args.entry)
+    current = entry.get("model") or WORKER_MODEL_DEFAULT
+
+    if rung_index(target) <= rung_index(current):
+        raise OrchError(
+            "%s is already on %r, which is not below %r. `escalate` only ever "
+            "raises -- it is the escape hatch, not the model field.\n"
+            "To correct a mis-recorded rung use `orch update %s --model %s`."
+            % (entry["entry"], current, target, entry["entry"], target))
+
+    entry["model"] = target
+    entry["model_reason"] = reason
+    entry["notes"].append({"at": _now(),
+                           "note": "escalated %s -> %s: %s" % (current, target, reason)})
+    entry["updated_at"] = _now()
+    save_tracker(path, data)
+
+    records = load_escalations(repo_key, program)
+    records.append({
+        "at": _now(),
+        "entry": entry["entry"],
+        "title": entry.get("title"),
+        "archetype": entry.get("archetype"),
+        "from": current,
+        "to": target,
+        "reason": reason,
+    })
+    spath = escalations_path(repo_key, program)
+    os.makedirs(os.path.dirname(spath), exist_ok=True)
+    with open(spath, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, indent=2)
+        fh.write("\n")
+
+    print("%s escalated %s -> %s" % (entry["entry"], current, target))
+    print("Recorded. Now RETUNE the running agent to the %s rung of the "
+          "provider's model list -- this wrote down the decision, it did not "
+          "reach the worker. A tracker that says %s while the agent still runs "
+          "on %s is worse than one that said nothing."
+          % (target, target, current), file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # resume: re-derive orchestration state after compaction or resume
 # --------------------------------------------------------------------------- #
 #
@@ -1936,6 +2202,17 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
                         if rotation["state"] == "pending"
                         else "CLOSE the predecessor, then `orch rotate complete "
                              "--alive <ids>`"))
+    wake = load_wake(repo_key, program)
+    if wake["wakes"]:
+        refs = open_entry_refs(repo_key, program)
+        lines.append("wakes registered: %d — each fires into YOUR session; "
+                     "delete any with nothing left to insure"
+                     % len(wake["wakes"]))
+        for item in sorted(wake["wakes"].values(), key=lambda w: w.get("id") or ""):
+            lines.append("  " + _wake_render(item, refs))
+    if wake.get("idle_ticks"):
+        lines.append("idle ticks: %d consecutive turn ends with nothing running"
+                     % wake["idle_ticks"])
     cmp_rec = _load_json(compaction_path(repo_key, program))
     if cmp_rec.get("floor"):
         lines.append("context floor %dK · this program should launch with "
@@ -2739,8 +3016,15 @@ def scan_compaction(path: str) -> Dict[str, Any]:
     transcript (the summary message and the boundary metadata); consecutive
     markers with no model call between them collapse to one event, which is why
     `pending` is a latch rather than a counter.
+
+    Calls are deduplicated by `requestId` for the reason given in `read_usage`:
+    one response spans several lines. Distances here are quoted in model calls
+    and compared against CYCLE_MIN_CALLS, so counting lines made the detector
+    roughly twice as tolerant as it reads -- a "15 calls apart" floor was really
+    firing near 7.
     """
     calls = 0
+    seen_requests: Set[str] = set()
     prev = 0
     first = None
     events: List[Dict[str, Any]] = []
@@ -2764,9 +3048,15 @@ def scan_compaction(path: str) -> Dict[str, Any]:
                     continue
                 if row.get("type") != "assistant":
                     continue
-                usage = (row.get("message") or {}).get("usage") or {}
+                message = row.get("message") or {}
+                usage = message.get("usage") or {}
                 if not usage:
                     continue
+                request_id = row.get("requestId") or message.get("id")
+                if request_id:
+                    if request_id in seen_requests:
+                        continue
+                    seen_requests.add(request_id)
                 context = ((usage.get("input_tokens") or 0)
                            + (usage.get("cache_creation_input_tokens") or 0)
                            + (usage.get("cache_read_input_tokens") or 0))
@@ -3197,6 +3487,19 @@ def cmd_rotate_claim(args: argparse.Namespace) -> int:
         pending, _ = _read_pending(log, cursor)
         print("inbox %r transferred to %s (%d item%s still queued)"
               % (target, here, len(pending), "" if len(pending) == 1 else "s"))
+    # Wakes transfer with the inbox target, which means they transfer
+    # silently. Naming them here is the successor's only chance to learn it
+    # inherited a heartbeat -- an unannounced one is a loop nobody owns.
+    wake = load_wake(repo_key, program)
+    inherited = [w for w in wake["wakes"].values()
+                 if not w.get("owner") or w.get("owner") == target]
+    if inherited:
+        refs = open_entry_refs(repo_key, program)
+        print("\ninherited %d wake%s — each fires into your session now:"
+              % (len(inherited), "" if len(inherited) == 1 else "s"))
+        for item in sorted(inherited, key=lambda w: w.get("id") or ""):
+            print("  " + _wake_render(item, refs))
+
     rotation["state"] = "claimed"
     rotation["claimed_at"] = _now()
     rotation["successor_worktree"] = here
@@ -3271,6 +3574,407 @@ def cmd_rotate_abort(args: argparse.Namespace) -> int:
 
 
 
+# --------------------------------------------------------------------------- #
+# wakes -- a heartbeat's lifetime is the lifetime of the lanes it insures
+# --------------------------------------------------------------------------- #
+
+# Why this exists. An orchestrator set a liveness heartbeat while lanes were
+# running, then kept it after the last lane closed. Every firing re-derived
+# state, found no worker, and returned -- each tick individually defensible,
+# the waste visible only ACROSS ticks, which is the one view a per-turn agent
+# never gets for free. Two consecutive no-change turn ends with nothing running
+# is the tell, so the count lives on disk beside the tracker rather than in a
+# context that compaction throws away.
+WAKE_IDLE_TICKS = 2
+
+# An `external:` wake insures something the tracker cannot see -- a CI run, a
+# human's own build. It is exempt from the nothing-to-insure rule, because that
+# rule would otherwise have no escape hatch. The exemption buys a staleness
+# clock instead: nothing else would ever retire it.
+WAKE_EXTERNAL_STALE_MINUTES = 120
+
+# `heartbeat` prompts YOU on a cadence; `schedule` spawns a FRESH WORKER per
+# firing. Reaching for the second when you wanted the first silently multiplies
+# workers, so the kind is recorded and echoed back rather than assumed.
+WAKE_KINDS = ("heartbeat", "schedule")
+
+
+def wake_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "wake.json")
+
+
+def load_wake(repo_key: str, program: str) -> Dict[str, Any]:
+    data = _load_json(wake_path(repo_key, program))
+    data.setdefault("wakes", {})
+    data.setdefault("idle_ticks", 0)
+    data.setdefault("armed", False)
+    data.setdefault("last_advised_tick", 0)
+    if not isinstance(data["wakes"], dict):
+        data["wakes"] = {}
+    return data
+
+
+def save_wake(repo_key: str, program: str, data: Dict[str, Any]) -> None:
+    _save_json(wake_path(repo_key, program), data)
+
+
+def open_entry_refs(repo_key: str, program: str) -> Set[str]:
+    """Every open entry in the program, as `tracker:entry`.
+
+    Qualified by tracker because `e1` exists in `root` and in `root.1` and they
+    are different lanes -- an unqualified match would keep a parent's heartbeat
+    alive on the strength of a child's unrelated entry.
+    """
+    refs: Set[str] = set()
+    try:
+        trackers = _read_all_trackers(repo_key, program, True, "root")
+    except OrchError:
+        return refs
+    for name, data in trackers:
+        for entry in data.get("entries", []):
+            refs.add("%s:%s" % (name, entry["entry"]))
+    return refs
+
+
+def _parse_insures(raw: str, tracker: str, open_refs: Set[str]) -> List[str]:
+    """Normalise `--insures` into qualified refs, rejecting what insures nothing.
+
+    A wake registered against a lane that is already closed is the bug this
+    whole record exists to catch, arriving one step earlier -- so it is refused
+    at registration rather than reported two ticks later.
+    """
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    if not items:
+        raise OrchError("--insures needs at least one lane or `external:<what>`")
+    out: List[str] = []
+    for item in items:
+        if item.startswith("external:"):
+            if is_placeholder(item[len("external:"):]):
+                raise OrchError(
+                    "`external:` needs to name the thing being watched, e.g. "
+                    "`external:ci run 7781`. An unnamed external wake is one "
+                    "nobody can ever decide to retire."
+                )
+            out.append(item)
+            continue
+        ref = item if ":" in item else "%s:%s" % (tracker, item)
+        if ref not in open_refs:
+            raise OrchError(
+                "%s is not an open entry, so a wake registered against it "
+                "insures nothing and will fire forever.\nOpen entries: %s\n"
+                "If it watches something the tracker cannot see, say so: "
+                "--insures 'external:<what>'."
+                % (ref, ", ".join(sorted(open_refs)) or "(none)")
+            )
+        out.append(ref)
+    return out
+
+
+def _wake_live_lanes(wake: Dict[str, Any], open_refs: Set[str]) -> List[str]:
+    return [r for r in wake.get("insures", [])
+            if not r.startswith("external:") and r in open_refs]
+
+
+def _wake_is_external(wake: Dict[str, Any]) -> bool:
+    insures = wake.get("insures", [])
+    return bool(insures) and all(r.startswith("external:") for r in insures)
+
+
+def _wake_held(data: Dict[str, Any]) -> Optional[float]:
+    """Minutes of hold remaining, or None."""
+    until = data.get("hold_until")
+    if not isinstance(until, str):
+        return None
+    age = _age_minutes(until)
+    return None if age is None or age >= 0 else -age
+
+
+def _claimed_target(repo_key: str, args: argparse.Namespace) -> Optional[str]:
+    """The inbox target this WORKTREE claimed -- never the env fallback.
+
+    Gating the idle detector on a claim is what keeps it off workers. An agent
+    that ran `orch inbox claim` is a driver by construction; the environment
+    variable is injected into every agent the substrate spawns, so trusting it
+    would have every worker in the program counting the same idle ticks and
+    reporting the same loop.
+    """
+    try:
+        claim = _load_claims(repo_key).get(_worktree_key(args.repo))
+    except (OrchError, OSError):
+        return None
+    return (claim or {}).get("target")
+
+
+def wake_advisories(data: Dict[str, Any], open_refs: Set[str], ticks: int,
+                    viewer: Optional[str], idle_eligible: bool) -> List[str]:
+    """Advisories for every wake in the program, plus the unregistered case.
+
+    Deliberately NOT filtered by owner. An earlier cut only reported a wake to
+    the agent whose inbox target matched its `owner`, which silenced the
+    detector in precisely the case it was built for -- an inherited or
+    env-owned heartbeat nobody recognises as theirs. An orphaned wake is
+    unambiguous waste whoever is looking at it, so it is always reported, with
+    its owner named so a worker knows to escalate rather than delete.
+    """
+    lines: List[str] = []
+    for wake in sorted(data["wakes"].values(), key=lambda w: w.get("id") or ""):
+        wid = wake.get("id")
+        if _wake_is_external(wake):
+            age = _age_minutes(wake.get("created_at"))
+            if age is not None and age >= WAKE_EXTERNAL_STALE_MINUTES:
+                lines.append(
+                    "WAKE STALE — %s %s has been watching %s for %d minutes. "
+                    "Confirm that thing still exists and still needs watching; "
+                    "if it does not, delete it at the substrate and run "
+                    "`orch wake clear --id %s`."
+                    % (wake.get("kind", "heartbeat"), wid,
+                       ", ".join(wake.get("insures", [])), age, wid))
+            continue
+        if _wake_live_lanes(wake, open_refs):
+            continue
+        owner = wake.get("owner")
+        theirs = bool(owner) and bool(viewer) and owner != viewer
+        lines.append(
+            "WAKE ORPHANED — %s %s insured %s, and none of those lanes is open. "
+            "There is no running worker, so there is no finish-notification "
+            "that could go missing: nothing is left to insure, and every firing "
+            "from here is a no-change tick.%s\n%s"
+            % (wake.get("kind", "heartbeat"), wid,
+               ", ".join(wake.get("insures", [])),
+               ("\nThis is turn end %d with nothing running. You are the loop."
+                % ticks) if ticks >= WAKE_IDLE_TICKS else "",
+               ("It fires into `%s`, not into you — send it there with "
+                "`orch inbox send --to %s` rather than deleting another "
+                "agent's wake." % (owner, owner)) if theirs else
+               ("Delete it at the substrate now (your adapter's WAKE verb), "
+                "then `orch wake clear --id %s`. If it is really watching "
+                "something outside the tracker, re-register it as "
+                "`--insures 'external:<what>'`." % wid)))
+
+    # The unregistered case. A wake this tool never heard of is invisible, so
+    # the only evidence is the shape the RCA named: consecutive no-change turn
+    # ends with an empty roster. Armed only after the program's first close, so
+    # a pre-dispatch conversation with the human never trips it.
+    if idle_eligible and not data["wakes"] and ticks >= WAKE_IDLE_TICKS and \
+            ticks - data.get("last_advised_tick", 0) >= WAKE_IDLE_TICKS:
+        lines.append(
+            "IDLE LOOP — %d consecutive turn ends with no open dispatch in this "
+            "program. If a heartbeat or schedule is waking you, it is insuring "
+            "work that has already landed: delete it at the substrate now. If "
+            "you are working with the human directly, silence this with "
+            "`orch wake hold --minutes 60 --reason '<why>'`; if you keep a wake, "
+            "register it with `orch wake register` so its teardown is tracked."
+            % ticks)
+        data["last_advised_tick"] = ticks
+    return lines
+
+
+def arm_wake_ticks(repo_key: str, program: str) -> None:
+    """Arm the idle detector on the program's first close.
+
+    Before anything has closed, an empty roster means work has not started; the
+    loop this detects only exists after work has finished. Best effort: failing
+    to arm a detector must never fail a close.
+    """
+    try:
+        data = load_wake(repo_key, program)
+        if data.get("armed"):
+            return
+        data["armed"] = True
+        data["armed_at"] = _now()
+        save_wake(repo_key, program, data)
+    except (OSError, ValueError):
+        pass
+
+
+def wake_close_obligations(repo_key: str, program: str, tracker: str,
+                           entry: str, remaining: int) -> List[str]:
+    """What closing this entry owes the wakes that insured it.
+
+    This belongs to CLOSE and not to separate housekeeping: the moment a lane
+    stops running is the moment its insurance stops insuring anything, and it
+    is the last moment an agent is reliably looking.
+    """
+    try:
+        data = load_wake(repo_key, program)
+    except (OSError, ValueError):
+        return []
+    ref = "%s:%s" % (tracker, entry)
+    open_refs = open_entry_refs(repo_key, program)
+    lines: List[str] = []
+    for wake in sorted(data["wakes"].values(), key=lambda w: w.get("id") or ""):
+        if ref not in wake.get("insures", []):
+            continue
+        live = _wake_live_lanes(wake, open_refs)
+        if live:
+            lines.append("NOTE: %s %s still insures %s."
+                         % (wake.get("kind", "heartbeat"), wake.get("id"),
+                            ", ".join(live)))
+            continue
+        lines.append(
+            "TEARDOWN: %s %s insured %s and has nothing left to insure. Delete "
+            "it at the substrate NOW, then `orch wake clear --id %s`. A "
+            "heartbeat that outlives its lanes is a loop, not insurance."
+            % (wake.get("kind", "heartbeat"), wake.get("id"), ref,
+               wake.get("id")))
+    if not remaining and not data["wakes"]:
+        lines.append(
+            "NOTE: no open dispatches remain. If any heartbeat or schedule is "
+            "still set to wake you, delete it now — there is no worker left "
+            "whose finish-notification could go missing.")
+    return lines
+
+
+def _wake_render(wake: Dict[str, Any], open_refs: Set[str]) -> str:
+    if _wake_is_external(wake):
+        state = "external"
+    else:
+        live = _wake_live_lanes(wake, open_refs)
+        state = ("insures %s" % ", ".join(live)) if live else "ORPHANED"
+    return "  ".join(filter(None, [
+        str(wake.get("id")),
+        wake.get("kind", "heartbeat"),
+        "owner=%s" % (wake.get("owner") or "-"),
+        state,
+        wake.get("note") or "",
+    ]))
+
+
+def cmd_wake(args: argparse.Namespace) -> int:
+    action = args.wake_action
+    quiet = getattr(args, "format", "text") == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    try:
+        repo_key, _, _ = repo_identity(args.repo)
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        if quiet:
+            return 0
+        raise
+    data = load_wake(repo_key, program)
+    open_refs = open_entry_refs(repo_key, program)
+    try:
+        _, target = resolve_target(args, repo_key)
+    except OrchError:
+        target = None
+
+    if action == "register":
+        insures = _parse_insures(args.insures,
+                                 getattr(args, "tracker", "root") or "root",
+                                 open_refs)
+        existing = data["wakes"].get(args.id, {})
+        data["wakes"][args.id] = {
+            "id": args.id,
+            "kind": args.kind,
+            "insures": insures,
+            "owner": args.owner or target,
+            "note": args.note or existing.get("note"),
+            "created_at": existing.get("created_at") or _now(),
+            "updated_at": _now(),
+        }
+        data["idle_ticks"] = 0
+        save_wake(repo_key, program, data)
+        print("registered %s %s insuring %s"
+              % (args.kind, args.id, ", ".join(insures)))
+        print("Its lifetime is now the lifetime of those lanes: `orch close` "
+              "will tell you when it has nothing left to insure.", file=sys.stderr)
+        return 0
+
+    if action == "clear":
+        if args.id not in data["wakes"]:
+            raise OrchError(
+                "no wake %r registered. Registered: %s"
+                % (args.id, ", ".join(sorted(data["wakes"])) or "(none)"))
+        gone = data["wakes"].pop(args.id)
+        data["idle_ticks"] = 0
+        data["last_advised_tick"] = 0
+        save_wake(repo_key, program, data)
+        print("forgot %s %s (insured %s)%s"
+              % (gone.get("kind", "heartbeat"), args.id,
+                 ", ".join(gone.get("insures", [])),
+                 (": " + args.reason) if args.reason else ""))
+        print("This forgets the RECORD only. If you have not deleted it at the "
+              "substrate, it is still firing.", file=sys.stderr)
+        return 0
+
+    if action == "hold":
+        if args.clear:
+            data.pop("hold_until", None)
+            data.pop("hold_reason", None)
+            save_wake(repo_key, program, data)
+            print("hold cleared")
+            return 0
+        if not args.reason or is_placeholder(args.reason):
+            raise OrchError(
+                "--reason is required. A hold suppresses the one detector that "
+                "sees across ticks, so what it is waiting for has to be "
+                "written down where the next session can read it."
+            )
+        until = datetime.now(timezone.utc) + timedelta(minutes=args.minutes)
+        data["hold_until"] = until.isoformat()
+        data["hold_reason"] = args.reason
+        data["idle_ticks"] = 0
+        save_wake(repo_key, program, data)
+        print("idle advisories held for %d minutes (until %s): %s"
+              % (args.minutes, until.isoformat(timespec="minutes"), args.reason))
+        return 0
+
+    if action == "list":
+        wakes = sorted(data["wakes"].values(), key=lambda w: w.get("id") or "")
+        if args.json:
+            print(json.dumps({"wakes": wakes, "idle_ticks": data["idle_ticks"],
+                              "armed": data["armed"],
+                              "hold_until": data.get("hold_until")}, indent=2))
+            return 0
+        if not wakes:
+            print("no wakes registered for program %r" % program)
+        for wake in wakes:
+            print(_wake_render(wake, open_refs))
+        held = _wake_held(data)
+        if held:
+            print("hold: %d more minutes — %s"
+                  % (held, data.get("hold_reason") or "?"))
+        print("%d consecutive turn end%s with nothing running%s"
+              % (data["idle_ticks"], "" if data["idle_ticks"] == 1 else "s",
+                 "" if data["armed"] else " (detector not armed: nothing has "
+                 "closed in this program yet)"))
+        return 0
+
+    # check -- the turn-end detector
+    held = _wake_held(data)
+    claimed = _claimed_target(repo_key, args)
+    # The counter has exactly one writer: the agent that claimed this program's
+    # inbox. An agent that is not that writer must be INERT toward it, not
+    # merely quiet -- an earlier cut let any worker's turn end take the else
+    # branch and reset the count, which would have erased the only evidence
+    # that spans ticks and reintroduced the blind spot through a side door.
+    if claimed and not held:
+        if data["armed"] and not open_refs:
+            data["idle_ticks"] = data.get("idle_ticks", 0) + 1
+        else:
+            data["idle_ticks"] = 0
+            data["last_advised_tick"] = 0
+        data["last_tick"] = _now()
+    lines = [] if held else wake_advisories(
+        data, open_refs, data["idle_ticks"], claimed or target,
+        idle_eligible=bool(claimed))
+    if claimed and not held:
+        try:
+            save_wake(repo_key, program, data)
+        except OSError:
+            pass
+    if not lines:
+        return 0 if quiet else 3
+    text = "\n\n".join(lines) + "\n"
+    if quiet:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop", "additionalContext": text}}))
+    else:
+        print(text, end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="orch",
@@ -3302,6 +4006,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "matter `mode` overrides that)" % WORKER_MODE_DEFAULT)
     sp.add_argument("--ask-mode-ok", action="store_true",
                     help="allow a mode that stops to ask a human")
+    sp.add_argument("--model", help="model RUNG, not a name: one of %s "
+                                    "(default: %s; brief front matter `model` "
+                                    "overrides that)"
+                                    % (", ".join(MODEL_RUNGS), WORKER_MODEL_DEFAULT))
+    sp.add_argument("--model-reason",
+                    help="why this dispatch needs a rung above %s; required for "
+                         "%s" % (MODEL_FLAG_ABOVE,
+                                 ", ".join(sorted(MODEL_REFUSE_WITHOUT_REASON))))
     common(sp)
     sp.set_defaults(func=cmd_open)
 
@@ -3310,6 +4022,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent-id")
     sp.add_argument("--session-name")
     sp.add_argument("--mode", help="the session mode the agent is actually in")
+    sp.add_argument("--model", choices=MODEL_RUNGS,
+                    help="correct a mis-recorded rung; to RAISE one, use "
+                         "`orch escalate`")
     sp.add_argument("--status", choices=STATUSES)
     sp.add_argument("--pending-message",
                     help="message to deliver when the worker next goes idle")
@@ -3511,6 +4226,64 @@ def build_parser() -> argparse.ArgumentParser:
     rp = rsub.add_parser("abort", help="drop the record; closes nothing")
     rp.add_argument("--program")
     rp.set_defaults(func=cmd_rotate_abort)
+
+    sp = sub.add_parser(
+        "wake",
+        help="track recurring wake-ups so they die with the lanes they insure")
+    wsub = sp.add_subparsers(dest="wake_action", required=True)
+
+    wp = wsub.add_parser("register",
+                         help="record a heartbeat or schedule you just created")
+    wp.add_argument("--id", required=True, help="the substrate's id for it")
+    wp.add_argument("--insures", required=True,
+                    help="comma-separated open entries, or 'external:<what>'")
+    wp.add_argument("--kind", default="heartbeat", choices=WAKE_KINDS,
+                    help="heartbeat prompts YOU; schedule spawns a fresh worker")
+    wp.add_argument("--owner", help="inbox target it fires into (default: yours)")
+    wp.add_argument("--note")
+    wp.add_argument("--to", help=argparse.SUPPRESS)
+    common(wp)
+    wp.set_defaults(func=cmd_wake)
+
+    wp = wsub.add_parser("clear", help="forget a wake you have deleted")
+    wp.add_argument("--id", required=True)
+    wp.add_argument("--reason")
+    wp.add_argument("--to", help=argparse.SUPPRESS)
+    wp.add_argument("--program")
+    wp.set_defaults(func=cmd_wake)
+
+    wp = wsub.add_parser("list", help="what is set to wake this program")
+    wp.add_argument("--json", action="store_true")
+    wp.add_argument("--to", help=argparse.SUPPRESS)
+    wp.add_argument("--program")
+    wp.set_defaults(func=cmd_wake)
+
+    wp = wsub.add_parser(
+        "hold", help="suppress idle advisories while waiting on something untracked")
+    wp.add_argument("--minutes", type=int, default=60)
+    wp.add_argument("--reason")
+    wp.add_argument("--clear", action="store_true", help="lift the hold now")
+    wp.add_argument("--to", help=argparse.SUPPRESS)
+    wp.add_argument("--program")
+    wp.set_defaults(func=cmd_wake)
+
+    wp = wsub.add_parser(
+        "check", help="turn-end hook: the across-ticks view of a wake loop")
+    wp.add_argument("--format", default="text", choices=("text", "hook"))
+    wp.add_argument("--to", help=argparse.SUPPRESS)
+    wp.add_argument("--program")
+    wp.set_defaults(func=cmd_wake)
+
+    sp = sub.add_parser(
+        "escalate", help="raise a lane's model rung, on a recorded signal")
+    sp.add_argument("entry", nargs="?", help="entry id or agent id")
+    sp.add_argument("--to", choices=MODEL_RUNGS, help="the rung to raise to")
+    sp.add_argument("--reason", help="the observed signal; required, and kept")
+    sp.add_argument("--log", action="store_true",
+                    help="read the record back, grouped by archetype")
+    sp.add_argument("--json", action="store_true")
+    common(sp)
+    sp.set_defaults(func=cmd_escalate)
 
     sp = sub.add_parser("budget", help="show or set this program's spend limit")
     sp.add_argument("--set", dest="limit", type=float,

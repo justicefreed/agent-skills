@@ -19,7 +19,7 @@ orchestration policy.
 | `ESCALATE` | worker → parent; see `../messaging.md` for the safe path | | observed |
 | `PEER` | see `../messaging.md`; **default to artifact reads instead** | | observed |
 | `RETUNE` | `update_agent` (`settings.model`, `thinkingOptionId`, `modeId`) | changes config on a **running** agent; does not touch instructions | documented |
-| `WAKE` | `create_heartbeat` | prompts *you* on a cadence; no update tool — delete and recreate | documented |
+| `WAKE` | `create_heartbeat` | prompts *you* on a cadence; no update tool — delete and recreate. Pair every create with `orch wake register --id <heartbeat id>`, and `delete_heartbeat` with `orch wake clear` | documented |
 | `SCHEDULE` | `create_schedule` | spawns a **fresh** agent per firing | documented |
 | `ROTATE` | `create_agent` with `workspaceId` **omitted**, then the successor calls `archive_agent` on you | omitting `workspaceId` places the successor in your own workspace, which is both the same worktree and the same tab strip the human was watching. There is no replace-in-place API | documented |
 

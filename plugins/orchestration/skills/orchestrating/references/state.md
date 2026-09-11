@@ -86,6 +86,15 @@ recorded before the mode was tracked. Use `orch update <e> --mode <id>` to recor
 *actually* in; `update` does not refuse a blocking mode, because the repair path has to be able to
 write down the bad state before anyone can report it.
 
+**The model rung rides the same rails**, because it has the same failure mode — forgotten at spawn,
+and expensive rather than neutral when forgotten. `open` fills in `ORCH_WORKER_MODEL` (default
+`economy`) unless front matter or `--model` says otherwise, refuses `frontier` without
+`--model-reason`, and names the rung in the same printed fragment. `roster` flags `TIER:<rung>` above
+`economy`, suffixed `:NO-REASON` when unjustified, and `NO-MODEL` on an entry recorded before the
+rung was tracked. `orch update <e> --model <rung>` is the correction path; raising a rung goes
+through `orch escalate`, which demands the signal and keeps it. Rungs only — a model *name* in a
+brief is rejected, because it is wrong the next time the provider ships. See `delegation.md` §3–4.
+
 Required brief front matter — `title`, `worktree`, `expected_artifacts`, `advances`,
 `consumption` — is read from the file, never retyped. `orch` rejects placeholders (`unknown`,
 `tbd`, `n/a`, …): a required field answered with a placeholder is an omission in costume.
@@ -96,8 +105,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | Command | Purpose |
 |---|---|
 | `orch programs` | what programs exist for this repo |
-| `orch open --brief P [--agent-id ID] [--mode M] [--program N] [--tracker ID]` | record a dispatch |
-| `orch update E [--agent-id] [--session-name] [--mode] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch open --brief P [--agent-id ID] [--mode M] [--model R] [--model-reason S] [--program N] [--tracker ID]` | record a dispatch |
+| `orch update E [--agent-id] [--session-name] [--mode] [--model] [--status] [--pending-message] [--note]` | amend an open entry |
 | `orch permissions [--install]` | check, or grant, the one read a worker needs to start |
 | `orch mint-child E` | allocate a sub-orchestrator's tracker id (idempotent) |
 | `orch close E --consumed "<what happened>"` | delete a consumed entry |
@@ -110,8 +119,15 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch inbox peek [--to T]` | pending count; exit 3 when empty |
 | `orch inbox drain [--to T] [--format text\|json\|hook]` | print pending items and mark delivered |
 | `orch inbox list [--to T] [--all]` | the inbox log, delivered items included |
-| `orch cost [--transcript P \| --for T] [--json]` | calls, context, cost per call, share by component |
+| `orch cost [--transcript P \| --for T] [--format json]` | calls, context, cost per call, share by component |
 | `orch budget [--set N]` | show or set this program's spend limit in USD |
+| `orch escalate E --to R --reason S` | raise a lane's model rung, on a signal that is recorded |
+| `orch escalate --log [--json]` | the escalations so far, grouped by archetype |
+| `orch wake register --id I --insures E[,E\|external:W] [--kind K]` | bind a heartbeat to the lanes it insures |
+| `orch wake clear --id I [--reason R]` | forget a wake you have deleted at the substrate |
+| `orch wake list [--json]` | what is set to wake this program, and the idle-tick count |
+| `orch wake hold --minutes N --reason R \| --clear` | suppress idle advisories while waiting on something untracked |
+| `orch wake check [--format hook]` | the turn-end wake-loop detector |
 | `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
 | `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
@@ -151,9 +167,29 @@ close — and it must survive the predecessor going away mid-handoff, which is p
 exists for. It is deleted on `rotate complete`, and a record still pending after ten minutes raises
 an advisory on the turn-end hook. That is the dangling-session detector.
 
-Seven smaller sidecars share that directory — `budget.json`, `rates.json`, `transcripts.json`,
-`frontdesk.json`, and the fire-once markers `cost-warned.json`, `guard-warned.json` and
-`frontdesk-suggested.json`. **Only files named `root`, `root.1`, `root.1.2` are trackers**, and the
+`escalations.json` is the fourth, and the only one that must outlive the work it describes. Every
+other record here is deleted when its subject closes; this one is kept precisely *because* the
+tracker is a working set. It answers a question no single dispatch can — **which archetypes actually
+earn a rung above the cheap default** — and it can only answer it by accumulating across dispatches
+that are individually gone. Nothing else records it: the reason a human raised a dial appears in no
+transcript, no commit and no plan document. Hence the mandatory `--reason` on `orch escalate`; an
+escalation with no reason is a hunch, and a hunch cannot be checked a month later. Read it with
+`orch escalate --log`, and treat an archetype that escalates every time as a wrong default in
+`delegation.md` rather than as a run of bad luck.
+
+`wake.json` is there for the third instance of the same reason, and it carries two different kinds
+of fact. The first is a binding the substrate does not hold: *which lanes a heartbeat insures*. A
+substrate knows a heartbeat exists and when it next fires; it has no idea what it was set up to
+watch, so nothing but this record can decide when it has stopped watching anything. The second is
+the **idle-tick count** — how many consecutive turn ends have found the roster empty. That one is
+recorded precisely because it is the view a single turn cannot have: each no-change tick is
+individually defensible, and only the count across them says *loop*. It has exactly one writer, the
+agent that claimed the program's inbox; every other agent reads it and leaves it alone, because a
+worker's turn end resetting the count would erase the only evidence that spans ticks.
+
+Nine smaller sidecars share that directory — `budget.json`, `rates.json`, `transcripts.json`,
+`frontdesk.json`, `escalations.json`, and the fire-once markers `cost-warned.json`,
+`guard-warned.json` and `frontdesk-suggested.json`. **Only files named `root`, `root.1`, `root.1.2` are trackers**, and the
 recursive reader filters on exactly that grammar. It has to: a sidecar has no tracker schema
 version, so a reader that globbed `*.json` aborted on the first one it met. Callers that swallowed
 the error then saw an empty program, which is why the fan-out advisory silently reported zero open

@@ -29,6 +29,7 @@ consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
 archetype: integrator                            # optional, provenance
 mode: auto                                       # optional; session mode to spawn with
+model: economy                                   # optional; RUNG, not a name; default economy
 review: integrator                               # optional; integrator | in-brief | none
 tracker_id: root.1                                # only for a sub-orchestrator
 plan_doc: docs/migration-2026-09/PLAN.md          # optional

@@ -8,6 +8,8 @@ hooks:
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
         - type: command
           command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" cost --format hook; done; exit 0'
+        - type: command
+          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" wake check --format hook; done; exit 0'
   SessionStart:
     - matcher: "compact|resume"
       hooks:
@@ -87,7 +89,8 @@ Workers may themselves orchestrate; a decomposing task says so in its brief and 
 fan-out shape.
 
 See `references/delegation.md` for substrate choice, isolation choice, and the archetype catalog
-with model/effort guidance.
+with model/effort guidance. Rungs are relative to the provider and resolved at spawn time, never
+written as model names — and `default` is not the anchor, `economy` is.
 
 **Done when:** each unit of work is marked *delegate* or *do inline*, with a reason.
 
@@ -135,7 +138,9 @@ is running — in that order.
 
 **Liveness.** Notifications are the good path. Heartbeats are the insurance. Explicit
 reconciliation is for a failed heartbeat or for re-deriving state from a fresh context — *never* as
-a wait loop. Details in `references/liveness.md`.
+a wait loop. Register every `WAKE` with `orch wake register`, because a heartbeat's lifetime is the
+lifetime of the lanes it insures and nothing else will retire it. Details in
+`references/liveness.md`.
 
 **Messaging.** Read `references/messaging.md` before sending anything to a running worker. Mid-task
 correction does not exist on any substrate: a correction waits, destroys work, or comes from the
@@ -162,7 +167,10 @@ human's own turns have become routing traffic. It fires once; the offer is their
 can always open you directly. `references/frontdesk.md`.
 
 **Tuning.** `RETUNE` changes a running worker's model or effort without touching its instructions.
-It is the only safe way to influence work already underway; prefer starting cheap and escalating.
+It is the only safe way to influence work already underway, and it is what makes starting cheap
+safe. Escalate on an observed signal, never a hunch, and record the signal:
+`orch escalate <e> --to <rung> --reason "<what you saw>"`. Lane model tier is the largest single
+cost lever measured here — 39% of one four-day bill (`references/cost.md`).
 
 ## Step 5 — Intake
 
@@ -191,9 +199,11 @@ landing is commissioned or ruled unnecessary, and its provenance lives somewhere
   history and in what order; the integrator does the *labor*.
 - **`CLOSE`** the worker, then delete its tracker entry. An entry you cannot delete is an output
   nobody consumed — that is the signal, not a nuisance.
+- **Delete any wake the close just orphaned**, here and not as later housekeeping. `orch close`
+  names them; a heartbeat that outlives its lanes is a loop, not insurance.
 - **Reclaim resources by explicit name, never by glob**, and never while any build is running.
 
-**Done when:** the entry is deleted, provenance is durable, and resources are reclaimed.
+**Done when:** the entry is deleted, every wake it orphaned is gone, provenance is durable, and resources are reclaimed.
 
 ## Reference map
 
@@ -220,8 +230,8 @@ Load these on demand, not up front.
 **Tooling.** Tracker and inbox operations go through `scripts/orch.py`; per-harness path resolution
 is in `references/substrates/_capabilities.md`, `ORCH_SKILL_DIR` included. Never edit tracker files by
 hand — the script's field enforcement is the point. The front matter registers hooks that drain,
-advise, re-derive state, check for a compaction loop and guard large inputs; all silent when there is
-nothing to say.
+advise, re-derive state, check for a compaction loop, catch a wake still firing with nothing to
+insure, and guard large inputs; all silent when there is nothing to say.
 
 **Status for the human.** Never narrate the roster into chat — it becomes permanent context re-read
 every later turn. `orch statusline` renders it into harness chrome the model never pays for;

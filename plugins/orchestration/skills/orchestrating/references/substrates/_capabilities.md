@@ -15,7 +15,7 @@ and holds the harness-specific details the spine deliberately excludes.
 | `ESCALATE` | worker → parent, out of band, mid-task | the **primary** correction channel |
 | `PEER` | worker → sibling | narrow; pre-authorised only; see `../messaging.md` |
 | `RETUNE` | change a running worker's model / effort / mode | does **not** change instructions |
-| `WAKE` | recurring prompt back to *this* orchestrator | heartbeat semantics |
+| `WAKE` | recurring prompt back to *this* orchestrator | heartbeat semantics; register it with `orch wake register` so it dies with the lanes it insures (`../liveness.md`) |
 | `SCHEDULE` | recurring spawn of a *fresh* worker on a cadence | distinct from `WAKE` |
 | `ROTATE` | replace a **live** agent — usually yourself — with a fresh one on a handoff note | see `../rotation.md`; the successor performs the `CLOSE`, never the predecessor |
 

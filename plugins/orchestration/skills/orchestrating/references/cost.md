@@ -1,33 +1,57 @@
 # Cost — where an orchestration program's money actually goes
 
-Measured from one three-hour program's transcripts, 1,632 model calls, about $1,100 estimated.
-Numbers here are that program's; the *shape* generalises, and it is not the shape most people expect.
+Measured across four days of one machine's transcripts: **16,156 model calls, about $1,140** at the
+rates in `orch.py`. The *shape* generalises, and it is not the shape most people expect.
 
 ## Where the money went
 
 | Component | Share |
 |---|---|
-| Cache reads — re-reading the context on every model call | 61% |
-| Output tokens | 16% |
-| Cache writes | 23% |
+| Cache reads — re-reading the context on every model call | 55% |
+| Output tokens | 24% |
+| Cache writes | 21% |
 | Fresh input tokens | ~0% |
 
-Of the output, **reasoning was 21%** — so thinking tokens were about 3% of the total bill.
+Those 55% are **1.66 billion** cache-read tokens. Of the output, **reasoning was around a fifth** —
+so thinking tokens were a few percent of the total bill.
+
+**Count responses, not transcript lines.** The harness writes one line per content block, so a
+response holding thinking + text + tool_use is three lines, each repeating the same `usage` object.
+An earlier version of `orch cost` summed lines and reported 1,592 calls for a session that made 714
+— a 2.23x overstatement, on top of a rate table three model generations stale. Together those made
+it report $1,025 for a session that cost $127. If you are computing this yourself, deduplicate on
+`requestId`.
 
 **Do not reach for the effort dial to save money.** It is the most visible knob and nearly the least
-significant, and turning it down buys a 3% saving by making every decision worse. The same is true of
-model choice *for the orchestrator*: it is the number of calls and the size of the context that
-decide the bill, not the price per token.
+significant, and turning it down buys a few percent by making every decision worse.
+
+**Model tier is the exception, and it applies to workers, not to you.** An earlier version of this
+file lumped model choice in with effort as a knob not worth turning. That is right for the
+orchestrator and wrong for the fleet, and the difference is large enough to matter: in the measured
+four days, 6,509 Opus calls in lane worktrees cost $616, and the same tokens on Sonnet 5 would have
+cost $246 — **$370 from one default**, against $97 for the orchestrator's own calls and 11.6% for
+capping every context at 120K. Tier multiplies the cache-read tax rather than replacing it, so it
+compounds with every other lever here instead of competing with them.
+
+Check the direction before assuming a cheaper model is cheaper, though. Fable 5.1 prices cache reads
+at $0.25/MTok against Opus 5's $0.50, so moving 580 Fable calls to Opus would have *saved $0.26* —
+nothing. Read the cache-read column, not the headline input/output price, because cache reads are
+the majority of the bill.
+
+See `delegation.md` for which lanes earn a frontier tier and how a lane escalates when the cheap
+tier is visibly failing.
 
 ## The finding that matters
 
-The same orchestrator, doing the same kind of work, at three points in one session:
+Cost per model call against context carried, measured over 9,138 Opus calls:
 
-| Phase | Context carried | Cost per model call |
+| Context carried | Calls measured | Cost per model call |
 |---|---|---|
-| Early | 118K | $0.42 |
-| Late, before auto-compaction | 668K | $1.35 |
-| After auto-compaction | 88K | $0.23 |
+| under 100K | 3,932 | $0.077 |
+| 100–200K | 4,452 | $0.105 |
+| 200–300K | 517 | $0.152 |
+| 300–400K | 176 | $0.224 |
+| 400–500K | 61 | $0.271 |
 
 **An orchestrator's context is not a private convenience. It is a tax on every remaining step of the
 program.** A 20K tool result read once is 20K re-read on every subsequent call — a dozen calls a turn,
@@ -45,9 +69,14 @@ expensive was almost entirely self-inflicted, not imposed by the workers.
 
 1. **Rotate the orchestrator on purpose.** This skill already treats orchestrator death by
    compaction as routine and makes recovery work: tracker, brief files, plan document. Use that
-   deliberately instead of waiting for it. A rotation at ~200-300K would have held most of that
-   session near $0.30 a call instead of drifting to $1.35 — and the sessions that went wrong went
-   wrong in the other direction, peaking at 731K-899K with no compaction at all. See "Rotating" below.
+   deliberately instead of waiting for it. The measured sessions that went wrong went wrong by
+   drifting up: one peaked at 711K, another ran 714 calls at a 311K median, and the worst reached
+   731K-899K with no compaction at all. See "Rotating" below.
+
+   Be honest about the size of this lever, though. Capping *every* call in the measured four days at
+   120K of context would have saved 11.6% — real, but not the difference between a $96 day and a
+   $553 day. The distribution is dominated by the *many* calls near 105K, not the few enormous ones,
+   which is why the next two levers matter more.
 2. **Never read anything large into the orchestrator.** Delegate the read and take back a
    conclusion. The existing rule says this to avoid "context pollution", which undersells it: a big
    read is a recurring charge, not a one-off.
@@ -69,7 +98,7 @@ same fact seen twice — which is why moving work out is a bigger saving than ma
 
 ```bash
 orch cost                      # this session: calls, context, $/call, share by component
-orch cost --json               # the same, for a script
+orch cost --format json        # the same, for a script
 orch budget --set 150          # a limit for this program, in USD
 ```
 
@@ -100,7 +129,8 @@ change.
 
 ## Rotating — compaction, made early and lossless
 
-Compaction already *is* rotation: it is what dropped that session from $1.35 to $0.23 a call. The
+Compaction already *is* rotation: it is what dropped that session from the 400K band to the 100K
+one, better than halving the per-call cost. The
 only thing wrong with it was timing — the harness waited until the window was nearly full, so the
 session spent five hundred calls in the expensive band first — and the fact that the summary is a
 recollection of state rather than the state itself. Both are fixed without a new agent.

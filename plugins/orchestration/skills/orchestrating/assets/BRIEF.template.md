@@ -8,6 +8,8 @@ advances: [<plan item ids>]        # or the literal: none
 consumption: <what the orchestrator will do with the result — this is the delete condition>
 progress_artifact: <path the worker appends progress to — REQUIRED for long tasks>
 archetype: <integrator|implementer|analyst|verifier|doc|inventory>   # optional, provenance
+# model: <minimal|economy|default|frontier>   # optional RUNG, never a name; default economy
+# model_reason: <the observed signal>         # required for frontier
 review: <integrator|in-brief|none>  # who reads the diff before it lands; default integrator
 # review_waiver: <why no second reader is needed>   # required only with review: none
 # tracker_id: <root.N>             # only when this worker is itself an orchestrator

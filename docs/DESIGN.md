@@ -82,6 +82,48 @@ Constraints: two dials on Anthropic-family models, one on Cursor-hosted models (
 options). `RETUNE` makes start-cheap-escalate-later viable. Contrast compares **model family**, not
 provider id — a bridged provider with the same family is a quota path, not an independent opinion.
 
+### 5a. The anchor drifted, and relative rungs are why nobody noticed
+
+Rungs are deliberately relative — `frontier` / `default` / `economy` / `minimal`, resolved against
+the provider's live model list — because a table of model names is wrong the next time a provider
+ships. That decision was right and it had a cost nobody priced: **a relative rung can change
+referent without changing spelling.** A stale name (`sonnet-4-5`) looks stale on sight; a stale rung
+reads as current forever.
+
+`default` is the rung that moved. The catalog's justification for anchoring there was empirical — in
+the program it was derived from, every worker ran on the provider default at default effort, and that
+included the adversarial passes which correctly refuted the orchestrator. But the provider default
+was a Sonnet-class model when that was measured and is an Opus-class one now, so the unchanged
+sentence became a 2.5x instruction. Measured across four days on one machine (§9c): 6,509 calls in
+lane worktrees cost **$616 where the same tokens one rung down cost $246** — 39% of the entire bill,
+and the single largest lever found, against 11.6% for capping every context at 120K.
+
+Read correctly, the original evidence never supported the frontier tier; it supported *whatever the
+everyday tier happens to be*. So the anchor is now **`economy`**, seven of nine archetypes start at
+or below it, and none starts above it. Two things follow:
+
+- **The cheap-tier claim is untested one rung down, so it is instrumented rather than asserted.** The
+  baseline is on record — 28 of 31 lane tasks finished in a single round on the old anchor. The
+  verifier is the one archetype that held at `economy` while the doc writer and the cleanup sweep
+  dropped to `minimal`, because a bad doc is visible in the artifact and a bad sweep fails loudly,
+  whereas a bad verdict is indistinguishable from a good one until something downstream breaks. Its
+  `minimal` carve-out is a separate row with a narrow precondition, not a discount on the same row.
+- **The dial is enforced where the mode already is, and for the identical reason.** Both are decided
+  at `orch open` rather than at spawn, because a field remembered at spawn time is a field that gets
+  forgotten — and neither fails safe: omitting the mode selects Always Ask, omitting the model
+  selects the provider default. `open` refuses `frontier` without `--model-reason`; `roster` prints
+  `TIER:<rung>` above `economy` with a `:NO-REASON` suffix when unjustified, because spend, unlike a
+  stall, never announces itself.
+
+`orch escalate <e> --to <rung> --reason R` is the escape hatch, and its mandatory reason is the point
+rather than the friction. Escalation records land in `escalations.json`, the one sidecar that
+**outlives the entry it describes** — every other record here dies when its subject closes, but this
+one answers a question no single dispatch can see: which archetypes actually earn a higher rung. It
+can only answer it by accumulating across dispatches that are individually gone, and nothing else
+records it, since the reason a human raised a dial appears in no transcript, commit or plan document.
+An archetype that escalates every time is a wrong default, not bad luck — the log is how that becomes
+visible, and the catalog row is what should change.
+
 ## 6. Tracker
 
 `${XDG_STATE_HOME:-~/.local/state}/agent-orchestration/<repo-basename>-<hash8>/<program>/<id>.json`
@@ -197,15 +239,24 @@ harness pipes it, because a hook is not guaranteed to run where the agent is wor
 
 ## 9c. Cost, measured
 
-Same program, 1,632 model calls, ~$1,100 estimated. Cache reads — re-reading the context on every
-model call — were **61%** of it, output 16%, cache writes 23%, fresh input ~0%. Reasoning tokens were
-about **3%**.
+Four days of one machine's transcripts, 16,156 model calls, ~$1,140. Cache reads — re-reading the
+context on every model call — were **55%** of it (1.66 billion tokens), output 24%, cache writes
+21%, fresh input ~0%. Reasoning was about a fifth of the output, so a few percent of the bill.
 
-The load-bearing measurement is one orchestrator at three points in one session: $0.42 per model
-call at 118K of context, $1.35 at 668K, and $0.23 after an auto-compaction dropped it to 88K. Same
-agent, same kind of work, 5.9x. By composition that context was 35% tool results, 29% its own
-tool-call text, 32% its own prose and reasoning, and 4% worker notifications — **self-inflicted, not
-imposed by the workers.**
+The load-bearing measurement is cost per model call against context carried, over 9,138 Opus calls:
+$0.077 under 100K, $0.105 at 100-200K, $0.152 at 200-300K, $0.224 at 300-400K, $0.271 at 400-500K.
+Same agent, same kind of work, 3.5x across the range. By composition that context was 35% tool
+results, 29% its own tool-call text, 32% its own prose and reasoning, and 4% worker notifications —
+**self-inflicted, not imposed by the workers.**
+
+Two corrections to how this was originally measured, because both inflated the answer and the second
+one silently changed a threshold. `orch cost` summed transcript *lines*, but the harness writes one
+line per content block and repeats the same `usage` object on each, so a 714-response session counted
+as 1,592 calls; responses are now deduplicated on `requestId`. And `DEFAULT_RATES` carried no `opus`
+or `fable` row, so both fell through to a `default` still priced at the Claude 3/4 era $15/$75 with
+cache reads at $1.50 against a real $0.50. Together they reported $1,025 for a session that cost
+$127. The same line-counting bug sat in `scan_compaction`, where distances are compared against
+`CYCLE_MIN_CALLS` — so a detector documented as firing at 15 calls apart was really firing near 7.
 
 Hence Principle 6: an orchestrator's context is a tax on every remaining step, so a large read is a
 recurring charge. Three consequences the skill did not previously draw:
@@ -299,6 +350,41 @@ There is no per-agent registration event, so a pill cannot appear by itself; `/o
 constraint agrees with the intent — status is worth composer space on the one or two agents actually
 orchestrating, not on all fifteen lanes. The pill and its panel share one query key, so the panel
 opens from the pill's cache and the two can never show different numbers at the same instant.
+
+## 9f. Wake lifetime, and the view a turn cannot have
+
+Observed: an orchestrator kept a liveness heartbeat running after its last lane closed, and looped.
+Each firing re-derived state, found no worker, correctly did nothing, and returned. Every tick was
+individually defensible; the waste existed only in the sequence.
+
+Two distinct defects, and the fix for each is structural rather than advisory.
+
+**A wake had no recorded lifetime.** A heartbeat insures one thing — the finish-notification of a
+*running worker* — so its lifetime is the lifetime of the lanes it watches, not of the program or
+the session. The substrate knows a heartbeat exists and when it next fires; it has no idea what it
+was set up to watch. That binding is therefore non-derivable state, which by Principle 1 means it is
+recorded: `wake.json`, one entry per wake, naming the entries it insures. Registration refuses a
+lane that is not open, and `orch close` reports which wakes the close just orphaned — teardown
+belongs in CLOSE beside deleting the tracker entry, for the same reason that deletion lives there.
+Separate housekeeping is the category of work that gets deferred forever.
+
+**The loop was invisible from inside a turn.** No per-turn agent gets the across-ticks view for
+free, so it is kept on disk: a count of consecutive turn ends with an empty roster, raised by the
+turn-end hook as `WAKE ORPHANED` (a registered wake with no live lane, first tick) or `IDLE LOOP`
+(two consecutive no-change turn ends, which catches an unregistered wake). The counter is armed only
+after the program's first close, so a pre-dispatch conversation never trips it, and it has exactly
+one writer — the agent that claimed the program's inbox. Every other agent reads and leaves it
+alone; an earlier cut let any worker's turn end reset the count, which would have erased the only
+evidence that spans ticks.
+
+Two design choices are worth recording because the first attempt got both wrong. Advisories are
+**not** filtered by wake ownership: filtering silenced the detector in exactly the case it was built
+for, an inherited or environment-owned heartbeat that nobody recognises as theirs. And the escape
+hatch is explicit rather than a loosened rule — `--insures 'external:<what>'` for a wake watching
+something the tracker cannot see, which trades the zero-lane rule for a staleness clock, plus
+`orch wake hold --minutes N --reason R` for a genuinely idle session. A hold demands its reason,
+because suppressing the only cross-tick detector is a decision the next session has to be able to
+read.
 
 ## 10. Principles
 

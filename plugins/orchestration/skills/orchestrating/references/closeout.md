@@ -56,6 +56,12 @@ orch close e1 --consumed "landed as <id>; review doc written; plan rows updated"
 `--consumed` is required. **An entry you cannot describe as consumed is an output nobody used** —
 that is a finding, not paperwork. Resist the temptation to close it anyway.
 
+**Delete any wake the close just orphaned, here.** `close` names them. A heartbeat set to catch a
+lost finish-notification has nothing to insure the moment its last lane stops running, and every
+firing after that is a no-change tick that only looks wasteful from outside the turn. Delete it at
+the substrate, then `orch wake clear --id <id>`. `liveness.md` has the rule and the escape hatch for
+a wake that genuinely watches something the tracker cannot see.
+
 Then reclaim what the lane held:
 
 - **Delete by explicit name, never by glob.** A glob in a shared cache directory takes out sibling
@@ -78,6 +84,8 @@ group, filtered to the specific worktree.
 ## When the whole program ends
 
 - Every entry closed, so the tracker directory holds no open work.
+- Every wake deleted at the substrate, so `orch wake list` is empty. A program with no lanes and a
+  live heartbeat is a loop with no one left to notice it.
 - Provenance in the repository; the plan document current.
 - Resources reclaimed by explicit name.
 - The tracker itself may be left — it is machine-local, bounded, and cheap. `orch prune` clears
