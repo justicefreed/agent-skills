@@ -61,6 +61,16 @@ def check(name, got, want):
           % (name, got, want, "ok" if ok else "FAIL"))
 
 
+def check_same(name, got, want):
+    """Exact equality, for the things that are strings rather than money."""
+    ok = got == want
+    if not ok:
+        FAILURES.append(name)
+    print("  %-48s %s" % (name, "ok" if ok else "FAIL"))
+    if not ok:
+        print("    got  %r\n    want %r" % (got, want))
+
+
 M = 1_000_000
 
 # The 1-hour cache-write tier bills at 2x input; the 5-minute tier at 1.25x.
@@ -111,6 +121,25 @@ spend.read_usage(transcript([{"type": "user", "message": {"content": "hi"}},
                              call("h", **write(M, ephemeral_1h=M))]),
                  RATES, on_line=_seen.append)
 check("on_line observes non-usage lines too", float(len(_seen)), 2.0)
+
+# The four hooks ship through two channels -- `plugin.json` for a marketplace
+# install, `spend install` for the symlink path -- and nothing about a session
+# that is missing its cost line tells you which channel delivered the hook that
+# did not fire. So they are generated from one place and pinned here.
+_manifest = os.path.join(HERE, "..", ".claude-plugin", "plugin.json")
+with open(_manifest) as fh:
+    check_same("plugin.json hooks match the generator",
+               json.load(fh).get("hooks"), spend.desired_hooks_object())
+
+# The bug this replaced: `install` baked in the absolute path of whichever copy
+# of spend.py ran it. From a git worktree that path is reclaimed along with the
+# worktree, and every hook ends in `exit 0`, so the whole plugin goes quiet
+# without erroring. Resolution must therefore happen when the hook fires.
+_installed = spend.hook_command("guard", marker=True)
+check_same("install command carries no absolute path",
+           os.path.realpath(spend.__file__) in _installed, False)
+check_same("install command is the manifest one, plus a marker",
+           _installed, spend.hook_command("guard") + "  # " + spend.HOOK_MARKER)
 
 for path in _tmp:
     try:

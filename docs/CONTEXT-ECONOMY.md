@@ -127,10 +127,18 @@ provider and stay correct as models turn over; names rot. The anchor is `economy
 because `default` drifted from Sonnet-class to Opus-class and cost $616 against a measured $246 —
 an anchor that moves under you is worse than no anchor.
 
-**`..` through a symlink is kernel-resolved.** The hook fallback path needs `../..` from a linked
-skill directory to reach the plugin root, because the kernel resolves the symlink before applying
-`..`. The `spend install` path is immune — it bakes in `os.path.realpath(__file__)` at install
-time.
+**`..` through a symlink is kernel-resolved.** The hook path needs `../..` from a linked *skill*
+directory to reach the plugin root, because the kernel resolves the symlink before applying `..`.
+
+`spend install` used to be exempt from that, by baking in `os.path.realpath(__file__)` at install
+time — which looked like the safer choice and was the opposite. An absolute path is only as durable
+as the checkout it names, and the checkout it names is whichever copy of `spend.py` happened to run
+`install`. Run it once from a git worktree and all four hooks point into a directory that is deleted
+the moment that worktree is reclaimed. Every hook ends in `exit 0`, so the failure is not an error:
+it is the cost line, the guard and the rung prompt all quietly ceasing to exist. Both channels now
+generate the same fire-time resolution loop from `desired_hooks_object()`, and `test_spend.py` pins
+`plugin.json` to it — the two ship the same four hooks, and nothing about a session missing its cost
+line tells you which channel delivered the one that did not fire.
 
 ## 5a. The 1-hour cache-write tier (correction, 2026-09-11)
 
@@ -173,6 +181,17 @@ removed. The seam is: anything true of a transcript in general lives in
 supported. This is the answer to "an always-applicable default for all sessions": installing the
 plugin gets the skill; running `spend install` gets the hooks everywhere, including repos that
 have never heard of this marketplace.
+
+It is a one-time step and re-running it is a no-op, which is the property that matters: the command
+records nothing about where it was run from, so there is no state to repair and no reason to re-run
+it after a `git pull`. `--dry-run` prints the settings file that would be written, which is also how
+to check the hooks are still there.
+
+Two things a hook structurally cannot do, recorded here so they are not looked for in the wrong
+place. **The auto-compact window is read at launch**, so no in-session hook can set it — that is why
+it lives in the orchestration plugin's Paseo daemon plugin, which runs before the session exists.
+And **hooks are Claude Code's mechanism**: `link-skills.sh` puts the skill text where Codex and
+Cursor read it, but those harnesses get the rungs table, not the enforcement.
 
 ## 7. Deferred
 

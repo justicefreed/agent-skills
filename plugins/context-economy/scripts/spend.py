@@ -1050,10 +1050,20 @@ def settings_path() -> str:
     return os.path.join(base, "settings.json")
 
 
-def _hook_command(action: str) -> str:
-    script = os.path.realpath(__file__)
-    return "python3 %s %s || exit 0  # %s" % (script, action, HOOK_MARKER)
-
+# Where a firing hook looks for this script, in order. Resolution happens at
+# fire time rather than at install time, and that is the whole point: an earlier
+# cut baked in `os.path.realpath(__file__)`, which pins all four hooks to
+# whichever copy of spend.py happened to run `install`. Run it once from a git
+# worktree and every hook points into a directory that disappears when the
+# worktree is reclaimed -- and since each one ends in `exit 0`, the result is no
+# cost line, no guard, no rung prompt, and no error to notice. These candidates
+# outlive any checkout.
+HOOK_DIRS = (
+    '"$SPEND_SKILL_DIR"',
+    '"$CLAUDE_PLUGIN_ROOT"',
+    '"$HOME/.claude/skills/delegating-economically/../.."',
+    '"$HOME/.agents/skills/delegating-economically/../.."',
+)
 
 DESIRED_HOOKS = (
     ("Stop", None, "cost --format hook"),
@@ -1061,6 +1071,40 @@ DESIRED_HOOKS = (
     ("PreToolUse", "Task|Agent", "rung"),
     ("SessionStart", "compact|resume", "compaction check --format hook"),
 )
+
+
+def hook_command(action: str, marker: bool = False) -> str:
+    """The exact shell one hook runs. `plugin.json` ships this verbatim.
+
+    `..` from the *skill* directory lands on the plugin root because the kernel
+    resolves the symlink before applying `..` -- which is why the candidate is
+    the linked skill and not the plugin directory it lives in.
+
+    `marker` appends the comment that makes `install` idempotent: it is how a
+    re-run finds its own entries in a settings file full of other people's.
+    """
+    return ('for d in %s ; do [ -f "$d/scripts/spend.py" ] && '
+            'exec python3 "$d/scripts/spend.py" %s; done; exit 0%s'
+            % (" ".join(HOOK_DIRS), action,
+               "  # " + HOOK_MARKER if marker else ""))
+
+
+def desired_hooks_object(marker: bool = False) -> Dict[str, Any]:
+    """`DESIRED_HOOKS` as the structure both channels write.
+
+    Single-sourced because the two channels -- `plugin.json` for a marketplace
+    install, this script's `install` for the symlink path -- have to agree, and
+    nothing about a session tells you which one delivered the hook that did not
+    fire. `test_spend.py` asserts `plugin.json` still matches.
+    """
+    hooks: Dict[str, Any] = {}
+    for event, matcher, action in DESIRED_HOOKS:
+        entry: Dict[str, Any] = {
+            "hooks": [{"type": "command", "command": hook_command(action, marker)}]}
+        if matcher:
+            entry["matcher"] = matcher
+        hooks.setdefault(event, []).append(entry)
+    return hooks
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -1088,13 +1132,9 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     added = 0
     if not args.uninstall:
-        for event, matcher, action in DESIRED_HOOKS:
-            entry: Dict[str, Any] = {"hooks": [{"type": "command",
-                                                "command": _hook_command(action)}]}
-            if matcher:
-                entry["matcher"] = matcher
-            hooks.setdefault(event, []).append(entry)
-            added += 1
+        for event, entries in desired_hooks_object(marker=True).items():
+            hooks.setdefault(event, []).extend(entries)
+            added += len(entries)
     changed = removed if args.uninstall else added
 
     settings["hooks"] = hooks
