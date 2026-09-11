@@ -1028,25 +1028,30 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     # Idempotent: every entry carries a marker comment, so a re-run replaces our
     # own hooks and never touches anyone else's.
-    changed = 0
-    for event, matcher, action in DESIRED_HOOKS:
-        entries = [e for e in hooks.get(event, [])
-                   if not (isinstance(e, dict) and HOOK_MARKER in json.dumps(e))]
-        if args.uninstall:
-            if entries != hooks.get(event, []):
-                changed += 1
-            if entries:
-                hooks[event] = entries
-            else:
-                hooks.pop(event, None)
-            continue
-        entry: Dict[str, Any] = {"hooks": [{"type": "command",
-                                            "command": _hook_command(action)}]}
-        if matcher:
-            entry["matcher"] = matcher
-        entries.append(entry)
-        hooks[event] = entries
-        changed += 1
+    # Strip our own entries once per event, before adding any back. Stripping
+    # inside the add loop lets a second desired hook for an event delete the
+    # first -- PreToolUse has two, and the guard never survived the rung.
+    removed = 0
+    for event in dict.fromkeys(event for event, _, _ in DESIRED_HOOKS):
+        existing = hooks.get(event, [])
+        kept = [e for e in existing
+                if not (isinstance(e, dict) and HOOK_MARKER in json.dumps(e))]
+        removed += len(existing) - len(kept)
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+
+    added = 0
+    if not args.uninstall:
+        for event, matcher, action in DESIRED_HOOKS:
+            entry: Dict[str, Any] = {"hooks": [{"type": "command",
+                                                "command": _hook_command(action)}]}
+            if matcher:
+                entry["matcher"] = matcher
+            hooks.setdefault(event, []).append(entry)
+            added += 1
+    changed = removed if args.uninstall else added
 
     settings["hooks"] = hooks
     if args.dry_run:
