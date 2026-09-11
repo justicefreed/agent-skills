@@ -11,7 +11,8 @@ and holds the harness-specific details the spine deliberately excludes.
 | `ISOLATE` | give a worker its own branch / worktree / workspace | orthogonal to parentage on some substrates |
 | `POLL` | determine a worker's true state | see `../liveness.md` — not a wait loop |
 | `HARVEST` | collect a worker's final report | |
-| `CLOSE` | end a worker and release what it held | |
+| `CLOSE` | end a worker | ends the *worker*, not necessarily the container it ran in |
+| `RECLAIM` | archive the container an isolated lane ran in — its agents, its terminals, its worktree | the counterpart to `ISOLATE`, and on a substrate that lists finished workers for review it is also the only acknowledgement available. Commit first; see `../closeout.md` |
 | `ESCALATE` | worker → parent, out of band, mid-task | the **primary** correction channel |
 | `PEER` | worker → sibling | narrow; pre-authorised only; see `../messaging.md` |
 | `RETUNE` | change a running worker's model / effort / mode | does **not** change instructions |

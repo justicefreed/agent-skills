@@ -12,6 +12,7 @@ implying work is running elsewhere.
 | `POLL` `ESCALATE` `PEER` `RETUNE` `WAKE` `SCHEDULE` | no | not applicable — there is no second agent |
 | `HARVEST` | n/a | the work's output is in front of you |
 | `CLOSE` | yes | close the tracker entry as usual |
+| `RECLAIM` | n/a | nothing created a container, so nothing owns one. A branch or worktree you made yourself is yours to delete by name |
 
 ## Keep the tracker anyway
 

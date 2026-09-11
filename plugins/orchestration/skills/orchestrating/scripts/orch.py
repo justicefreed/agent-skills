@@ -775,6 +775,11 @@ def cmd_open(args: argparse.Namespace) -> int:
         "title": fields["title"],
         "brief_path": os.path.abspath(args.brief),
         "worktree": fields["worktree"],
+        # The substrate's own handle for whatever holds this lane -- a Paseo
+        # workspace id, and nothing at all on a substrate with no such object.
+        # Recorded here because a lane's container is invisible from the
+        # tracker otherwise, and an unnamed container is one nobody reclaims.
+        "workspace_id": args.workspace_id,
         "expected_artifacts": fields["expected_artifacts"],
         "advances": fields["advances"],
         "consumption": fields["consumption"],
@@ -809,8 +814,11 @@ def cmd_open(args: argparse.Namespace) -> int:
               "up in Always Ask, which halts it on its first tool call; omit the "
               "model and it comes up on the provider default, which is the "
               "expensive rung. Then run:\n"
-              "  orch update %s --agent-id <id> --session-name <name>"
-              % (json.dumps({"modeId": mode}), model, entry_id), file=sys.stderr)
+              "  orch update %s --agent-id <id> --session-name <name>%s"
+              % (json.dumps({"modeId": mode}), model, entry_id,
+                 "" if entry["workspace_id"] or not lane_has_own_tree(entry, args.repo)
+                 else " --workspace-id <id>"),
+              file=sys.stderr)
     if missing_read_rules():
         print("warning: this brief, and the skill references it points at, sit "
               "outside the worker's worktree and are not allow-listed, so the "
@@ -836,6 +844,11 @@ def cmd_update(args: argparse.Namespace) -> int:
     if args.session_name:
         entry["session_name"] = args.session_name
         changed.append("session_name")
+    if getattr(args, "workspace_id", None):
+        # Usually set here rather than at `open`: the container is minted at
+        # spawn time, which is after the brief was written and recorded.
+        entry["workspace_id"] = args.workspace_id.strip()
+        changed.append("workspace_id")
     if args.status:
         if args.status not in STATUSES:
             raise OrchError("status must be one of %s" % ", ".join(STATUSES))
@@ -897,6 +910,61 @@ def cmd_mint_child(args: argparse.Namespace) -> int:
     return 0
 
 
+def lane_has_own_tree(entry: Dict[str, Any], repo: Optional[str]) -> bool:
+    """Whether this lane runs somewhere other than the orchestrator's own tree.
+
+    A lane with its own tree has a container that something had to create, and
+    therefore one that something has to reclaim; a lane sharing this agent's
+    tree has none. Derived from the worktree rather than from the presence of a
+    `workspace_id`, so that an absent id reads as an omission rather than as
+    proof no container exists.
+    """
+    lane = entry.get("worktree")
+    if not lane:
+        return False
+    try:
+        return os.path.realpath(str(lane)) != _worktree_key(repo)
+    except (OSError, ValueError, OrchError):
+        return False
+
+
+def reclaim_close_obligations(entry: Dict[str, Any], repo: Optional[str]) -> List[str]:
+    """What closing this entry owes the container the lane ran in.
+
+    Same argument as `wake_close_obligations`: the lane's container stops being
+    useful the moment the lane closes, and close is the last moment an agent is
+    reliably looking at this entry. Deferred to housekeeping it is deferred
+    forever, and the cost is not only disk -- on a substrate that surfaces
+    finished workers for review, every un-reclaimed lane is a row the human has
+    to dismiss to find the one that actually wants them.
+
+    Names the container and stops. Whether reclaiming it is one call or several
+    is the substrate's business, not the tracker's.
+    """
+    workspace = entry.get("workspace_id")
+    if workspace:
+        return [
+            "RECLAIM: %s held workspace %s. Archive it at the substrate NOW -- "
+            "it takes the lane's agents, its terminals and its worktree "
+            "directory with it, and a worker that is gone cannot sit in the "
+            "human's review queue. Commit first: archiving a worktree keeps "
+            "the branch and not the uncommitted tree."
+            % (entry["entry"], workspace)
+        ]
+
+    # No container recorded. That is correct for a lane that ran in the
+    # orchestrator's own tree, and a silent leak for one that did not.
+    if lane_has_own_tree(entry, repo):
+        return [
+            "NOTE: %s ran in %s, which is not this agent's own tree, and no "
+            "workspace id was recorded. If the substrate created that tree, it "
+            "owns an object nobody is going to reclaim -- find it and archive "
+            "it by hand. Record it at dispatch next time: `orch update <e> "
+            "--workspace-id <id>`." % (entry["entry"], entry.get("worktree"))
+        ]
+    return []
+
+
 def cmd_close(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -923,6 +991,8 @@ def cmd_close(args: argparse.Namespace) -> int:
     arm_wake_ticks(repo_key, program)
     for line in wake_close_obligations(repo_key, program, args.tracker,
                                        entry["entry"], len(data["entries"])):
+        print(line, file=sys.stderr)
+    for line in reclaim_close_obligations(entry, args.repo):
         print(line, file=sys.stderr)
     if entry.get("child_tracker"):
         child = tracker_path(repo_key, program, entry["child_tracker"])
@@ -3972,6 +4042,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("open", help="record a dispatch from its brief")
     sp.add_argument("--brief", required=True, help="path to the brief file")
     sp.add_argument("--agent-id", help="omit when recording before the spawn")
+    sp.add_argument("--workspace-id",
+                    help="substrate handle for the container this lane runs in "
+                         "(a Paseo workspace id); close names it back for "
+                         "reclamation")
     sp.add_argument("--mode",
                     help="session mode to spawn with (default: %s; brief front "
                          "matter `mode` overrides that)" % WORKER_MODE_DEFAULT)
@@ -3992,6 +4066,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("entry", help="entry id or agent id")
     sp.add_argument("--agent-id")
     sp.add_argument("--session-name")
+    sp.add_argument("--workspace-id",
+                    help="the container this lane runs in, once the spawn has "
+                         "minted it")
     sp.add_argument("--mode", help="the session mode the agent is actually in")
     sp.add_argument("--model", choices=MODEL_RUNGS,
                     help="correct a mis-recorded rung; to RAISE one, use "

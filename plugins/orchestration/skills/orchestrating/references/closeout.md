@@ -62,7 +62,19 @@ firing after that is a no-change tick that only looks wasteful from outside the 
 the substrate, then `orch wake clear --id <id>`. `liveness.md` has the rule and the escape hatch for
 a wake that genuinely watches something the tracker cannot see.
 
-Then reclaim what the lane held:
+Then reclaim what the lane held.
+
+**Archive the lane's container first, if the substrate gave it one.** `close` names it, the same way
+it names an orphaned wake, and for the same reason: this is the last moment an agent is reliably
+looking. One call takes the lane's agents, its terminals and its worktree together — delete the
+worktree by hand instead and the agents survive it, still listed, still asking the human to review
+work that was never theirs to review. Steps 1 and 2 are what make this safe to do: archiving keeps
+the branch and not the uncommitted tree, so a lane whose work is committed and verified loses
+nothing. `close` can only name a container that was recorded, so record it at dispatch:
+`orch update <e> --workspace-id <id>`. Substrate semantics — and why there is no "mark as reviewed"
+to reach for instead — in `substrates/paseo.md`.
+
+Then the rest:
 
 - **Delete by explicit name, never by glob.** A glob in a shared cache directory takes out sibling
   lanes' work. Name each path.

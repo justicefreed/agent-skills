@@ -15,7 +15,8 @@ orchestration policy.
 | `ISOLATE` | `create_workspace` (`isolation: "worktree"`, `mode: branch-off\|checkout-branch\|checkout-pr`) | **placement never changes parentage** — a cross-workspace child is still your subagent | documented |
 | `POLL` | `get_agent_status` → `status`, `activeTurn`, `attentionReason`, `pendingPermissions` | the only reliable idle/running signal available. `status: running` with a non-empty `pendingPermissions` is a **stalled** worker, not a working one | observed |
 | `HARVEST` | the finish notification's `agent-response`, plus artifacts on disk | | documented |
-| `CLOSE` | `archive_agent` | interrupts if running | documented |
+| `CLOSE` | `archive_agent` | interrupts if running. Leaves the workspace and the worktree behind — use `RECLAIM` for a lane that got its own | documented |
+| `RECLAIM` | `archive_workspace` | archives **everything the workspace owns**: live agents, stored agent records, terminals. For a Paseo-owned worktree it then runs the teardown commands and **deletes the worktree directory**, unless another active workspace still references that path. The branch is recorded and the worktree is restorable; the uncommitted tree is not | daemon source |
 | `ESCALATE` | worker → parent; see `../messaging.md` for the safe path | | observed |
 | `PEER` | see `../messaging.md`; **default to artifact reads instead** | | observed |
 | `RETUNE` | `update_agent` (`settings.model`, `thinkingOptionId`, `modeId`) | changes config on a **running** agent; does not touch instructions | documented |
@@ -28,6 +29,31 @@ that archives itself never reaches its next line and cannot observe the result �
 be the one to call it. And an agent-scoped `create_agent` already defaults to the caller's workspace,
 so the correct placement is the default one: pass `initialPrompt` verbatim from `orch rotate begin`
 and pass no `workspaceId`. Full order in `../rotation.md`.
+
+## The review queue — why `RECLAIM` is the only lever
+
+Every lane you spawn ends up in the subagents pill as *"N ready to review"*, and none of them were
+ever meant for the human. That count is **derived state, not a read flag**. The daemon buckets an
+agent in order — `needs_input` when a permission is pending, `failed` on error, `running` while
+running, then `attention` when its `requiresAttention` is set, else `done` — and sets
+`requiresAttention` when a turn ends on an agent nobody is focused on. That is the definition of a
+finished worker.
+
+**There is no mark-as-read you can call.** The daemon does have `clear_agent_attention` and
+`workspace.clear_attention.request`, both accepting an id or an array of them, but only the desktop
+client sends them: neither MCP nor the `paseo` CLI exposes either one. Do not go around that by
+speaking the daemon socket — it is an unversioned internal message behind the CLI's own pairing.
+
+So reclaiming *is* the acknowledgement. An archived agent is off the active list and cannot be in any
+bucket, which is why `closeout.md` puts `RECLAIM` in the close step rather than in housekeeping. Two
+built-ins are worth knowing and neither replaces it:
+
+- `create_agent_request.autoArchive` archives an agent — and the worktree it created — at its **first**
+  turn end. Not exposed by MCP `create_agent` or by `paseo run`, and wrong for any lane you intend to
+  message twice.
+- `daemon.autoArchiveAfterMerge` in `~/.paseo/config.json` (default `false`) archives a worktree once
+  its PR is observed merged. Global and merge-triggered, so it covers lanes that land through a PR
+  and no others. Free when it applies.
 
 ## Session mode — the one setting whose default is wrong
 

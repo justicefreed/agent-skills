@@ -54,7 +54,7 @@ A generic conversation-compaction handoff skill remains complementary and is not
 
 ## 4. Capability verbs and adapters
 
-The spine names no tool. Verbs: `SPAWN ISOLATE POLL HARVEST CLOSE ESCALATE PEER RETUNE WAKE
+The spine names no tool. Verbs: `SPAWN ISOLATE POLL HARVEST CLOSE RECLAIM ESCALATE PEER RETUNE WAKE
 SCHEDULE`. Adapters: `paseo`, `claude-native` (in-harness agent teams treated as a variant whose
 `SPAWN` is human-performed), `none`.
 
@@ -385,6 +385,41 @@ something the tracker cannot see, which trades the zero-lane rule for a stalenes
 `orch wake hold --minutes N --reason R` for a genuinely idle session. A hold demands its reason,
 because suppressing the only cross-tick detector is a decision the next session has to be able to
 read.
+
+## 9g. The review queue, and why reclaiming is the acknowledgement
+
+Observed: every lane spawned into its own Paseo workspace ended up in the human's sidebar as *"ready
+to review"*, and none of them were ever meant for the human. The obvious ask is a mark-as-read. It
+does not exist, and the reason it does not exist is the useful part.
+
+**That state is derived, not stored.** The daemon buckets an agent in a fixed order and lands it in
+`attention` when `requiresAttention` is set — which it sets when a turn ends on an agent nobody is
+focused on. A finished worker *is* the definition of the bucket. There is no flag to write. The
+daemon does carry `clear_agent_attention` and a workspace-scoped twin, but only the desktop client
+sends them; neither MCP nor the CLI exposes either, and reaching them means speaking an unversioned
+internal socket behind the CLI's own pairing. That is a substrate we would then own.
+
+So the acknowledgement is **removal**: an archived agent is off the active list and cannot be in any
+bucket. `RECLAIM` (`archive_workspace` on Paseo) was added as a verb distinct from `CLOSE` because
+the two are not the same reclaim. `CLOSE` ends the *worker*; `RECLAIM` ends the *container* — the
+lane's agents, its terminals, and, for a substrate-owned worktree, the directory itself. A lane that
+got its own workspace and receives only `CLOSE` leaves the workspace and its agent records behind,
+which is exactly the row the human has to dismiss.
+
+Where it lives follows 9f's argument unchanged. The container is substrate state the tracker cannot
+derive, so it is recorded (`workspace_id`, set at dispatch) and **named back at close**, beside the
+orphaned-wake report. Close is the last moment an agent is reliably looking at the entry; deferred to
+housekeeping it is deferred forever. `orch.py` names the container and stops — it does not shell out
+to `paseo`, because a tracker that knows one substrate's archive call stops being portable, and the
+verb table is the only place a substrate may be named.
+
+The ordering constraint is real and is why this sits *after* the commit step rather than replacing
+it: archiving a Paseo-owned worktree keeps the branch and deletes the tree. Uncommitted work is
+gone. A lane whose work is committed and verified loses nothing; a lane closed out of order loses
+everything. Two substrate built-ins nearly do this and neither replaces the verb —
+`create_agent_request.autoArchive` fires at the *first* turn end, which is wrong for any lane worth
+messaging twice, and `daemon.autoArchiveAfterMerge` is global and triggers on an observed PR merge,
+so it covers lanes that land through a PR and no others.
 
 ## 10. Principles
 

@@ -56,6 +56,7 @@ what is **still open**.
 | `root.json` | **fully** | fixed name |
 | child tracker id | **fully** | parent id + ordinal; encoded in the filename |
 | substrate agent id | **no** | minted at spawn — the field that makes this tracker necessary |
+| the lane's container | **no** | minted at `ISOLATE`; nothing else remembers which lane owns it |
 | worker liveness | **fully** | the substrate; never stored here |
 
 Program names are derived from the plan document's directory when there is one, otherwise
@@ -70,8 +71,14 @@ Two phases, because the record must precede the action but the agent id only exi
 ```bash
 orch open --brief briefs/batch-c.md         # -> e1, status pending
 # ...SPAWN...
-orch update e1 --agent-id <id> --session-name <name>
+orch update e1 --agent-id <id> --session-name <name> [--workspace-id <id>]
 ```
+
+`--workspace-id` records the substrate's handle for whatever container the lane got from `ISOLATE`,
+and is omitted for a lane running in your own tree. It is recorded for the same reason the agent id
+is — it is minted at spawn and derivable from nothing afterwards — and it is what lets `orch close`
+name the container back for `RECLAIM` instead of leaving it for a housekeeping pass that never
+comes. `closeout.md` has the obligation.
 
 If the process dies between them, you are left with a `pending` entry naming a brief and a worktree
 — enough to find the orphan. Recording *after* the spawn instead would leave an agent nobody knows
@@ -105,8 +112,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | Command | Purpose |
 |---|---|
 | `orch programs` | what programs exist for this repo |
-| `orch open --brief P [--agent-id ID] [--mode M] [--model R] [--model-reason S] [--program N] [--tracker ID]` | record a dispatch |
-| `orch update E [--agent-id] [--session-name] [--mode] [--model] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch open --brief P [--agent-id ID] [--workspace-id ID] [--mode M] [--model R] [--model-reason S] [--program N] [--tracker ID]` | record a dispatch |
+| `orch update E [--agent-id] [--session-name] [--workspace-id] [--mode] [--model] [--status] [--pending-message] [--note]` | amend an open entry |
 | `orch permissions [--install]` | check, or grant, the one read a worker needs to start |
 | `orch mint-child E` | allocate a sub-orchestrator's tracker id (idempotent) |
 | `orch close E --consumed "<what happened>"` | delete a consumed entry |

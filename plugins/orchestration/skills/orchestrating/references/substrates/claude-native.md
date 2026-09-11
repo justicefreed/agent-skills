@@ -12,6 +12,7 @@ not the process — and for short-lived work where a fresh restart is cheap.
 | `POLL` | the peer/agent listing tool; the background-task output tool | listing rows observed to show only `interactive · started Nm ago` — **no busy/idle field**, despite the docs describing one | observed |
 | `HARVEST` | the subagent's final report, or its background-task output | the final message is not shown to the user — relay what matters | documented |
 | `CLOSE` | the task-stop tool for background work | | documented |
+| `RECLAIM` | none needed | `ISOLATE`'s worktree is auto-cleaned and a subagent does not outlive the session, so no container survives the close and none can sit in a review queue | documented |
 | `ESCALATE` | the message tool addressed to `"main"` | **background subagents only** — so escalation-capable dispatch implies background dispatch | documented |
 | `PEER` | the message tool, addressed to a listed peer | **queues and drains at the receiver's next tool round**; race-free | documented |
 | `RETUNE` | none | model is fixed at spawn; **no effort dial** — effort comes from the agent definition | documented |

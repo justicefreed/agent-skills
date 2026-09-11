@@ -199,11 +199,13 @@ landing is commissioned or ruled unnecessary, and its provenance lives somewhere
   history and in what order; the integrator does the *labor*.
 - **`CLOSE`** the worker, then delete its tracker entry. An entry you cannot delete is an output
   nobody consumed — that is the signal, not a nuisance.
-- **Delete any wake the close just orphaned**, here and not as later housekeeping. `orch close`
-  names them; a heartbeat that outlives its lanes is a loop, not insurance.
-- **Reclaim resources by explicit name, never by glob**, and never while any build is running.
+- **Delete any wake the close just orphaned, and `RECLAIM` any container the lane held** — here, not
+  as later housekeeping. `orch close` names both. A heartbeat that outlives its lanes is a loop, not
+  insurance; a workspace that outlives its worker is a row the human has to dismiss. Commit first —
+  reclaiming keeps the branch, not the uncommitted tree.
+- **Reclaim everything else by explicit name, never by glob**, and never while any build is running.
 
-**Done when:** the entry is deleted, every wake it orphaned is gone, provenance is durable, and resources are reclaimed.
+**Done when:** the entry is deleted, every wake it orphaned is gone, every container it held is archived, provenance is durable, and resources are reclaimed.
 
 ## Reference map
 
