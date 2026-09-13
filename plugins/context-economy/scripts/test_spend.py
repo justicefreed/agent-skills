@@ -74,6 +74,74 @@ def check_same(name, got, want):
 
 M = 1_000_000
 
+# Provider wrappers, case, and punctuation must not change the underlying rate.
+check_same("cursor prefix resolves GPT-5.6 Sol",
+           spend.rate_for("cursor/GPT-5.6-sol", RATES),
+           RATES["gpt-5.6-sol"])
+check_same("cursor/claude prefix resolves Fable 5.1",
+           spend.rate_for("cursor/claude-fable-5-1", RATES),
+           RATES["fable-5.1"])
+check_same("GPT-5.6 Sol published rates",
+           RATES["gpt-5.6-sol"],
+           {"in": 4.0, "out": 20.0, "cache_write": 5.0,
+            "cache_write_1h": 5.0, "cache_read": 0.4})
+check_same("Fable 5.1 published rates",
+           RATES["fable-5.1"],
+           {"in": 10.0, "out": 50.0, "cache_write": 12.5,
+            "cache_write_1h": 20.0, "cache_read": 0.25})
+check_same("versioned model beats generic family alias",
+           spend.rate_for("anthropic/claude-sonnet-4-6", RATES),
+           RATES["sonnet-4.6"])
+check_same("fast variant beats base model",
+           spend.rate_for("cursor/GPT-5.6-Terra-Fast", RATES),
+           RATES["gpt-5.6-terra-fast"])
+check_same("generic alias requires a complete token",
+           spend.rate_for("provider/notopus-model", RATES),
+           RATES["default"])
+
+# Model selection is two deterministic filters: the versioned policy says what
+# fits, and the live catalog says what can actually be spawned. A prose table
+# cannot make the second guarantee.
+_model_options = {
+    "archetypes": {
+        "implementer": {
+            "aliases": ["implementation"],
+            "rung": "economy",
+            "effort": "medium",
+        },
+    },
+    "models": [
+        {"id": "gpt-5.6-luna", "family": "gpt-5.6",
+         "rungs": ["minimal", "economy"], "use": "bounded work"},
+        {"id": "claude-sonnet-5", "family": "claude-sonnet",
+         "rungs": ["economy", "advanced"], "use": "interconnected work"},
+        {"id": "retired-model", "family": "retired",
+         "rungs": ["economy"], "use": "must not appear"},
+    ],
+}
+_model_catalog = [
+    {"slug": "cursor/gpt-5.6-luna",
+     "supported_reasoning_levels": [
+         {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]},
+    {"slug": "cursor/claude-sonnet-5",
+     "supported_reasoning_levels": [{"effort": "low"}]},
+]
+_selected = spend.select_models(
+    _model_options, _model_catalog, "economy", "medium")
+check_same("model selector returns exact live slugs",
+           [row["model"] for row in _selected],
+           ["cursor/gpt-5.6-luna", "cursor/claude-sonnet-5"])
+check_same("model selector emits only supported efforts",
+           [row["effort"] for row in _selected], ["medium", "low"])
+check_same("model selector can require an independent family",
+           [row["model"] for row in spend.select_models(
+               _model_options, _model_catalog, "economy", "medium", "gpt-5.6")],
+           ["cursor/claude-sonnet-5"])
+check_same("archetype aliases resolve to canonical policy",
+           spend.resolve_archetype(
+               "implementation", _model_options["archetypes"])[0],
+           "implementer")
+
 # The 1-hour cache-write tier bills at 2x input; the 5-minute tier at 1.25x.
 # `cache_creation_input_tokens` is their sum and did not change when the
 # breakdown was added, so code reading only it prices 1h writes at the 5m rate.

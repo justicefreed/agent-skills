@@ -62,17 +62,97 @@ def env(name: str, default: Any = None) -> Any:
 # bill, and the ordering there is not the ordering of the headline price. Moving
 # 580 measured Fable calls to Opus would have SAVED $0.26, because Fable prices
 # cache reads at $0.25/MTok against Opus's $0.50.
+#
+# Source for named rows: https://cursor.com/docs/models-and-pricing,
+# retrieved 2026-09-13. A dash in Cursor's cache-write column is represented as
+# zero. Anthropic's documented 1-hour cache tier remains 2x input; models whose
+# page has one cache-write price use that price for either transcript bucket.
+def _rate(input_rate: float, cache_write: float, cache_read: float,
+          output_rate: float,
+          cache_write_1h: Optional[float] = None) -> Dict[str, float]:
+    return {
+        "in": input_rate,
+        "out": output_rate,
+        "cache_write": cache_write,
+        "cache_write_1h": (cache_write if cache_write_1h is None
+                           else cache_write_1h),
+        "cache_read": cache_read,
+    }
+
+
 DEFAULT_RATES = {
-    # `cache_write` is the 5-minute tier (1.25x input); `cache_write_1h` is the
-    # 1-hour tier (2x input). Both are real and the split is per call -- see
-    # read_usage. A session on a 1h-TTL harness is overwhelmingly the 1h tier.
-    "default":    {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5},
-    "opus":       {"in": 5.0,  "out": 25.0, "cache_write": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5},
-    "fable":      {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_write_1h": 20.0, "cache_read": 0.25},
-    "mythos":     {"in": 10.0, "out": 50.0, "cache_write": 12.5,  "cache_write_1h": 20.0, "cache_read": 0.25},
-    "sonnet-4-6": {"in": 3.0,  "out": 15.0, "cache_write": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.3},
-    "sonnet":     {"in": 2.0,  "out": 10.0, "cache_write": 2.5,   "cache_write_1h": 4.0,  "cache_read": 0.2},
-    "haiku":      {"in": 1.0,  "out": 5.0,  "cache_write": 1.25,  "cache_write_1h": 2.0,  "cache_read": 0.1},
+    # Conservative fallback and broad aliases for old transcript model ids.
+    "default": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "opus": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "fable": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
+    "mythos": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
+    "sonnet": _rate(2.0, 2.5, 0.2, 10.0, 4.0),
+    "haiku": _rate(1.0, 1.25, 0.1, 5.0, 2.0),
+
+    # Cursor models.
+    "grok-4.6-fast": _rate(4.0, 0.0, 1.0, 12.0),
+    "grok-4.6": _rate(2.0, 0.0, 0.5, 6.0),
+    "grok-4.5-fast": _rate(4.0, 0.0, 1.0, 18.0),
+    "grok-4.5": _rate(2.0, 0.0, 0.5, 6.0),
+    "composer-2.5-fast": _rate(3.0, 0.0, 0.5, 15.0),
+    "composer-2.5": _rate(0.5, 0.0, 0.2, 2.5),
+
+    # Anthropic.
+    "sonnet-4-1m": _rate(6.0, 7.5, 0.6, 22.5, 12.0),
+    "sonnet-4": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
+    "haiku-4.5": _rate(1.0, 1.25, 0.1, 5.0, 2.0),
+    "opus-4.5": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "sonnet-4.5": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
+    "opus-4.6": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "sonnet-4.6": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
+    "opus-4.7-fast": _rate(30.0, 37.5, 3.0, 150.0, 60.0),
+    "opus-4.7": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "opus-4.8-fast": _rate(10.0, 12.5, 1.0, 50.0, 20.0),
+    "opus-4.8": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "fable-5.1": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
+    "fable-5": _rate(10.0, 12.5, 1.0, 50.0, 20.0),
+    "opus-5": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
+    "sonnet-5": _rate(2.0, 2.5, 0.2, 10.0, 4.0),
+
+    # OpenAI.
+    "gpt-5.6-luna-fast": _rate(0.4, 0.5, 0.04, 2.4),
+    "gpt-5.6-luna": _rate(0.2, 0.25, 0.02, 1.2),
+    "gpt-5.6-terra-fast": _rate(4.0, 5.0, 0.4, 24.0),
+    "gpt-5.6-terra": _rate(2.0, 2.5, 0.2, 12.0),
+    "gpt-5.6-sol-fast": _rate(8.0, 10.0, 0.8, 40.0),
+    "gpt-5.6-sol": _rate(4.0, 5.0, 0.4, 20.0),
+    "gpt-5.4-nano": _rate(0.2, 0.0, 0.02, 1.25),
+    "gpt-5.4-mini": _rate(0.75, 0.0, 0.075, 4.5),
+    "gpt-5.4-fast": _rate(5.0, 0.0, 0.5, 30.0),
+    "gpt-5.4": _rate(2.5, 0.0, 0.25, 15.0),
+    "gpt-5.3-codex": _rate(1.75, 0.0, 0.175, 14.0),
+    "gpt-5.2-codex": _rate(1.75, 0.0, 0.175, 14.0),
+    "gpt-5.2": _rate(1.75, 0.0, 0.175, 14.0),
+    "gpt-5.1-codex-mini": _rate(0.25, 0.0, 0.025, 2.0),
+    "gpt-5.1-codex-max": _rate(1.25, 0.0, 0.125, 10.0),
+    "gpt-5.1-codex": _rate(1.25, 0.0, 0.125, 10.0),
+    "gpt-5-codex": _rate(1.25, 0.0, 0.125, 10.0),
+    "gpt-5-mini": _rate(0.25, 0.0, 0.025, 2.0),
+    "gpt-5-fast": _rate(2.5, 0.0, 0.25, 20.0),
+    "gpt-5": _rate(1.25, 0.0, 0.125, 10.0),
+
+    # Google.
+    "gemini-2.5-flash": _rate(0.3, 0.0, 0.03, 2.5),
+    "gemini-3.8-flash": _rate(0.75, 0.0, 0.075, 3.5),
+    "gemini-3.7-flash": _rate(0.75, 0.0, 0.075, 3.5),
+    "gemini-3.6-flash": _rate(1.5, 0.0, 0.15, 7.5),
+    "gemini-3.5-flash": _rate(1.5, 0.0, 0.15, 9.0),
+    "gemini-3.1-pro": _rate(2.0, 0.0, 0.2, 12.0),
+    "gemini-3-pro-image-preview": _rate(2.0, 0.0, 0.2, 12.0),
+    "gemini-3-pro": _rate(2.0, 0.0, 0.2, 12.0),
+    "gemini-3-flash": _rate(0.5, 0.0, 0.05, 3.0),
+
+    # Moonshot.
+    "kimi-k2.7-code": _rate(0.95, 0.0, 0.19, 4.0),
+    "kimi-k3": _rate(3.0, 0.0, 0.3, 15.0),
+
+    # Z.ai.
+    "glm-5.2": _rate(1.4, 0.0, 0.26, 4.4),
 }
 
 # Model RUNGS are relative to the provider, never absolute names. A name written
@@ -80,8 +160,13 @@ DEFAULT_RATES = {
 # The measured cost of getting this wrong: `default` drifted from a Sonnet-class
 # model to an Opus-class one without the rung name changing, and 6,509 lane
 # calls cost $616 where the same tokens one rung down cost $246.
-MODEL_RUNGS = ("minimal", "economy", "default", "frontier")
+MODEL_RUNGS = ("minimal", "economy", "advanced", "frontier")
 WORKER_MODEL_DEFAULT = env("WORKER_MODEL", "economy")
+MODEL_OPTIONS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    "skills", "delegating-economically", "references", "model-options.json")
+EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+RELATIVE_EFFORTS = ("lowest", "one-below-default", "default")
 
 
 def load_rates() -> Dict[str, Any]:
@@ -104,18 +189,35 @@ def load_rates() -> Dict[str, Any]:
     return dict(DEFAULT_RATES)
 
 
-def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
-    """Longest key wins, so `sonnet-4-6` beats `sonnet` on a 4.6 model id.
+def _model_tokens(value: str) -> Tuple[str, ...]:
+    """Normalize provider wrappers and punctuation into comparable tokens."""
+    return tuple(re.findall(r"[a-z]+|\d+", (value or "").lower()))
 
-    Deliberately not first-match: that made the answer depend on dict insertion
-    order, which a rates override is free to change.
+
+def _contains_tokens(name: Tuple[str, ...], key: Tuple[str, ...]) -> bool:
+    """Whether key is a contiguous token sequence inside name."""
+    width = len(key)
+    return bool(width and any(name[i:i + width] == key
+                              for i in range(len(name) - width + 1)))
+
+
+def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
+    """Choose the most specific normalized model key.
+
+    Provider wrappers and punctuation do not affect matching:
+    `cursor/GPT-5.6-sol` matches `gpt-5.6-sol`, and
+    `cursor/claude-fable-5-1` matches `fable-5.1`.
     """
-    name = (model or "").lower()
+    name = _model_tokens(model)
     best = None
     for key, value in rates.items():
-        if key != "default" and key in name:
-            if best is None or len(key) > len(best[0]):
-                best = (key, value)
+        if key == "default":
+            continue
+        tokens = _model_tokens(key)
+        if _contains_tokens(name, tokens):
+            score = (len(tokens), len(key))
+            if best is None or score > best[0]:
+                best = (score, value)
     rate = best[1] if best else rates["default"]
     if "cache_write_1h" not in rate:
         # A rates.json written before the 1h tier existed prices every cache
@@ -123,6 +225,183 @@ def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
         # tier is 2x input, and silently undercharging is the bug this fixes.
         rate = dict(rate, cache_write_1h=rate["in"] * 2.0)
     return rate
+
+
+def load_model_options(path: Optional[str] = None) -> Dict[str, Any]:
+    source = os.path.expanduser(path or MODEL_OPTIONS_PATH)
+    try:
+        with open(source, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise SpendError("cannot read model options %s: %s" % (source, exc))
+    if not isinstance(data.get("models"), list) or not isinstance(
+            data.get("archetypes"), dict):
+        raise SpendError("invalid model options in %s" % source)
+    return data
+
+
+def find_model_catalog(path: Optional[str] = None) -> str:
+    candidates = []
+    if path:
+        candidates.append(path)
+    configured = env("MODEL_CATALOG")
+    if configured:
+        candidates.append(str(configured))
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        candidates.append(os.path.join(codex_home, "models_cache.json"))
+    candidates.append(os.path.expanduser("~/.codex/models_cache.json"))
+    for candidate in candidates:
+        expanded = os.path.expanduser(candidate)
+        if os.path.isfile(expanded):
+            return expanded
+    raise SpendError(
+        "no live model catalog; pass --catalog or set SPEND_MODEL_CATALOG")
+
+
+def load_model_catalog(path: Optional[str] = None) -> Tuple[str, List[Dict[str, Any]]]:
+    source = find_model_catalog(path)
+    try:
+        with open(source, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise SpendError("cannot read model catalog %s: %s" % (source, exc))
+    models = data.get("models") if isinstance(data, dict) else data
+    if not isinstance(models, list):
+        raise SpendError("model catalog %s has no models list" % source)
+    available = [m for m in models if isinstance(m, dict)
+                 and isinstance(m.get("slug"), str)
+                 and m.get("visibility", "list") != "hide"]
+    return source, available
+
+
+def resolve_archetype(
+        name: str, archetypes: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    wanted = name.strip().lower().replace("_", "-")
+    for canonical, policy in archetypes.items():
+        aliases = policy.get("aliases", []) if isinstance(policy, dict) else []
+        if wanted == canonical or wanted in aliases:
+            return canonical, policy
+    raise SpendError("unknown archetype %r; try: %s"
+                     % (name, ", ".join(sorted(archetypes))))
+
+
+def _catalog_match(option_id: str, slug: str) -> bool:
+    option = _model_tokens(option_id)
+    candidate = _model_tokens(slug)
+    return bool(option and candidate[-len(option):] == option)
+
+
+def _supported_efforts(model: Dict[str, Any]) -> List[str]:
+    rows = model.get("supported_reasoning_levels", [])
+    return [row.get("effort") for row in rows
+            if isinstance(row, dict) and isinstance(row.get("effort"), str)]
+
+
+def choose_effort(preferred: str, supported: List[str],
+                  model_default: Optional[str] = None) -> Optional[str]:
+    if not supported:
+        return None
+    ranked = [value for value in EFFORT_ORDER if value in supported]
+    if preferred == "lowest":
+        return ranked[0] if ranked else supported[0]
+    if preferred in ("default", "one-below-default"):
+        target = model_default if model_default in supported else None
+        if target is None:
+            return None
+        if preferred == "default":
+            return target
+        if target not in EFFORT_ORDER or not ranked:
+            return None
+        below = [value for value in ranked
+                 if EFFORT_ORDER.index(value) < EFFORT_ORDER.index(target)]
+        return below[-1] if below else target
+    target = preferred
+    if target in supported:
+        return target
+    if not ranked:
+        return supported[0]
+    try:
+        target_index = EFFORT_ORDER.index(target)
+    except ValueError:
+        target_index = EFFORT_ORDER.index("medium")
+    return min(ranked, key=lambda value: (
+        abs(EFFORT_ORDER.index(value) - target_index),
+        EFFORT_ORDER.index(value)))
+
+
+def select_models(options: Dict[str, Any], catalog: List[Dict[str, Any]],
+                  rung: str, effort: str,
+                  exclude_family: Optional[str] = None) -> List[Dict[str, Any]]:
+    selected = []
+    excluded = (exclude_family or "").strip().lower()
+    for option in options["models"]:
+        if rung not in option.get("rungs", []):
+            continue
+        if excluded and option.get("family", "").lower() == excluded:
+            continue
+        for model in catalog:
+            if not _catalog_match(option.get("id", ""), model["slug"]):
+                continue
+            supported = _supported_efforts(model)
+            selected.append({
+                "model": model["slug"],
+                "family": option.get("family"),
+                "rung": rung,
+                "effort": choose_effort(
+                    effort, supported, model.get("default_reasoning_level")),
+                "use": option.get("use"),
+            })
+            break
+    return selected
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    options = load_model_options(args.options)
+    archetype = None
+    policy = None
+    if args.archetype:
+        archetype, policy = resolve_archetype(
+            args.archetype, options["archetypes"])
+        rung = policy["rung"]
+        effort = policy["effort"]
+        if policy.get("requires_exclude_family") and not args.exclude_family:
+            raise SpendError(
+                "%s requires --exclude-family for an independent opinion"
+                % archetype)
+    else:
+        rung = args.rung
+        effort = args.effort or "medium"
+
+    source, catalog = load_model_catalog(args.catalog)
+    selected = select_models(
+        options, catalog, rung, effort, args.exclude_family)
+    if not selected:
+        raise SpendError(
+            "no %s models from the option map are present in %s"
+            % (rung, source))
+
+    result = {
+        "rung": rung,
+        "effort": effort,
+        "archetype": archetype,
+        "escalate": policy.get("escalate") if policy else None,
+        "models": selected,
+    }
+    if args.format == "json":
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if archetype:
+        print("%s: %s / %s effort" % (archetype, rung, effort))
+        print("escalate: %s" % policy["escalate"])
+    else:
+        print("%s / %s effort" % (rung, effort))
+    for row in selected:
+        suffix = (" / %s effort" % row["effort"]
+                  if row["effort"] else "")
+        print("%s%s — %s" % (row["model"], suffix, row["use"]))
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1250,6 +1529,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     rung = sub.add_parser("rung", help="PreToolUse: subagent spawned with no model")
     rung.set_defaults(func=cmd_rung)
+
+    models = sub.add_parser(
+        "models", help="live model options for a rung or task archetype")
+    choice = models.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--rung", choices=MODEL_RUNGS)
+    choice.add_argument("--archetype")
+    models.add_argument(
+        "--effort", choices=RELATIVE_EFFORTS + EFFORT_ORDER,
+        help="preferred effort for --rung (default: default)")
+    models.add_argument(
+        "--exclude-family",
+        help="omit an underlying family when an independent opinion is needed")
+    models.add_argument("--catalog", help="live model catalog JSON")
+    models.add_argument("--options", help="rung and archetype option map JSON")
+    models.add_argument("--format", choices=("text", "json"), default="text")
+    models.set_defaults(func=cmd_models)
 
     comp = sub.add_parser("compaction", help="floor, window and loop safety")
     comp.add_argument("action", choices=("measure", "check", "window"))

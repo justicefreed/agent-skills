@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "updated": "2026-09-13",
+  "archetypes": {
+    "implementer": {"aliases": ["implementation"], "rung": "economy", "effort": "medium", "escalate": "advanced when the change spans subsystems or an economy pass gets the scope wrong"},
+    "analyst": {"aliases": ["analysis"], "rung": "economy", "effort": "medium", "escalate": "advanced when the argument has many dependent hops or a premise is disputed"},
+    "premise-auditor": {"aliases": ["premise-audit", "auditor"], "rung": "economy", "effort": "medium", "escalate": "do not escalate; choose an independent model family"},
+    "verifier": {"aliases": ["verification"], "rung": "economy", "effort": "low", "escalate": "advanced when the guard cannot be made to fail and the reason is unclear"},
+    "verifier-low-risk": {"aliases": ["low-risk-verifier"], "rung": "minimal", "effort": "lowest", "escalate": "economy on any doubt"},
+    "doc-writer": {"aliases": ["doc", "writer"], "rung": "minimal", "effort": "lowest", "escalate": "rarely; improve the outline first"},
+    "inventory": {"aliases": ["cleanup", "inventory-cleanup"], "rung": "minimal", "effort": "lowest", "escalate": "reclassify the task if it requires judgment"}
+  },
+  "models": [
+    {"id": "composer-2.5", "family": "composer", "rungs": ["minimal", "economy"], "use": "fast, bounded agent work"},
+    {"id": "gpt-5.6-luna", "family": "gpt-5.6", "rungs": ["minimal", "economy"], "use": "bounded coding, prototyping, and high-volume workers"},
+    {"id": "gemini-3.8-flash", "family": "gemini", "rungs": ["economy"], "use": "fast everyday analysis and implementation"},
+    {"id": "kimi-k2.7-code", "family": "kimi", "rungs": ["economy"], "use": "bounded coding tasks"},
+    {"id": "claude-4.6-sonnet", "family": "claude-sonnet", "rungs": ["economy", "advanced"], "use": "everyday through interconnected coding work"},
+    {"id": "claude-sonnet-5", "family": "claude-sonnet", "rungs": ["economy", "advanced"], "use": "everyday through interconnected coding work"},
+    {"id": "gpt-5.6-terra", "family": "gpt-5.6", "rungs": ["advanced"], "use": "complex, sustained, or interconnected agent work"},
+    {"id": "gemini-3.1-pro", "family": "gemini", "rungs": ["advanced"], "use": "complex analysis and implementation"},
+    {"id": "grok-4.6", "family": "grok", "rungs": ["advanced"], "use": "complex analysis and implementation"},
+    {"id": "kimi-k3", "family": "kimi", "rungs": ["advanced"], "use": "complex or sustained agent work"},
+    {"id": "gpt-5.6-sol", "family": "gpt-5.6", "rungs": ["frontier"], "use": "the hardest coding or reasoning after a demonstrated capability limit"},
+    {"id": "claude-opus-4.8", "family": "claude-opus", "rungs": ["frontier"], "use": "the hardest coding or reasoning after a demonstrated capability limit"},
+    {"id": "claude-opus-5", "family": "claude-opus", "rungs": ["frontier"], "use": "the hardest coding or reasoning after a demonstrated capability limit"},
+    {"id": "claude-fable-5-1", "family": "claude-fable", "rungs": ["frontier"], "use": "the hardest coding or reasoning after a demonstrated capability limit"}
+  ]
+}

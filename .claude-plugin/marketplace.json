@@ -36,7 +36,7 @@
     {
       "name": "context-economy",
       "source": "./plugins/context-economy",
-      "description": "Session cost, context hygiene and compaction safety for any session \u2014 measure spend, guard large inputs and reads, prompt for a subagent model rung, keep the auto-compact window clear of the floor.",
+      "description": "Session cost, context hygiene and compaction safety for any session \u2014 measure spend, guard large inputs and reads, resolve live subagent models by rung or archetype, keep the auto-compact window clear of the floor.",
       "category": "development",
       "keywords": [
         "cost",
