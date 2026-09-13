@@ -174,6 +174,36 @@ close — and it must survive the predecessor going away mid-handoff, which is p
 exists for. It is deleted on `rotate complete`, and a record still pending after ten minutes raises
 an advisory on the turn-end hook. That is the dangling-session detector.
 
+## Checkpoint and recovery
+
+Workers can persist a durable handoff outside the repository:
+
+```bash
+orch checkpoint --agent-id AGENT \
+  --completed-step "step 2" --next-step "step 3" \
+  --changed-file path/to/file --test-state "green: pytest -q" \
+  [--pending-decision "..." ] [--uncertain-operation "..."]
+```
+
+`--changed-file`, `--pending-decision`, and `--uncertain-operation` may be repeated or
+comma-separated. The first three fields are required and reject placeholders. Checkpoints live
+under `<program>/checkpoints/AGENT.json`; writes are atomic. `--generation N` explicitly names a
+failure generation and otherwise preserves the checkpoint's existing generation (starting at 1).
+
+After a worker fails, run:
+
+```bash
+orch recover AGENT [--successor-id ID] [--handle TARGET]
+```
+
+This creates a generation-tagged `rotation.json` obligation, or adopts the matching pending
+obligation. It refuses a second successor for the same generation and keeps a `recovery.json`
+ledger after completion. The successor uses the existing `orch rotate claim` and
+`orch rotate complete --alive ...` steps. Recovery only transfers durable facts: uncertain
+external operations are never replayed automatically, and a known successor id is an assertion,
+not a substrate close operation. If the predecessor's inbox claim is not transferable, recover
+without `--handle` and resolve that substrate-specific situation before claiming.
+
 `escalations.json` is the fourth, and the only one that must outlive the work it describes. Every
 other record here is deleted when its subject closes; this one is kept precisely *because* the
 tracker is a working set. It answers a question no single dispatch can — **which archetypes actually

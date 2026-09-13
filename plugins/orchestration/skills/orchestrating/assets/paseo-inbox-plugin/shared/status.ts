@@ -113,6 +113,15 @@ export const statusResultSchema = z.object({
 });
 export type StatusResult = z.output<typeof statusResultSchema>;
 
+/** Compact, model-independent data for the recovery-guard timeline row. */
+export const recoveryTimelineSchema = z.object({
+  generation: z.string(),
+  kind: z.enum(["cursor_root_envelope_limit", "cursor_blob_capacity"]),
+  action: z.string(),
+  limitation: z.string(),
+});
+export type RecoveryTimeline = z.output<typeof recoveryTimelineSchema>;
+
 export const statusRead = defineRpc({
   name: "orch.status",
   input: z.object({

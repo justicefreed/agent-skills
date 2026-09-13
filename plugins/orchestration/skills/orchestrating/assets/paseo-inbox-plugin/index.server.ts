@@ -11,6 +11,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 
 import { orchRun } from "./server/orch";
+import { publishRecovery } from "./server/recovery";
 import { handleStatusRead } from "./server/status";
 import { statusRead } from "./shared/status";
 
@@ -134,7 +135,14 @@ async function drain(repo: string, target: string, signal: AbortSignal): Promise
 // them as `any` so this file also typechecks standalone, and narrow to the few
 // fields actually used at the point of use.
 type HookContext = {
-  paseo: { agents: { ref(id: string): { send(text: string): Promise<unknown> } } };
+  paseo: {
+    agents: {
+      ref(id: string): {
+        send(text: string): Promise<unknown>;
+        timeline: { append(input: unknown): Promise<unknown> };
+      };
+    };
+  };
   signal: AbortSignal;
 };
 
@@ -211,6 +219,21 @@ export default function contribute(server: PluginServerContext) {
       const repo = agent.cwd;
       if (!repo) return;
       const target = targets.get(agent.id) ?? agent.id;
+
+      if (event.outcome?.kind === "failed") {
+        try {
+          await publishRecovery(
+            repo,
+            target,
+            agent.id,
+            String(event.turnId ?? "unknown"),
+            event.outcome.error ?? {},
+            context.paseo,
+          );
+        } catch (error) {
+          console.error(`[orch-inbox] recovery guard failed for agent ${agent.id}: ${String(error)}`);
+        }
+      }
 
       // Drain then send, never the reverse: an item drained without delivery is
       // gone, so the send must be the very next thing we do.

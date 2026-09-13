@@ -56,6 +56,25 @@ in flight is lost. Never hand-run `orch inbox claim` to take over — that is th
 is the whole point of the step: it is the only moment in the procedure where a human-visible error
 appears if the close silently failed.
 
+## Replay-envelope recovery
+
+A `cursor_root_envelope_limit` is a durable replay-root size failure, not a token-window
+diagnosis. At the observed 524,288 serialized-byte boundary, stop growing that root. Write the
+progress artifact, including the last completed milestone and the next safe action, then rotate
+or compact at a seam. A fresh root may continue from the artifact; do not replay the failed
+prompt merely because the transport did not report completion.
+
+A `cursor_blob_capacity` is a transient, shared capacity failure. Keep the existing root and
+progress artifact, use the substrate's ordinary backoff, and retry only a read-only operation
+after capacity recovery. It is not a reason to recursively rotate or spawn a replacement. If
+the failed operation could have caused an external mutation, pause replay and reconcile the
+provider state first. Record `applied`, `not applied`, or `unknown`; only the first two permit a
+deterministic next action.
+
+For either class, recovery is complete when the durable artifact can reconstruct the last known
+state and the next action is safe. If the error is ambiguous, preserve the artifact and escalate
+instead of guessing. Never automatically replay a mutation with an uncertain outcome.
+
 ## When it is not clean
 
 | Situation | What to do |
