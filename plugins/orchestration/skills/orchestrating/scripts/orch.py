@@ -3313,6 +3313,100 @@ def cmd_compaction(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# checkpoints: durable handoff state for a failed worker
+# --------------------------------------------------------------------------- #
+
+CHECKPOINT_VERSION = 1
+
+
+def _agent_name(agent: str) -> str:
+    agent = (agent or "").strip()
+    if is_placeholder(agent) or not agent or "/" in agent or "\\" in agent:
+        raise OrchError("--agent-id must be a non-placeholder id without path separators")
+    return agent
+
+
+def checkpoint_path(repo_key: str, program: str, agent: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "checkpoints",
+                        _agent_name(agent) + ".json")
+
+
+def load_checkpoint(repo_key: str, program: str, agent: str) -> Dict[str, Any]:
+    path = checkpoint_path(repo_key, program, agent)
+    data = _load_json(path)
+    if not data:
+        raise OrchError(
+            "no checkpoint for agent %r. Run `orch checkpoint --agent-id %s` "
+            "before recovery." % (agent, agent))
+    if data.get("version") != CHECKPOINT_VERSION:
+        raise OrchError("checkpoint for %r has unsupported schema version %r"
+                        % (agent, data.get("version")))
+    return data
+
+
+def recovery_history_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "recovery.json")
+
+
+def load_recovery_history(repo_key: str, program: str) -> Dict[str, Any]:
+    data = _load_json(recovery_history_path(repo_key, program))
+    if not isinstance(data.get("generations"), list):
+        data["generations"] = []
+    return data
+
+
+def _checkpoint_values(values: Optional[List[str]]) -> List[str]:
+    result: List[str] = []
+    for value in values or []:
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                if is_placeholder(item):
+                    raise OrchError("checkpoint list values cannot be placeholders")
+                result.append(item)
+    return result
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    agent = _agent_name(args.agent_id or args.agent)
+    completed = (args.completed_step or "").strip()
+    following = (args.next_step or "").strip()
+    tests = (args.test_state or "").strip()
+    prior = _load_json(checkpoint_path(repo_key, program, agent))
+    generation = args.generation if args.generation is not None else (
+        prior.get("generation", 0) or 0)
+    if generation < 1:
+        generation = 1
+    for name, value in (("completed step", completed),
+                        ("next step", following), ("test state", tests)):
+        if is_placeholder(value):
+            raise OrchError("--%s is required and cannot be a placeholder"
+                            % name.replace(" ", "-"))
+    data = {
+        "version": CHECKPOINT_VERSION,
+        "agent_id": agent,
+        "program": program,
+        "repo_key": repo_key,
+        "saved_at": _now(),
+        "generation": generation,
+        "completed_step": completed,
+        "next_step": following,
+        "changed_files": _checkpoint_values(args.changed_file),
+        "test_state": tests,
+        "pending_decisions": _checkpoint_values(args.pending_decision),
+        "uncertain_operations": _checkpoint_values(args.uncertain_operation),
+    }
+    _save_json(checkpoint_path(repo_key, program, agent), data)
+    print("checkpoint saved for %s (next: %s)" % (agent, following))
+    if data["uncertain_operations"]:
+        print("WARNING: uncertain operations are recorded for review only; "
+              "none will be replayed.", file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # rotate: replace an agent without leaving a dangling one behind
 # --------------------------------------------------------------------------- #
 #
@@ -3488,6 +3582,100 @@ def cmd_rotate_begin(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Create or adopt the one replacement obligation for a failed agent."""
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    agent = _agent_name(args.agent)
+    checkpoint = load_checkpoint(repo_key, program, agent)
+    generation = checkpoint.get("generation")
+    if not isinstance(generation, int) or generation < 1:
+        raise OrchError("checkpoint for %r has no valid recovery generation" % agent)
+    existing = load_rotation(repo_key, program)
+    active = existing.get("state") in ("pending", "claimed")
+    if active:
+        old = existing.get("from") or {}
+        if (existing.get("recovery") and old.get("agent_id") == agent
+                and existing.get("generation") == generation):
+            known = existing.get("successor_agent_id")
+            requested = (args.successor_id or "").strip()
+            if requested and known and requested != known:
+                raise OrchError(
+                    "recovery generation %d already has successor %r; refusing "
+                    "duplicate successor %r" % (generation, known, requested))
+            if requested and not known:
+                existing["successor_agent_id"] = _agent_name(requested)
+                _save_json(rotation_path(repo_key, program), existing)
+            print("adopted recovery generation %d for failed agent %s"
+                  % (generation, agent))
+            print(_successor_checklist(existing))
+            return 0
+        raise OrchError(
+            "a rotation/recovery is already active for %r (generation %r). "
+            "Complete or abort it before recovering another failure."
+            % ((existing.get("from") or {}).get("agent_id"),
+               existing.get("generation")))
+
+    history = load_recovery_history(repo_key, program)
+    prior = next((item for item in history["generations"]
+                  if item.get("agent_id") == agent
+                  and item.get("generation") == generation), None)
+    if prior:
+        if prior.get("state") == "complete":
+            print("recovery generation %d for %s is already complete"
+                  % (generation, agent))
+            return 0
+        raise OrchError(
+            "recovery generation %d for %s already has an obligation (%s); "
+            "use `orch rotate status` or `orch rotate abort`, not a second "
+            "successor" % (generation, agent, prior.get("state", "active")))
+
+    worktree = _worktree_key(args.repo)
+    claims = _load_claims(repo_key)
+    claim = claims.get(worktree) or {}
+    target = args.handle or claim.get("target")
+    handoff = checkpoint_path(repo_key, program, agent)
+    rotation = {
+        "state": "pending",
+        "recovery": True,
+        "generation": generation,
+        "began_at": _now(),
+        "handoff": handoff,
+        "reason": "post-failure recovery",
+        "checkpoint": checkpoint_path(repo_key, program, agent),
+        "successor_agent_id": (_agent_name(args.successor_id)
+                               if args.successor_id else None),
+        "from": {
+            "handle": target or "root",
+            "agent_id": agent,
+            "worktree": worktree,
+            "inbox_target": target,
+        },
+    }
+    _save_json(rotation_path(repo_key, program), rotation)
+    history["generations"].append({
+        "agent_id": agent,
+        "generation": generation,
+        "state": "active",
+        "successor_agent_id": rotation["successor_agent_id"],
+        "at": _now(),
+    })
+    _save_json(recovery_history_path(repo_key, program), history)
+    print("recovery generation %d recorded for failed agent %s"
+          % (generation, agent))
+    print("The checkpoint says: completed %s; next %s; tests %s."
+          % (checkpoint["completed_step"], checkpoint["next_step"],
+             checkpoint["test_state"]))
+    if checkpoint.get("uncertain_operations"):
+        print("DO NOT replay uncertain operations: %s"
+              % "; ".join(checkpoint["uncertain_operations"]))
+    if checkpoint.get("pending_decisions"):
+        print("Pending decisions: %s"
+              % "; ".join(checkpoint["pending_decisions"]))
+    print(_successor_checklist(rotation))
+    return 0
+
+
 def cmd_rotate_claim(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -3577,6 +3765,15 @@ def cmd_rotate_complete(args: argparse.Namespace) -> int:
             "holds %s. CLOSE it, re-derive the live set, and run this again."
             % (agent[:8], old.get("inbox_target"), old.get("worktree"))
         )
+    if rotation.get("recovery"):
+        history = load_recovery_history(repo_key, program)
+        for item in history["generations"]:
+            if (item.get("agent_id") == agent
+                    and item.get("generation") == rotation.get("generation")):
+                item["state"] = "complete"
+                item["completed_at"] = _now()
+                item["successor_agent_id"] = rotation.get("successor_agent_id")
+        _save_json(recovery_history_path(repo_key, program), history)
     os.unlink(rotation_path(repo_key, program))
     print("rotation complete: %r replaced, predecessor %s confirmed gone"
           % (old.get("handle"), (agent or "-")[:8]))
@@ -4187,6 +4384,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--clear", action="store_true")
     sp.add_argument("--program")
     sp.set_defaults(func=cmd_frontdesk)
+
+    sp = sub.add_parser("checkpoint",
+                        help="persist a worker's durable progress")
+    sp.add_argument("agent", nargs="?", help="agent id (or use --agent-id)")
+    sp.add_argument("--agent-id", help="failed or running agent id")
+    sp.add_argument("--completed-step", required=True)
+    sp.add_argument("--next-step", required=True)
+    sp.add_argument("--changed-file", "--changed-files", dest="changed_file",
+                    action="append",
+                    help="changed path (repeat or comma-separated)")
+    sp.add_argument("--test-state", required=True)
+    sp.add_argument("--pending-decision", "--pending-decisions",
+                    dest="pending_decision", action="append")
+    sp.add_argument("--uncertain-operation", "--uncertain-operations",
+                    dest="uncertain_operation", action="append")
+    sp.add_argument("--generation", type=int)
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_checkpoint)
+
+    sp = sub.add_parser("recover",
+                        help="create or adopt one post-failure replacement")
+    sp.add_argument("agent", help="failed agent id")
+    sp.add_argument("--successor-id",
+                    help="known successor id; a different id is refused")
+    sp.add_argument("--handle", help="transferable inbox target")
+    sp.add_argument("--program")
+    sp.set_defaults(func=cmd_recover)
 
     sp = sub.add_parser("guard",
                         help="PreToolUse hook: note when a tool input is large")
