@@ -6,6 +6,8 @@ Two things, both optional, sharing one `orch` resolution:
    requester never has to send a prompt into a running agent's turn.
 2. **The program status pill** — a composer pill whose one line is exactly what `orch statusline`
    prints into a terminal status bar, and an agent panel with the roster behind it.
+3. **Replay recovery guard** — classifies Cursor's two known capacity failures, records a compact
+   generation-aware notice through `orch`, and appends an actionable timeline row.
 
 The second is the Paseo half of the status surface; the Claude Code half is the `statusLine` command
 in `references/statusline.md`. Both render the same JSON from the same collector.
@@ -44,6 +46,24 @@ What the delivery half does:
   nothing, so peeking first would only add a second process spawn on every turn of every agent.
 
 It never polls, never sends mid-turn, and never drains an inbox it is not about to deliver.
+
+## Replay recovery guard
+
+On a failed `agent.turn_ended`, the guard recognizes the structured
+`cursor_root_envelope_limit` and `cursor_blob_capacity` codes, plus only the documented fallback
+phrases for those errors. It writes a compact, idempotency-keyed record to the agent's durable
+`orch` inbox and appends a `recovery-guard` timeline row. The record contains the generation,
+classification, safe next action, and limitation; it never contains or resends the failed prompt.
+
+The safe actions are intentionally different:
+
+- `cursor_root_envelope_limit`: rotate from durable artifacts.
+- `cursor_blob_capacity`: wait for expiry/eviction or use an operator-managed restart.
+
+The plugin does not automatically create a successor. Paseo exposes agent creation, but it does
+not provide a transactionally idempotent same-workspace replacement primitive; creating one from a
+live failure hook could duplicate a lane. A human or orchestrator may run the existing rotation
+protocol after reviewing the timeline record.
 
 ## The program status pill
 
