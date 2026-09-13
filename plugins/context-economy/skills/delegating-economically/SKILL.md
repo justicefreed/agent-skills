@@ -48,26 +48,38 @@ expensive part was self-inflicted, not imposed by delegation.
 
 ## 2. Which rung?
 
-Name a **rung**, never a model. Rung names stay correct; model names rot the next
-time the provider ships — and the referent drifts underneath a stable name. That
-is not hypothetical: `default` moved from a Sonnet-class model to an Opus-class
-one with no rename, and 6,509 subagent calls cost **$616 where the same tokens
-one rung down cost $246** — 39% of a four-day bill, from a default nobody chose.
+Choose a **rung**, then resolve it to a live model at spawn time. Rung names
+describe stable capability and cost positions; model names rot when the provider
+ships.
 
 | Rung | Meaning |
 |---|---|
 | **frontier** | the provider's most capable. **Escalation only** — never a starting point |
-| **default** | whatever the provider picks when you choose nothing. **A moving target** |
+| **advanced** | above the everyday tier for complex, interconnected, or long-running work; below frontier |
 | **economy** | cheaper and faster; "good for everyday tasks". **The anchor** |
 | **minimal** | the cheapest that can do the job at all |
 
-**Start at `economy` and escalate on evidence.** Of 31 measured subagent tasks
-run one rung above this anchor, 28 finished correctly on the first attempt — so
-the rung above was buying very little. Escalate when a first pass comes back
-with the scope wrong, an argument is many hops deep, or a premise is disputed.
+The **provider default is not a rung**. It is an implicit selection made when no
+model is supplied, and it may drift to any rung. At session start, identify the
+actual selected model and map it to a rung before relying on its cost or
+capability. At subagent spawn, set the intended rung or its current model
+explicitly. Do not treat an omitted model as `advanced`. In one observed drift,
+the provider default moved from a Sonnet-class model to an Opus-class one with
+no rename; 6,509 subagent calls cost **$616 where the same tokens one rung down
+cost $246** — 39% of a four-day bill, from a choice nobody made.
+
+**Start at `economy` and escalate on evidence.** Evidence can be known before
+dispatch: use `advanced` when the task spans subsystems, has a long chain of
+dependent steps, or would be expensive to restart after a weak pass. It can
+also arrive from a failed economy pass. Of 31 measured subagent tasks run one
+rung above the anchor, 28 finished correctly on the first attempt — so do not
+choose `advanced` merely because it sounds safer. Reserve `frontier` for an
+observed capability limit or an explicit human request.
 
 Full archetype table — which kind of work sits on which rung, and what triggers
-an escalation — in `references/rungs.md`.
+an escalation — in `references/rungs.md`. Before dispatch, run
+`spend models --archetype <name>` or `spend models --rung <rung>` to intersect
+that policy with the harness's live catalog and get exact spawnable model slugs.
 
 **Check the cache-read column before assuming a cheaper-sounding model is
 cheaper.** Cache reads are the majority of a real bill and their ordering is not
