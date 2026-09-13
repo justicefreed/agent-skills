@@ -38,7 +38,8 @@ SKILL_DIR=<directory holding this SKILL.md>
   loads the real page in an iframe, or serve a copy without the stream.
 - `requestAnimationFrame` may never fire headless on macOS. Await `setTimeout(r, 0)` instead.
 - `--engine cft` switches to Chrome for Testing when new-headless features are needed. It may not
-  exit after `--dump-dom`; run it in the background, `sleep`, then kill its pid.
+  exit after `--dump-dom`; the wrapper caps the run with `HEADLESS_BROWSER_TIMEOUT_SECS` (default
+  30).
 - To stop a run, kill its pid or match its own `--user-data-dir`. Never `pkill -f` a generic
   Chrome pattern; sibling agents run their own.
 

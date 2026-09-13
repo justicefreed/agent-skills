@@ -44,7 +44,7 @@ plutil -convert json -o - ~/Library/Preferences/com.apple.LaunchServices/com.app
 | Option | Why it is immune | Notes |
 | --- | --- | --- |
 | `chrome-headless-shell` (`npx @puppeteer/browsers install chrome-headless-shell@stable`) | No `chrome/browser` layer at all: no policy loader, no default-browser code | Exits on its own after `--dump-dom`/`--screenshot`. Default engine of `scripts/headless-browser.sh`. |
-| Chrome for Testing (`npx @puppeteer/browsers install chrome@stable`) | Bundle id `com.google.chrome.for.testing`; no managed plist under that name | New headless. May hang after `--dump-dom` on macOS. |
+| Chrome for Testing (`npx @puppeteer/browsers install chrome@stable`) | Bundle id `com.google.chrome.for.testing`; no managed plist under that name | New headless. May hang after `--dump-dom` on macOS; `scripts/headless-browser.sh` caps each run. |
 | Playwright's bundled Chromium | Bundle id is not `com.google.Chrome` | Not used by these skills, but equally safe. |
 | Paseo browser tools | Electron webviews inside Paseo.app; Electron has no Chrome policy layer | See [paseo-browser.md](paseo-browser.md). |
 
