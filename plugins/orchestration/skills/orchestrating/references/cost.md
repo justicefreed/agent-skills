@@ -90,6 +90,14 @@ expensive was almost entirely self-inflicted, not imposed by the workers.
    report you must eventually read, and intake is what grows the context. Width past what you can
    land is not parallelism, it is deferred intake.
 
+   This one is the only advisory with a hard stop behind it, because it is the only one whose cost
+   lands somewhere none of these numbers look. Context and budget are charges against the program,
+   and an advisory is the right instrument for those: the orchestrator reads it and decides. A live
+   lane is also a harness process, its MCP servers, a checkout for the filesystem watcher to walk,
+   and a share of the per-tool-call hook traffic — and past some width those stop being a cost and
+   become an outage on the machine, at which point every lane is lost, not just the marginal one.
+   So `orch open` refuses past `ORCH_FANOUT_MAX`; `--over-fanout` is the one-dispatch override.
+
 Worth knowing about the other side: a **worker** carries a small context and dies at the end of its
 task, so its cache-read tax never accumulates. Cheap workers and an expensive orchestrator are the
 same fact seen twice — which is why moving work out is a bigger saving than making the work cheaper.
@@ -114,6 +122,15 @@ The skill's turn-end hook runs `orch cost --format hook` and speaks **only** whe
 | Fan-out too wide to consume | 8 open dispatches | `ORCH_FANOUT_WARN` |
 | Budget | 75% and 100% of the limit | `orch budget --set` |
 | Offer the human a front desk | 6 repeated routing turns, 20 turns, 6 dispatches | `ORCH_FRONTDESK_RELAY` |
+
+Fan-out is the only one of these with a hard stop behind it. `orch open` **refuses** a dispatch once
+the program holds `ORCH_FANOUT_MAX` lanes that have not been harvested — four past the warn
+threshold by default, so lowering `ORCH_FANOUT_WARN` lowers the ceiling with it. An advisory is the
+wrong instrument here because it is read by the one party it does not bind: a lane is dispatched by
+an orchestrator that has already decided to dispatch it, and the cost lands on the machine rather
+than on any number this program prints — each live lane is a harness process, its MCP servers, a
+worktree, and a share of the per-tool-call hook traffic. Land and `orch close` what is finished, or
+pass `--over-fanout` for the dispatch that genuinely cannot wait.
 
 The front desk advisory fires at most **once per program** rather than following the rule below —
 it asks the human to authorise another agent, and a declined offer must not come back. Conditions

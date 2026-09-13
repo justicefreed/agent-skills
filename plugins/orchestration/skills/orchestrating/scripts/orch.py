@@ -147,14 +147,29 @@ class OrchError(Exception):
 # identity: repo key, state root, program discovery
 # --------------------------------------------------------------------------- #
 
+# Matches the `track` call in `_track_counts`: five seconds is far past any
+# healthy `rev-parse`, and well short of a human noticing a missing status line.
+GIT_TIMEOUT_S = int(os.environ.get("ORCH_GIT_TIMEOUT", 5))
+
+
 def _git(args: List[str], cwd: str) -> str:
+    # Bounded, like every other subprocess here, and for a sharper reason: this
+    # is the hottest one. `repo_identity` calls it on every `orch statusline`,
+    # which the harness runs after every assistant message. An unbounded wait
+    # for a git that is blocked on `index.lock` -- ordinary where a dozen linked
+    # worktrees share one common git dir -- wedges the render, and the next
+    # message starts another, so slow renders overlap instead of queueing.
     try:
         out = subprocess.run(
             ["git"] + args, cwd=cwd, check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_TIMEOUT_S,
         )
     except FileNotFoundError:
         raise OrchError("git not found on PATH")
+    except subprocess.TimeoutExpired:
+        raise OrchError("git %s took over %ss in %s -- something is holding a "
+                        "lock in the common git dir"
+                        % (" ".join(args), GIT_TIMEOUT_S, cwd))
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode("utf-8", "replace").strip()
         raise OrchError("not a git repository (%s): %s" % (cwd, detail))
@@ -699,6 +714,24 @@ def cmd_permissions(args: argparse.Namespace) -> int:
     return 0
 
 
+def live_lane_count(repo_key: str, program: str) -> int:
+    """Entries still holding a lane open, across every tracker in the program.
+
+    Anything not yet harvested counts: a `pending` entry recorded before its
+    spawn is about to become a process, and one whose worker died but was never
+    closed is exactly the bookkeeping a ceiling should make someone fix.
+    """
+    try:
+        trackers = _read_all_trackers(repo_key, program, True, "root")
+    except OrchError:
+        # A program with no tracker yet has no lanes, and the first dispatch is
+        # never the one to refuse.
+        return 0
+    return sum(1 for _, data in trackers
+               for entry in data.get("entries", [])
+               if (entry.get("status") or "pending") != "harvested")
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     repo_key, root, common = repo_identity(args.repo)
     fields = parse_front_matter(args.brief)
@@ -753,6 +786,22 @@ def cmd_open(args: argparse.Namespace) -> int:
         plan_doc = fields.get("plan_doc")
         derived = os.path.basename(os.path.dirname(str(plan_doc))) if plan_doc else ""
         program = derived or "default"
+
+    # Counted across the whole program, not this tracker, because the resources
+    # a lane consumes are machine-wide and a child tracker's lanes are just as
+    # real as root's.
+    if not args.over_fanout:
+        live = live_lane_count(repo_key, program)
+        if live >= FANOUT_MAX:
+            raise OrchError(
+                "%d lanes already live in program %r, and the ceiling is %d.\n"
+                "Each live lane is a harness process, its MCP servers and a "
+                "worktree, so the cost of the widest fan-out is paid by the "
+                "machine rather than by this program's numbers.\nLand and "
+                "`orch close` what is finished, then dispatch. Raise the "
+                "ceiling with ORCH_FANOUT_MAX, or pass --over-fanout for this "
+                "one dispatch if it genuinely cannot wait."
+                % (live, program, FANOUT_MAX))
 
     tracker_id = args.tracker or fields.get("tracker_id") or "root"
     path = tracker_path(repo_key, program, tracker_id)
@@ -1650,6 +1699,17 @@ CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
 # Fan-out width past which a program is usually generating more intake than it
 # can consume. Advisory only -- there is no safe universal cap.
 FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
+# And the width past which `open` stops advising and refuses. An advisory is the
+# right instrument for "this is getting expensive" and the wrong one for "this
+# machine is about to fall over": the advisory is read by the one party it does
+# not bind, since a lane is dispatched by an orchestrator that has already
+# decided to dispatch it. The costs that matter here are not the orchestrator's
+# context -- each live lane is a harness process, its MCP servers, a worktree
+# for the filesystem watcher to walk, and a share of the per-tool-call hook
+# traffic, none of which appear in any number this program prints.
+# Derived from the warn threshold so that lowering one lowers both, and set
+# above it so the advisory still has room to be an advisory first.
+FANOUT_MAX = int(os.environ.get("ORCH_FANOUT_MAX", FANOUT_WARN + 4))
 # Conditions for PROPOSING a front desk. Calibrated against seven recorded
 # programs: the largest relay cluster was 8 in the one program where the human
 # had visibly become the router, and <=5 in every other, so 6 separates them
@@ -4051,6 +4111,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "matter `mode` overrides that)" % WORKER_MODE_DEFAULT)
     sp.add_argument("--ask-mode-ok", action="store_true",
                     help="allow a mode that stops to ask a human")
+    sp.add_argument("--over-fanout", action="store_true",
+                    help="dispatch past the %d-lane ceiling (ORCH_FANOUT_MAX)"
+                         % FANOUT_MAX)
     sp.add_argument("--model", help="model RUNG, not a name: one of %s "
                                     "(default: %s; brief front matter `model` "
                                     "overrides that)"
