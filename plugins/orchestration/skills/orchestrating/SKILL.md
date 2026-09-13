@@ -1,27 +1,40 @@
 ---
 name: orchestrating
 description: Orchestrate work across multiple agents with tracked dispatches, briefs and verification. Use when the user wants work fanned out or run in parallel, wants an agent given its own branch or worktree, is resuming a multi-agent program, needs input delivered to a busy agent, wants a front desk in front of an orchestrator, or when another skill needs the brief-contract rules.
+# Every command below resolves its own interpreter rather than naming `python3` and
+# letting PATH answer: a shim on PATH costs a blocked shell per fire, and these fire
+# per tool call and per turn in every concurrent session. `ORCH_PYTHON` overrides.
+# Measured, and reasoned through, in `context-economy`'s `spend.py` -- see HOOK_PY.
 hooks:
   Stop:
     - hooks:
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" inbox drain --format hook; done; exit 0'
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" cost --format hook; done; exit 0'
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" cost --format hook; done; exit 0'
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" wake check --format hook; done; exit 0'
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" wake check --format hook; done; exit 0'
   SessionStart:
     - matcher: "compact|resume"
       hooks:
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" resume --format hook; done; exit 0'
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" resume --format hook; done; exit 0'
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" compaction check --format hook; done; exit 0'
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" compaction check --format hook; done; exit 0'
   PreToolUse:
+    # Prefiltered in shell, like the `spend.py` guard: this fires on every Write,
+    # Edit and Bash and almost always has nothing to say, so the payload is sized
+    # by a shell builtin before an interpreter is started. The floor is the SMALLER
+    # of the two guard floors -- the heredoc one, by default -- because filtering at
+    # ORCH_GUARD_BYTES would silently drop heredoc detection. Reading stdin is
+    # guarded by `[ -t 0 ]` so an interactive run cannot block, matching
+    # `hook_payload`, and every compare fails open so a bad threshold costs a spawn
+    # rather than the warning. No Read case: it is absent from the matcher, and
+    # `_tool_input_size` scores it 0 regardless.
     - matcher: "Write|Edit|Bash"
       hooks:
         - type: command
-          command: 'for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec python3 "$d/scripts/orch.py" guard; done; exit 0'
+          command: '[ -t 0 ] && exit 0; p=$(cat); f=${ORCH_GUARD_HEREDOC_BYTES:-1200}; b=${ORCH_GUARD_BYTES:-6000}; { [ "$b" -lt "$f" ] && f=$b; } 2>/dev/null; { [ ${#p} -lt "$f" ] && exit 0; } 2>/dev/null; PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] || continue; printf %s "$p" | "$PY" "$d/scripts/orch.py" guard; exit $?; done; exit 0'
 ---
 
 # Orchestrating

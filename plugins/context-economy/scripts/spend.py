@@ -515,14 +515,19 @@ def cmd_budget(args: argparse.Namespace) -> int:
 # across 150 messages; subagent launch prompts, 31KB across 53 spawns.
 #
 # This never blocks. Sometimes the content is rightly yours.
-GUARD_BYTES = int(env("GUARD_BYTES", 6000))
+# The defaults are named separately from the resolved values because the guard's
+# shell prefilter has to know the same numbers before this file is ever parsed.
+# See `GUARD_PREFILTER`.
+GUARD_BYTES_DEFAULT = 6000
+GUARD_BYTES = int(env("GUARD_BYTES", GUARD_BYTES_DEFAULT))
 GUARD_COOLDOWN_S = int(env("GUARD_COOLDOWN", 600))
 # A document authored inline through a heredoc gets a much lower floor. Of 42
 # heredoc-authored briefs measured in one program the median was 4.4KB and 32 of
 # the 42 sat UNDER GUARD_BYTES -- so the threshold that is right for an
 # arbitrary large input let three quarters of the single biggest self-inflicted
 # context item through. The shape is the signal, not the size.
-GUARD_HEREDOC_BYTES = int(env("GUARD_HEREDOC_BYTES", 1200))
+GUARD_HEREDOC_BYTES_DEFAULT = 1200
+GUARD_HEREDOC_BYTES = int(env("GUARD_HEREDOC_BYTES", GUARD_HEREDOC_BYTES_DEFAULT))
 # A file this big read whole is a recurring charge, not a one-off read.
 GUARD_READ_BYTES = int(env("GUARD_READ_BYTES", 24_000))
 
@@ -1072,6 +1077,68 @@ DESIRED_HOOKS = (
     ("SessionStart", "compact|resume", "compaction check --format hook"),
 )
 
+# `python3` off PATH is an expensive thing to NAME in a hook, and the expense is
+# invisible in this file: the script is cheap, getting an interpreter is not.
+# Where a pyenv/asdf/conda shim sits first on PATH, resolving the name costs a
+# bash process that re-execs into another bash process. Measured on one machine:
+# `python3 -c pass` 477ms against 54ms for /usr/bin/python3, and the `guard` hook
+# end to end 1.25s at 6% CPU against 88ms at 73% CPU -- 14x, all of it BLOCKED
+# rather than computing. A blocked hook holds its shell, its shim's shell and an
+# interpreter open for that whole second, and these hooks fire per tool call, in
+# every concurrent session. That is how a hook nobody reads becomes a process
+# storm and a load spike in the directory service that every exec consults.
+#
+# Resolution stays at FIRE time, for the same reason the directory search does
+# (see HOOK_DIRS): a path chosen by `install` pins one machine's state into a
+# settings file that outlives it.
+#
+# /usr/bin/python3 is preferred because it is the one interpreter whose path is
+# a platform guarantee rather than a PATH accident. Everything here runs on the
+# system interpreter (3.9 on macOS); `SPEND_PYTHON` is the escape hatch for
+# anyone who needs a specific one, including the rare Mac with no Command Line
+# Tools, where /usr/bin/python3 is present but a stub.
+HOOK_PY = ('PY="${SPEND_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; '
+           '[ -x "$PY" ] || PY=python3;')
+
+# The guard fires on every Write/Edit/Bash/Read and, on the overwhelming
+# majority of them, has nothing to say. Even with the interpreter resolved that
+# is ~88ms of Python startup per tool call spent reaching silence, so the common
+# path is decided in the shell instead: the payload lands in a variable and
+# `${#p}` is a builtin, leaving one `cat`. This is the pattern
+# `browser-verification/hooks/no-google-chrome.sh` already uses.
+#
+# Four things this must not get wrong:
+#   * `[ -t 0 ]` first. `hook_payload` returns {} rather than read a terminal,
+#     precisely so an interactive run cannot block; a bare `cat` would throw
+#     that away and hang forever holding a shell -- the disease, not the cure.
+#   * the floor is the SMALLEST payload-size threshold the guard will apply, and
+#     by default that is the heredoc one, not GUARD_BYTES. Filtering at 6000
+#     would silently kill heredoc detection, the signal the guard exists for.
+#     Both are resolved here and the smaller wins, because whichever one is
+#     lower is the one a payload has to clear -- hardcoding the heredoc default
+#     would swallow real warnings for anyone who tuned GUARD_BYTES below it.
+#     GUARD_READ_BYTES is deliberately absent: a Read never reaches the compare.
+#   * a Read must always reach Python: `_unbounded_read_bytes` sizes the FILE,
+#     not the payload, so a 300-byte payload can still deserve a warning. The
+#     match is loose on purpose -- over-matching costs one spawn, under-matching
+#     loses the signal.
+#   * the override names are the ones `env()` honours (SPEND_ then ORCH_), not
+#     the bare constant name, or a tuned threshold is read here and ignored.
+# `${#p}` counts characters rather than bytes, which is what `_tool_input_size`
+# counts too, so the two agree on a multi-byte payload.
+# Every numeric compare is `2>/dev/null`-guarded and fails OPEN: a threshold set
+# to something non-numeric makes `[` return an error, the `&& exit 0` is skipped,
+# and the payload reaches Python. A misconfigured knob costs a spawn rather than
+# the warning.
+GUARD_PREFILTER = (
+    '[ -t 0 ] && exit 0; p=$(cat); '
+    'f=${SPEND_GUARD_HEREDOC_BYTES:-${ORCH_GUARD_HEREDOC_BYTES:-%d}}; '
+    'b=${SPEND_GUARD_BYTES:-${ORCH_GUARD_BYTES:-%d}}; '
+    '{ [ "$b" -lt "$f" ] && f=$b; } 2>/dev/null; '
+    'case "$p" in *Read*) ;; *) '
+    '{ [ ${#p} -lt "$f" ] && exit 0; } 2>/dev/null ;; esac;'
+    % (GUARD_HEREDOC_BYTES_DEFAULT, GUARD_BYTES_DEFAULT))
+
 
 def hook_command(action: str, marker: bool = False) -> str:
     """The exact shell one hook runs. `plugin.json` ships this verbatim.
@@ -1083,9 +1150,18 @@ def hook_command(action: str, marker: bool = False) -> str:
     `marker` appends the comment that makes `install` idempotent: it is how a
     re-run finds its own entries in a settings file full of other people's.
     """
-    return ('for d in %s ; do [ -f "$d/scripts/spend.py" ] && '
-            'exec python3 "$d/scripts/spend.py" %s; done; exit 0%s'
-            % (" ".join(HOOK_DIRS), action,
+    prefix = HOOK_PY
+    run = 'exec "$PY" "$d/scripts/spend.py" %s' % action
+    if action == "guard":
+        # The prefilter has already eaten stdin, so the payload is replayed on a
+        # pipe. `|| continue` rather than `&& <run>` because `&&` leaves a
+        # non-zero $? on a missing candidate, and `exit $?` would then abandon
+        # the remaining candidates instead of trying them.
+        prefix = "%s %s" % (GUARD_PREFILTER, HOOK_PY)
+        run = 'printf %s "$p" | "$PY" "$d/scripts/spend.py" guard; exit $?'
+    return ('%s for d in %s ; do [ -f "$d/scripts/spend.py" ] || continue; '
+            '%s; done; exit 0%s'
+            % (prefix, " ".join(HOOK_DIRS), run,
                "  # " + HOOK_MARKER if marker else ""))
 
 

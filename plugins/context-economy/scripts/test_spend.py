@@ -13,6 +13,7 @@ No test framework, matching the plugin: one file, standard library only.
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -140,6 +141,90 @@ check_same("install command carries no absolute path",
            os.path.realpath(spend.__file__) in _installed, False)
 check_same("install command is the manifest one, plus a marker",
            _installed, spend.hook_command("guard") + "  # " + spend.HOOK_MARKER)
+
+# Naming `python3` and letting PATH answer cost 14x on a machine with a pyenv
+# shim first -- 1.25s per tool call at 6% CPU, blocked rather than computing,
+# holding a shell open the whole time in every concurrent session. The script
+# was never the expense; the name was. Prose did not hold this the first time,
+# so it is pinned: every hook must run an interpreter it resolved itself.
+for _action in (action for _, _, action in spend.DESIRED_HOOKS):
+    _cmd = spend.hook_command(_action)
+    check_same("%r resolves its own interpreter" % _action.split()[0],
+               "PY=/usr/bin/python3" in _cmd and "SPEND_PYTHON" in _cmd, True)
+    check_same("%r runs $PY, never a bare python3" % _action.split()[0],
+               ' python3 "$d/scripts/spend.py"' in _cmd, False)
+
+# The prefilter decides in shell what the guard would spend ~88ms of Python
+# startup to decide. Several ways it can be silently wrong, all of which lose
+# the signal rather than break anything:
+_guard = spend.hook_command("guard")
+# It consumes stdin, which `hook_payload` deliberately refuses to do on a
+# terminal. Without this check ahead of the `cat`, an interactive run blocks
+# forever holding a shell -- the exact failure the whole change is about.
+check_same("guard checks for a terminal before reading stdin",
+           _guard.index("-t 0") < _guard.index("$(cat)"), True)
+# Filtering at GUARD_BYTES would drop every heredoc between the two floors, and
+# heredoc detection is the guard's most actionable signal. Filtering at only the
+# heredoc floor is the mirror bug: it swallows warnings for anyone who tuned
+# GUARD_BYTES below it. Both floors are resolved at fire time; the smaller wins.
+check_same("guard prefilter carries both payload floors, not one",
+           str(spend.GUARD_HEREDOC_BYTES_DEFAULT) in _guard
+           and str(spend.GUARD_BYTES_DEFAULT) in _guard, True)
+# The override names are the ones `env()` honours, SPEND_ then ORCH_. Naming the
+# bare constant here would read a threshold nobody set and ignore the tuned one.
+for _name in ("SPEND_GUARD_HEREDOC_BYTES", "ORCH_GUARD_HEREDOC_BYTES",
+              "SPEND_GUARD_BYTES", "ORCH_GUARD_BYTES"):
+    check_same("guard prefilter reads %s" % _name, _name in _guard, True)
+# `_unbounded_read_bytes` sizes the file, not the payload, so a Read can be
+# small on the wire and still worth warning about. It must never be filtered.
+check_same("guard prefilter always lets a Read through", "*Read*" in _guard, True)
+
+# Everything above is a substring assertion, and the failure mode of generating
+# shell out of Python is QUOTING, which no substring assertion can see. So the
+# generated command is actually run, against the payload shapes whose handling
+# differs. `sh` rather than the caller's shell: that is what a hook runs under.
+_FLOOR_VARS = ("SPEND_GUARD_BYTES", "ORCH_GUARD_BYTES",
+               "SPEND_GUARD_HEREDOC_BYTES", "ORCH_GUARD_HEREDOC_BYTES")
+
+
+def guard_out(command=None, payload=None, **overrides):
+    """stdout of the real guard hook for one payload. Fresh state dir each call,
+    so the per-kind cooldown never makes an earlier case suppress a later one."""
+    if payload is None:
+        payload = {"tool_name": "Bash", "tool_input": {"command": command},
+                   "cwd": HERE}
+    env = {k: v for k, v in os.environ.items() if k not in _FLOOR_VARS}
+    env.update(SPEND_SKILL_DIR=os.path.dirname(HERE),
+               SPEND_STATE_HOME=tempfile.mkdtemp(), **overrides)
+    return subprocess.run(
+        ["sh", "-c", spend.hook_command("guard")],
+        input=json.dumps(payload), text=True, env=env, timeout=60,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip()
+
+
+check_same("live: an ordinary small command says nothing",
+           guard_out("ls -la"), "")
+check_same("live: a big inline doc warns",
+           "inline doc" in guard_out("cat > /tmp/x.md <<EOF\n%s\nEOF" % ("x " * 900)),
+           True)
+# The regression the two-floor fix exists for: with GUARD_BYTES tuned under the
+# heredoc floor, a payload between the two must still reach Python. A prefilter
+# hardcoded at 1200 returns "" here and the tuned threshold is silently dead.
+check_same("live: a floor tuned below the heredoc one is honoured",
+           "input" in guard_out("echo " + "a" * 40, SPEND_GUARD_BYTES="20"), True)
+# A Read payload is tiny on the wire; the file it names is not.
+check_same("live: a whole-file Read of a big file warns", "read whole" in guard_out(
+    payload={"tool_name": "Read",
+             "tool_input": {"file_path": os.path.join(HERE, "spend.py")},
+             "cwd": HERE}), True)
+# The payload is attacker-adjacent data -- it is whatever the model just wrote.
+# `p=$(cat)` and `printf %s "$p"` must never re-expand it. If either loses its
+# quoting, this substitution runs and the marker appears.
+_marker = os.path.join(tempfile.mkdtemp(), "expanded")
+guard_out("echo '`touch %s`$(touch %s)' %s" % (_marker, _marker, "b" * 40),
+          SPEND_GUARD_BYTES="20")
+check_same("live: a payload is never re-expanded by the hook shell",
+           os.path.exists(_marker), False)
 
 for path in _tmp:
     try:

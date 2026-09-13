@@ -69,8 +69,12 @@ surfaces disagreeing about whether something is wrong is worse than one surface 
 
 ## Where the numbers come from
 
-Everything is a small JSON read, in microseconds, because the expensive reads were already paid for
-elsewhere:
+Every read the collector makes is a small JSON file, so the reads themselves are microseconds — the
+expensive reads were already paid for elsewhere. Note where that leaves the cost: what a render
+actually spends is dominated by starting a Python interpreter, not by anything the collector reads.
+That is why the snippets below name an interpreter rather than letting `PATH` answer — with a shim
+first on `PATH`, resolving the name costs far more than the whole collection it precedes, on a
+command the harness runs after every assistant message.
 
 - **Cost** comes from `<program>/cost/<target>.json`, written by `orch cost` — which the skill's
   turn-end hook already runs. The status line never opens a transcript itself; transcripts are
@@ -80,6 +84,15 @@ elsewhere:
 - **The agent-track count** is fetched by running `track inbox --json` and cached for 15s in
   `<program>/track-cache.json`. On any failure the cached value stands.
 
+What the reads cost is not what the *command* costs. Starting it dominates: one Python interpreter,
+plus the `git rev-parse` that identifies the repo. Both are bounded — `git` by `ORCH_GIT_TIMEOUT`,
+because a dozen linked worktrees sharing one common git dir make `index.lock` contention ordinary,
+and an unbounded wait on a per-message command does not fail, it wedges and then overlaps with the
+next render. The interpreter is bounded only by which one you name: leave `python3` to `PATH` and a
+pyenv or asdf shim in front of it can turn a 50ms start into most of a second, on a command the
+harness runs after every assistant message. Hence the resolution in the snippets below — prefer a
+known-absolute interpreter, and let `PATH` answer only as a last resort.
+
 ## Claude Code
 
 `~/.claude/settings.json`:
@@ -88,10 +101,14 @@ elsewhere:
 {
   "statusLine": {
     "type": "command",
-    "command": "python3 ~/.claude/skills/orchestrating/scripts/orch.py statusline"
+    "command": "PY=\"${ORCH_PYTHON:-}\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || PY=python3; exec \"$PY\" ~/.claude/skills/orchestrating/scripts/orch.py statusline"
   }
 }
 ```
+
+`orch.py` runs on the system interpreter, so `/usr/bin/python3` is the right default: it is the one
+path that is a platform guarantee rather than a `PATH` accident. `ORCH_PYTHON` names a different one
+where that matters.
 
 Claude Code re-runs this on session start and resume, after every assistant message, on `/compact`
 completion, and on permission-mode or vim-mode changes. It hands the command a JSON payload on
@@ -104,11 +121,15 @@ only be read once. Forward it:
 
 ```bash
 #!/usr/bin/env bash
+PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3
 INPUT=$(cat)
-ORCH=$(printf '%s' "$INPUT" | python3 ~/.claude/skills/orchestrating/scripts/orch.py statusline)
+ORCH=$(printf '%s' "$INPUT" | "$PY" ~/.claude/skills/orchestrating/scripts/orch.py statusline)
 printf '%s' "$INPUT" | your-existing-statusline
 [ -n "$ORCH" ] && printf '\n%s' "$ORCH"    # second line, only when there is something to say
 ```
+
+One interpreter, not two: a wrapper that spawns `python3` twice pays the start twice on every
+message.
 
 Multi-line output is supported, so the orch line can sit under the existing one rather than fight it
 for width. `--stdin never` skips the payload wait entirely for a caller that has nothing to hand it.
@@ -142,6 +163,8 @@ uses it.
 | `ORCH_INBOX_TARGET` | which inbox target counts as "mine" (also `--to`) |
 | `ORCH_AUTOCOMPACT_WINDOW` | the context window the percentage is measured against, absent a payload |
 | `ORCH_STATUSLINE_STDIN_WAIT` | seconds to wait for a harness payload before giving up (default 2) |
+| `ORCH_GIT_TIMEOUT` | seconds a `git` call may take before the line goes quiet (default 5) |
+| `ORCH_PYTHON` | interpreter the snippets above run; read by the shell, not by `orch.py` |
 | `NO_COLOR` | disables ANSI colour, as does `--color never` |
 
 ## When it says nothing
