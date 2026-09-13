@@ -41,6 +41,22 @@ the majority of the bill.
 See `delegation.md` for which lanes earn a frontier tier and how a lane escalates when the cheap
 tier is visibly failing.
 
+## Replay-envelope guardrails
+
+Context-token warnings are not byte telemetry. The skill cannot measure the serialized replay
+root before Cursor does, so use conservative checkpoints rather than claiming a precise
+remaining envelope. Before a long read, milestone transition, compaction, rotation, or external
+mutation, update the durable progress artifact with the last known state and one safe next step.
+The artifact is the recovery boundary, not a transcript copy.
+
+Treat `cursor_root_envelope_limit` as a root-size failure: stop retrying the same growing root and
+rotate or compact from the checkpoint. Treat `cursor_blob_capacity` as transient shared capacity:
+preserve the root, use ordinary backoff, and retry only read-only work after recovery. Never
+recursively rotate for blob capacity. If a failed call might have changed an external system,
+reconcile it before replaying and record `applied`, `not applied`, or `unknown`; `unknown` blocks
+automatic mutation replay. OpenCodex may expose final replay-root bytes, but the orchestration
+guidance must not pretend to have proactive exact-byte measurement.
+
 ## The finding that matters
 
 Cost per model call against context carried, measured over 9,138 Opus calls:

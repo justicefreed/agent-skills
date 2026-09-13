@@ -88,6 +88,15 @@ justify a long turn, are in `references/availability.md`.
 Workers may themselves orchestrate; a decomposing task says so in its brief and gets a recommended
 fan-out shape.
 
+### Durable checkpoints for long work
+
+For work that can outlive a turn, create the brief's `progress_artifact` before the first
+dispatch. Keep it small and append only facts a fresh agent cannot re-derive: completed
+milestones, the next bounded action, verification evidence, and any external side effect whose
+outcome is uncertain. Update it after each milestone and immediately before a context-heavy read,
+rotation, compaction, or external mutation. A checkpoint is complete when it names the last
+durable state and one safe next action; do not use chat history as the checkpoint.
+
 See `references/delegation.md` for substrate choice, isolation choice, and the archetype catalog
 with model/effort guidance. Rungs are relative to the provider and resolved at spawn time, never
 written as model names — and `default` is not the anchor, `economy` is.
@@ -238,6 +247,25 @@ insure, and guard large inputs; all silent when there is nothing to say.
 **Status for the human.** Never narrate the roster into chat — it becomes permanent context re-read
 every later turn. `orch statusline` renders it into harness chrome the model never pays for;
 `references/statusline.md` installs it, once per machine.
+
+## Replay-envelope failures
+
+Two failures that look similar have different remedies. A `cursor_root_envelope_limit` means the
+serialized replay root exceeded the fixed envelope (known to fail at 524,288 serialized bytes);
+it is a local state-size failure. Stop adding transcript to the same root, checkpoint the durable
+artifact, and rotate or compact at a seam. Do not retry the identical prompt indefinitely.
+
+A `cursor_blob_capacity` means shared blob capacity was unavailable; it is transient and
+process-wide. Preserve the checkpoint, wait for the normal retry/backoff mechanism or retry the
+same read-only operation once capacity is expected to recover. Do not recursively rotate agents
+or create more blobs to escape it. If the operation may have mutated an external system, do not
+automatically replay it: reconcile the provider's observed state first and record
+`applied`, `not applied`, or `unknown` in the progress artifact. Recovery is complete only when
+the artifact survives and the next action is safe under the recorded state.
+
+When the error class is missing or ambiguous, treat a possible external mutation as `unknown`,
+preserve the artifact, and escalate rather than guessing. See `references/rotation.md` and
+`references/cost.md` for the procedures and conservative thresholds.
 
 **Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
 build discipline, formatter exclusions, known traps. Generate it from
