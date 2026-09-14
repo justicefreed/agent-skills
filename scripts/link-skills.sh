@@ -66,7 +66,12 @@ for rel in data.get("skills", []):
 
 count=0
 linked=0
-for target in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+
+# These providers discover user skills from different locations. `.agents` is
+# retained for harnesses following the cross-harness Agent Skills convention,
+# including Paseo-hosted provider processes.
+for target in "$HOME/.claude/skills" "$HOME/.codex/skills" \
+              "$HOME/.cursor/skills" "$HOME/.agents/skills"; do
   mkdir -p "$target"
   while IFS= read -r src; do
     [ -n "$src" ] || continue
