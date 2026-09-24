@@ -19,14 +19,16 @@ session that can spawn a subagent:
 Everything here reads the harness transcript on disk, so it costs no model
 tokens, and every hook is silent unless something is actually wrong.
 
-This file is the single source of truth for MODEL RATES. The measured failure it
-exists to prevent was a rate table three model generations stale in one place:
-together with a request-counting bug it reported $1,025 for a session that cost
-$127. A second copy of this table is the same bug waiting to happen.
+MODEL RATES live in one place: the reviewed pricing snapshot, read through
+`pricing.py`. The measured failure that rule exists to prevent was a rate table
+three model generations stale in one place: together with a request-counting bug
+it reported $1,025 for a session that cost $127. A second copy of the table is
+the same bug waiting to happen.
 """
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import stat
@@ -57,103 +59,183 @@ def env(name: str, default: Any = None) -> Any:
 # rates
 # --------------------------------------------------------------------------- #
 #
-# Dollars per million tokens. Read the CACHE_READ column before assuming a
-# cheaper-sounding model is cheaper: cache reads are the majority of a real
-# bill, and the ordering there is not the ordering of the headline price. Moving
-# 580 measured Fable calls to Opus would have SAVED $0.26, because Fable prices
-# cache reads at $0.25/MTok against Opus's $0.50.
+# Dollars per million tokens, one row per (route, canonical id), read from the
+# reviewed pricing snapshot `references/pricing/current.json` through
+# `pricing.py`, which validates it. The same model bills differently per route,
+# so a rate is never looked up by model name alone.
 #
-# Source for named rows: https://cursor.com/docs/models-and-pricing,
-# retrieved 2026-09-13. A dash in Cursor's cache-write column is represented as
-# zero. Anthropic's documented 1-hour cache tier remains 2x input; models whose
-# page has one cache-write price use that price for either transcript bucket.
-def _rate(input_rate: float, cache_write: float, cache_read: float,
-          output_rate: float,
-          cache_write_1h: Optional[float] = None) -> Dict[str, float]:
+# Read the CACHE_READ column before assuming a cheaper-sounding model is
+# cheaper: cache reads are the majority of a real bill, and the ordering there
+# is not the ordering of the headline price. Moving 580 measured Fable calls to
+# Opus would have SAVED $0.26, because Fable prices cache reads at $0.25/MTok
+# against Opus's $0.50.
+#
+# There is NO default row. A model string that does not resolve to a reviewed
+# (route, canonical id) price is UNPRICED: its calls are counted and reported
+# with a reason, and its cost is excluded rather than guessed. Substring
+# matching once billed `claude-opus-5-5` at the `opus-5` row, 25% high, and
+# the report looked exactly as trustworthy as a correct one.
+_PRICING: Any = None
+
+
+def pricing_module() -> Any:
+    """`pricing.py` beside this file, loaded once under a private name.
+
+    Loaded by path rather than imported because orch.py loads this file by path
+    too, from another plugin, where `pricing` is not on sys.path.
+    """
+    global _PRICING
+    if _PRICING is None:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "pricing.py")
+        spec = importlib.util.spec_from_file_location("context_economy_pricing", path)
+        if spec is None or spec.loader is None:
+            raise SpendError("cannot load %s" % path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PRICING = module
+    return _PRICING
+
+
+def _spend_rate(fields: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """A snapshot rate object in the per-bucket shape `read_usage` bills.
+
+    A route publishing one untiered cache-write price bills both transcript
+    write buckets at it. Null stays null: a dash on a pricing page is unknown,
+    not free.
+    """
+    def num(value: Any) -> Optional[float]:
+        return None if value is None else float(value)
     return {
-        "in": input_rate,
-        "out": output_rate,
-        "cache_write": cache_write,
-        "cache_write_1h": (cache_write if cache_write_1h is None
-                           else cache_write_1h),
-        "cache_read": cache_read,
+        "in": num(fields["input"]),
+        "out": num(fields["output"]),
+        "cache_write": num(fields.get("cache_write_5m", fields.get("cache_write"))),
+        "cache_write_1h": num(fields.get("cache_write_1h", fields.get("cache_write"))),
+        "cache_read": num(fields["cache_read"]),
     }
 
 
-DEFAULT_RATES = {
-    # Conservative fallback and broad aliases for old transcript model ids.
-    "default": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "opus": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "fable": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
-    "mythos": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
-    "sonnet": _rate(2.0, 2.5, 0.2, 10.0, 4.0),
-    "haiku": _rate(1.0, 1.25, 0.1, 5.0, 2.0),
+def _model_tokens(value: str) -> Tuple[str, ...]:
+    return tuple(re.findall(r"[a-z]+|\d+", (value or "").lower()))
 
-    # Cursor models.
-    "grok-4.6-fast": _rate(4.0, 0.0, 1.0, 12.0),
-    "grok-4.6": _rate(2.0, 0.0, 0.5, 6.0),
-    "grok-4.5-fast": _rate(4.0, 0.0, 1.0, 18.0),
-    "grok-4.5": _rate(2.0, 0.0, 0.5, 6.0),
-    "composer-2.5-fast": _rate(3.0, 0.0, 0.5, 15.0),
-    "composer-2.5": _rate(0.5, 0.0, 0.2, 2.5),
 
-    # Anthropic.
-    "sonnet-4-1m": _rate(6.0, 7.5, 0.6, 22.5, 12.0),
-    "sonnet-4": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
-    "haiku-4.5": _rate(1.0, 1.25, 0.1, 5.0, 2.0),
-    "opus-4.5": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "sonnet-4.5": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
-    "opus-4.6": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "sonnet-4.6": _rate(3.0, 3.75, 0.3, 15.0, 6.0),
-    "opus-4.7-fast": _rate(30.0, 37.5, 3.0, 150.0, 60.0),
-    "opus-4.7": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "opus-4.8-fast": _rate(10.0, 12.5, 1.0, 50.0, 20.0),
-    "opus-4.8": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "fable-5.1": _rate(10.0, 12.5, 0.25, 50.0, 20.0),
-    "fable-5": _rate(10.0, 12.5, 1.0, 50.0, 20.0),
-    "opus-5": _rate(5.0, 6.25, 0.5, 25.0, 10.0),
-    "sonnet-5": _rate(2.0, 2.5, 0.2, 10.0, 4.0),
+def _contains_tokens(name: Tuple[str, ...], key: Tuple[str, ...]) -> bool:
+    width = len(key)
+    return bool(width and any(name[i:i + width] == key
+                              for i in range(len(name) - width + 1)))
 
-    # OpenAI.
-    "gpt-5.6-luna-fast": _rate(0.4, 0.5, 0.04, 2.4),
-    "gpt-5.6-luna": _rate(0.2, 0.25, 0.02, 1.2),
-    "gpt-5.6-terra-fast": _rate(4.0, 5.0, 0.4, 24.0),
-    "gpt-5.6-terra": _rate(2.0, 2.5, 0.2, 12.0),
-    "gpt-5.6-sol-fast": _rate(8.0, 10.0, 0.8, 40.0),
-    "gpt-5.6-sol": _rate(4.0, 5.0, 0.4, 20.0),
-    "gpt-5.4-nano": _rate(0.2, 0.0, 0.02, 1.25),
-    "gpt-5.4-mini": _rate(0.75, 0.0, 0.075, 4.5),
-    "gpt-5.4-fast": _rate(5.0, 0.0, 0.5, 30.0),
-    "gpt-5.4": _rate(2.5, 0.0, 0.25, 15.0),
-    "gpt-5.3-codex": _rate(1.75, 0.0, 0.175, 14.0),
-    "gpt-5.2-codex": _rate(1.75, 0.0, 0.175, 14.0),
-    "gpt-5.2": _rate(1.75, 0.0, 0.175, 14.0),
-    "gpt-5.1-codex-mini": _rate(0.25, 0.0, 0.025, 2.0),
-    "gpt-5.1-codex-max": _rate(1.25, 0.0, 0.125, 10.0),
-    "gpt-5.1-codex": _rate(1.25, 0.0, 0.125, 10.0),
-    "gpt-5-codex": _rate(1.25, 0.0, 0.125, 10.0),
-    "gpt-5-mini": _rate(0.25, 0.0, 0.025, 2.0),
-    "gpt-5-fast": _rate(2.5, 0.0, 0.25, 20.0),
-    "gpt-5": _rate(1.25, 0.0, 0.125, 10.0),
 
-    # Google.
-    "gemini-2.5-flash": _rate(0.3, 0.0, 0.03, 2.5),
-    "gemini-3.8-flash": _rate(0.75, 0.0, 0.075, 3.5),
-    "gemini-3.7-flash": _rate(0.75, 0.0, 0.075, 3.5),
-    "gemini-3.6-flash": _rate(1.5, 0.0, 0.15, 7.5),
-    "gemini-3.5-flash": _rate(1.5, 0.0, 0.15, 9.0),
-    "gemini-3.1-pro": _rate(2.0, 0.0, 0.2, 12.0),
-    "gemini-3-pro-image-preview": _rate(2.0, 0.0, 0.2, 12.0),
-    "gemini-3-pro": _rate(2.0, 0.0, 0.2, 12.0),
-    "gemini-3-flash": _rate(0.5, 0.0, 0.05, 3.0),
+class RateTable:
+    """Reviewed rates keyed by (route, canonical id), plus the registry that
+    turns a transcript's model string into that key."""
 
-    # Moonshot.
-    "kimi-k2.7-code": _rate(0.95, 0.0, 0.19, 4.0),
-    "kimi-k3": _rate(3.0, 0.0, 0.3, 15.0),
+    def __init__(self, registry: Any, rows: Dict[Tuple[str, str], Dict[str, Optional[float]]],
+                 origins: Dict[Tuple[str, str], str]):
+        self.registry = registry
+        self.rows = rows
+        self.origins = origins
 
-    # Z.ai.
-    "glm-5.2": _rate(1.4, 0.0, 0.26, 4.4),
-}
+    def _suggest(self, name: str) -> List[str]:
+        """Canonical ids an old short-name key probably meant. Advisory only:
+        it names candidates in an error message and never prices anything."""
+        resolved = self.registry.resolve_route_name(name)
+        if resolved:
+            return [resolved[1]]
+        tokens = _model_tokens(name)
+        return sorted(m for m in self.registry.models
+                      if _contains_tokens(_model_tokens(m), tokens))
+
+    def with_overrides(self, data: Any, origin: str) -> "RateTable":
+        """Layer `{"rates": [{"route", "model", <rate fields>}, ...]}` on top.
+
+        The pre-registry format -- a map from short names like `opus-5` to
+        rates -- is rejected with the canonical ids it could have meant, rather
+        than silently matched by substring as it used to be.
+        """
+        pricing = pricing_module()
+        if isinstance(data, dict) and isinstance(data.get("rates"), list):
+            entries = data["rates"]
+        elif isinstance(data, list):
+            entries = data
+        elif isinstance(data, dict):
+            hints = ["%r (did you mean %s?)" % (key, " or ".join(self._suggest(key)) or
+                                                "no canonical id matches")
+                     for key in data]
+            raise SpendError(
+                "%s: short-name rate keys are no longer read: %s. Key rows by "
+                "(route, canonical id): {\"rates\": [{\"route\": \"anthropic\", "
+                "\"model\": \"claude-opus-5\", \"input\": 5, ...}]}"
+                % (origin, "; ".join(hints)))
+        else:
+            raise SpendError("%s: rates override must be {\"rates\": [...]}" % origin)
+        rows = dict(self.rows)
+        origins = dict(self.origins)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise SpendError("%s: each rate row must be an object" % origin)
+            route, model = entry.get("route"), entry.get("model")
+            if route not in self.registry.routes:
+                raise SpendError("%s: unknown route %r; routes are %s"
+                                 % (origin, route, ", ".join(self.registry.routes)))
+            billing = self.registry.billing_route(route)
+            if billing != route:
+                raise SpendError("%s: route %r bills as %r; key the row there"
+                                 % (origin, route, billing))
+            if model not in self.registry.models:
+                hint = self._suggest(model or "")
+                raise SpendError("%s: %r is not a canonical id%s" % (
+                    origin, model, "; did you mean %s?" % " or ".join(hint) if hint else ""))
+            fields = {k: v for k, v in entry.items() if k not in ("route", "model")}
+            try:
+                parsed = pricing.rate_fields(fields, "%s (%s, %s)" % (origin, route, model))
+            except pricing.PricingError as exc:
+                raise SpendError(str(exc))
+            rows[(route, model)] = _spend_rate(parsed)
+            origins[(route, model)] = origin
+        return RateTable(self.registry, rows, origins)
+
+    def lookup(self, model: str) -> Dict[str, Any]:
+        """A transcript model string -> its route, canonical id and rate.
+
+        `rate` is None when unpriced, and `reason` then says why.
+        """
+        raw = (model or "").strip()
+        resolved = self.registry.resolve_route_name(raw)
+        if not resolved:
+            return {"route": None, "model": None, "rate": None,
+                    "reason": "no canonical id for %r" % raw}
+        route, canonical = resolved
+        if route is None:
+            return {"route": None, "model": canonical, "rate": None,
+                    "reason": "no registered route carries %s bare" % canonical}
+        billing = self.registry.billing_route(route)
+        rate = self.rows.get((billing, canonical))
+        return {"route": route, "model": canonical, "rate": rate,
+                "reason": None if rate else "no %s rate for %s" % (billing, canonical)}
+
+    def as_rows(self) -> List[Dict[str, Any]]:
+        return [dict(route=route, model=model, origin=self.origins[(route, model)], **rate)
+                for (route, model), rate in sorted(self.rows.items())]
+
+
+_DEFAULT_RATES: Optional[RateTable] = None
+
+
+def default_rates() -> RateTable:
+    """The reviewed snapshot's rates, with no local overrides."""
+    global _DEFAULT_RATES
+    if _DEFAULT_RATES is None:
+        pricing = pricing_module()
+        try:
+            _, snapshot, _ = pricing.load_snapshot()
+        except pricing.PricingError as exc:
+            raise SpendError("pricing snapshot: %s" % exc)
+        registry = pricing.Registry(snapshot)
+        rows = {key: _spend_rate(pricing.rate_fields(row["rates"], "%s/%s" % key))
+                for key, row in registry.rates.items()}
+        _DEFAULT_RATES = RateTable(registry, rows,
+                                   {key: snapshot["snapshot_id"] for key in rows})
+    return _DEFAULT_RATES
+
 
 # Model RUNGS are relative to the provider, never absolute names. A name written
 # down today is wrong the next time the provider ships; a rung stays correct.
@@ -169,62 +251,41 @@ EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 RELATIVE_EFFORTS = ("lowest", "one-below-default", "default")
 
 
-def load_rates() -> Dict[str, Any]:
-    """DEFAULT_RATES, overridden by SPEND_RATES json or ./rates.json.
+def load_rates() -> RateTable:
+    """The reviewed rates, overridden by SPEND_RATES json or ./rates.json.
 
-    A price change should not be a code change.
+    A price change should not be a code change. Overrides are keyed by
+    (route, canonical id); an unreadable override is an error, not ignored.
     """
+    table = default_rates()
     override = env("RATES")
     if override:
         try:
-            return {**DEFAULT_RATES, **json.loads(override)}
-        except ValueError:
-            pass
+            data = json.loads(override)
+        except ValueError as exc:
+            raise SpendError("SPEND_RATES is not JSON: %s" % exc)
+        return table.with_overrides(data, "SPEND_RATES")
     for path in ("rates.json", os.path.join(state_root(), "rates.json")):
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                return {**DEFAULT_RATES, **json.load(fh)}
-        except (OSError, ValueError):
+                data = json.load(fh)
+        except OSError:
             continue
-    return dict(DEFAULT_RATES)
+        except ValueError as exc:
+            raise SpendError("%s is not JSON: %s" % (path, exc))
+        return table.with_overrides(data, path)
+    return table
 
 
-def _model_tokens(value: str) -> Tuple[str, ...]:
-    """Normalize provider wrappers and punctuation into comparable tokens."""
-    return tuple(re.findall(r"[a-z]+|\d+", (value or "").lower()))
+def rate_for(model: str, rates: RateTable) -> Optional[Dict[str, Optional[float]]]:
+    """The reviewed rate for a transcript model string, or None when unpriced.
 
-
-def _contains_tokens(name: Tuple[str, ...], key: Tuple[str, ...]) -> bool:
-    """Whether key is a contiguous token sequence inside name."""
-    width = len(key)
-    return bool(width and any(name[i:i + width] == key
-                              for i in range(len(name) - width + 1)))
-
-
-def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
-    """Choose the most specific normalized model key.
-
-    Provider wrappers and punctuation do not affect matching:
-    `cursor/GPT-5.6-sol` matches `gpt-5.6-sol`, and
-    `cursor/claude-fable-5-1` matches `fable-5.1`.
+    `cursor/gpt-5.6-sol` prices from the (cursor, gpt-5.6-sol) row,
+    `claude-ocx-cursor--claude-sonnet-5` from Cursor's row because that route
+    bills as Cursor, and a bare `claude-opus-5-5` from (anthropic,
+    claude-opus-5-5). Nothing is matched by substring.
     """
-    name = _model_tokens(model)
-    best = None
-    for key, value in rates.items():
-        if key == "default":
-            continue
-        tokens = _model_tokens(key)
-        if _contains_tokens(name, tokens):
-            score = (len(tokens), len(key))
-            if best is None or score > best[0]:
-                best = (score, value)
-    rate = best[1] if best else rates["default"]
-    if "cache_write_1h" not in rate:
-        # A rates.json written before the 1h tier existed prices every cache
-        # write at the 5m rate. Synthesize rather than fall back to it: the
-        # tier is 2x input, and silently undercharging is the bug this fixes.
-        rate = dict(rate, cache_write_1h=rate["in"] * 2.0)
-    return rate
+    return rates.lookup(model)["rate"]
 
 
 def load_model_options(path: Optional[str] = None) -> Dict[str, Any]:
@@ -286,12 +347,6 @@ def resolve_archetype(
                      % (name, ", ".join(sorted(archetypes))))
 
 
-def _catalog_match(option_id: str, slug: str) -> bool:
-    option = _model_tokens(option_id)
-    candidate = _model_tokens(slug)
-    return bool(option and candidate[-len(option):] == option)
-
-
 def _supported_efforts(model: Dict[str, Any]) -> List[str]:
     rows = model.get("supported_reasoning_levels", [])
     return [row.get("effort") for row in rows
@@ -330,9 +385,35 @@ def choose_effort(preferred: str, supported: List[str],
         EFFORT_ORDER.index(value)))
 
 
+def _preference_rank(options: Dict[str, Any], rung: str, model: str) -> int:
+    """Return a stable rank for a preferred model within a rung."""
+    preferences = options.get("preferences", {})
+    preferred = preferences.get(rung, []) if isinstance(preferences, dict) else []
+    return preferred.index(model) if model in preferred else len(preferred)
+
+
+def agents_dir_arg(args: argparse.Namespace) -> Optional[str]:
+    value = getattr(args, "agents_dir", None)
+    return os.path.expanduser(value) if value else None
+
+
 def select_models(options: Dict[str, Any], catalog: List[Dict[str, Any]],
                   rung: str, effort: str,
-                  exclude_family: Optional[str] = None) -> List[Dict[str, Any]]:
+                  exclude_family: Optional[str] = None,
+                  registry: Any = None) -> List[Dict[str, Any]]:
+    """Policy rows for a rung that the live catalog can actually spawn.
+
+    Catalog slugs are route names (`cursor/claude-sonnet-5`) or canonical ids
+    (Codex's `gpt-5.6-terra`); each is resolved through the registry and
+    matched to the policy's canonical id exactly. `model` is always the
+    canonical id; the slug that matched is kept as `catalog_slug`.
+    """
+    registry = registry or default_rates().registry
+    reachable: Dict[str, Dict[str, Any]] = {}
+    for model in catalog:
+        resolved = registry.resolve_route_name(model["slug"])
+        if resolved:
+            reachable.setdefault(resolved[1], model)
     selected = []
     excluded = (exclude_family or "").strip().lower()
     for option in options["models"]:
@@ -340,19 +421,19 @@ def select_models(options: Dict[str, Any], catalog: List[Dict[str, Any]],
             continue
         if excluded and option.get("family", "").lower() == excluded:
             continue
-        for model in catalog:
-            if not _catalog_match(option.get("id", ""), model["slug"]):
-                continue
-            supported = _supported_efforts(model)
-            selected.append({
-                "model": model["slug"],
-                "family": option.get("family"),
-                "rung": rung,
-                "effort": choose_effort(
-                    effort, supported, model.get("default_reasoning_level")),
-                "use": option.get("use"),
-            })
-            break
+        model = reachable.get(option.get("id", ""))
+        if model is None:
+            continue
+        selected.append({
+            "model": option["id"],
+            "catalog_slug": model["slug"],
+            "family": option.get("family"),
+            "rung": rung,
+            "effort": choose_effort(
+                effort, _supported_efforts(model), model.get("default_reasoning_level")),
+            "use": option.get("use"),
+        })
+    selected.sort(key=lambda row: _preference_rank(options, rung, row["model"]))
     return selected
 
 
@@ -373,19 +454,38 @@ def cmd_models(args: argparse.Namespace) -> int:
         rung = args.rung
         effort = args.effort or "medium"
 
-    source, catalog = load_model_catalog(args.catalog)
+    pricing = pricing_module()
+    detected = pricing.detect_harness(getattr(args, "harness", None))
+    harness = detected["harness"]
+    registry = default_rates().registry
+    agents_dir = agents_dir_arg(args)
+    if args.catalog or harness != "claude-code":
+        source, catalog = load_model_catalog(args.catalog)
+    else:
+        source, catalog = pricing.claude_code_catalog(registry, agents_dir)
     selected = select_models(
-        options, catalog, rung, effort, args.exclude_family)
+        options, catalog, rung, effort, args.exclude_family, registry=registry)
     if not selected:
         raise SpendError(
             "no %s models from the option map are present in %s"
             % (rung, source))
+
+    if harness == "claude-code":
+        agent_index = pricing.index_agents_by_model(
+            pricing.read_agent_definitions(agents_dir or pricing.default_agents_dir()), registry)
+        for row in selected:
+            result_field = pricing.spawn_field(
+                row["model"], row["family"], harness, registry, agent_index)
+            row["spawn"] = result_field["spawn"]
+            row["via"] = result_field["via"]
 
     result = {
         "rung": rung,
         "effort": effort,
         "archetype": archetype,
         "escalate": policy.get("escalate") if policy else None,
+        "harness": harness,
+        "harness_source": detected["detected_by"],
         "models": selected,
     }
     if args.format == "json":
@@ -400,7 +500,85 @@ def cmd_models(args: argparse.Namespace) -> int:
     for row in selected:
         suffix = (" / %s effort" % row["effort"]
                   if row["effort"] else "")
-        print("%s%s — %s" % (row["model"], suffix, row["use"]))
+        spawn = row.get("spawn")
+        spawn_text = ""
+        if spawn:
+            spawn_text = (" [spawn: %s]" % spawn["value"] if spawn.get("value")
+                         else " [spawn: %s]" % spawn["error"])
+        via_text = ""
+        via = row.get("via")
+        if via:
+            via_text = " [via: %s]" % ", ".join(
+                "%s (%s)" % (entry["value"], entry["route"]) for entry in via)
+        print("%s%s%s%s — %s" % (row["model"], suffix, spawn_text, via_text, row["use"]))
+    return 0
+
+
+# `spend agents --write` is the only path that ever creates or overwrites a
+# file under an agents directory. It is never wired to a hook or to `install`:
+# a subagent spawn is not the moment to be writing files on this session's
+# behalf, and running it against the real `~/.claude/agents` is a decision for
+# a human to make explicitly, every time.
+AGENT_TEMPLATE = (
+    '---\n'
+    'name: "%s"\n'
+    'description: "Routed worker."\n'
+    'model: "%s"\n'
+    '---\n'
+    '\n'
+    '<!-- generated-by: context-economy -->\n'
+)
+
+
+def _preferred_model_ids(options: Dict[str, Any]) -> set:
+    """Every canonical id some rung's `preferences` list currently recommends.
+
+    An archetype has no model list of its own -- it names a rung, and the
+    rung's `preferences` entry is what actually recommends a model -- so
+    "recommended by a rung preference or archetype" reduces to this union.
+    """
+    preferred = set()
+    for ids in (options.get("preferences") or {}).values():
+        preferred.update(ids)
+    return preferred
+
+
+def cmd_agents(args: argparse.Namespace) -> int:
+    pricing = pricing_module()
+    options = load_model_options(args.options)
+    agents_dir = agents_dir_arg(args) or pricing.default_agents_dir()
+    existing = pricing.read_agent_definitions(agents_dir)
+    preferred = None if args.all else _preferred_model_ids(options)
+    rows = []
+    for policy in options.get("models", []):
+        model_id = policy.get("id")
+        if policy.get("provider") != "anthropic":
+            continue
+        if preferred is not None and model_id not in preferred:
+            continue
+        path = os.path.join(agents_dir, "%s.md" % model_id)
+        current = existing.get(model_id)
+        # Never overwrite a file this tool did not generate itself -- most
+        # concretely, one of opencodex's `ocx-*` agent definitions.
+        if current and current.get("generated_by") not in (None, "context-economy"):
+            rows.append({"id": model_id, "path": path, "skipped": "generated by %s"
+                        % current["generated_by"]})
+            continue
+        rows.append({"id": model_id, "path": path, "skipped": None})
+        if args.write:
+            os.makedirs(agents_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(AGENT_TEMPLATE % (model_id, model_id))
+
+    if args.format == "json":
+        print(json.dumps({"agents_dir": agents_dir, "wrote": args.write, "models": rows}, indent=2))
+        return 0
+    verb = "wrote" if args.write else "would write"
+    for row in rows:
+        if row["skipped"]:
+            print("skip  %s (%s)" % (row["path"], row["skipped"]))
+        else:
+            print("%s %s" % (verb, row["path"]))
     return 0
 
 
@@ -536,11 +714,38 @@ def emit(event: str, text: str) -> None:
 # transcript
 # --------------------------------------------------------------------------- #
 
+def claude_projects_dir() -> str:
+    return env("CLAUDE_PROJECTS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude", "projects")
+
+
 def project_dir_for(cwd: str) -> Optional[str]:
-    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    base = claude_projects_dir()
     slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))
     path = os.path.join(base, slug)
     return path if os.path.isdir(path) else None
+
+
+def find_transcript_by_session() -> Optional[str]:
+    """This session's own transcript, found by session id rather than cwd.
+
+    The cwd-slug lookup keys on the directory the session STARTED in, so it
+    fails from any subdirectory. `CLAUDE_CODE_SESSION_ID` is stable for the
+    whole session regardless of where a command runs.
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not session_id:
+        return None
+    base = claude_projects_dir()
+    try:
+        project_dirs = os.listdir(base)
+    except OSError:
+        return None
+    for name in project_dirs:
+        candidate = os.path.join(base, name, session_id + ".jsonl")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def find_transcript(args: argparse.Namespace) -> Optional[str]:
@@ -549,6 +754,9 @@ def find_transcript(args: argparse.Namespace) -> Optional[str]:
     from_hook = hook_payload().get("transcript_path")
     if isinstance(from_hook, str) and os.path.isfile(os.path.expanduser(from_hook)):
         return os.path.expanduser(from_hook)
+    by_session = find_transcript_by_session()
+    if by_session:
+        return by_session
     start = args.repo if os.path.isdir(args.repo) else "."
     pdir = project_dir_for(start)
     if not pdir:
@@ -557,7 +765,7 @@ def find_transcript(args: argparse.Namespace) -> Optional[str]:
     return max(files, key=os.path.getmtime) if files else None
 
 
-def read_usage(path: str, rates: Dict[str, Any],
+def read_usage(path: str, rates: RateTable,
                on_line: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """Summarise a transcript's model calls. Streams; keeps only aggregates.
 
@@ -572,15 +780,23 @@ def read_usage(path: str, rates: Dict[str, Any],
     Summing lines multiplies the bill by the average block count: on a measured
     session, 1,592 lines were 714 responses -- a 2.23x overstatement.
     `requestId` is the response identity.
+
+    A call whose model has no reviewed (route, canonical id) price -- or whose
+    tokens land in a bucket that route leaves unpriced -- is counted under
+    `unpriced` with its reason. Its tokens still count; its cost is excluded.
+    `<synthetic>` lines are not model calls and are skipped outright.
     """
+    not_model_calls = pricing_module().NOT_MODEL_CALLS
     totals = {"in": 0, "out": 0, "cache_write": 0, "cache_write_1h": 0,
               "cache_read": 0}
     component_cost = {k: 0.0 for k in totals}
     seen: Set[str] = set()
     steps = 0
     cost = 0.0
-    recent: List[Tuple[int, float]] = []
+    recent: List[Tuple[int, Optional[float]]] = []
     models: Dict[str, int] = {}
+    unpriced: Dict[str, Dict[str, Any]] = {}
+    priced_steps = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -598,13 +814,16 @@ def read_usage(path: str, rates: Dict[str, Any],
                 usage = message.get("usage") or {}
                 if not usage:
                     continue
+                model = message.get("model") or ""
+                if model in not_model_calls:
+                    continue
                 request_id = row.get("requestId") or message.get("id")
                 if request_id:
                     if request_id in seen:
                         continue
                     seen.add(request_id)
-                model = message.get("model") or ""
-                rate = rate_for(model, rates)
+                priced = rates.lookup(model)
+                rate = priced["rate"]
                 models[model] = models.get(model, 0) + 1
                 # Cache writes bill at two tiers. `cache_creation_input_tokens`
                 # is their sum and stayed put when the breakdown was added, so
@@ -623,12 +842,21 @@ def read_usage(path: str, rates: Dict[str, Any],
                     "cache_write_1h": write_1h,
                     "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
                 }
-                step_cost = sum(fields[k] * rate[k] for k in fields) / 1e6
                 for key, value in fields.items():
                     totals[key] += value
-                    component_cost[key] += value * rate[key] / 1e6
-                cost += step_cost
                 steps += 1
+                gaps = [k for k in fields if fields[k] and (rate is None or rate[k] is None)]
+                if rate is None or gaps:
+                    entry = unpriced.setdefault(model, {"calls": 0, "reason": priced["reason"] or (
+                        "%s has no %s price" % (priced["model"], ", ".join(gaps)))})
+                    entry["calls"] += 1
+                    step_cost: Optional[float] = None
+                else:
+                    step_cost = sum(fields[k] * (rate[k] or 0.0) for k in fields) / 1e6
+                    for key, value in fields.items():
+                        component_cost[key] += value * (rate[key] or 0.0) / 1e6
+                    cost += step_cost
+                    priced_steps += 1
                 recent.append((fields["in"] + fields["cache_write"]
                                + fields["cache_write_1h"]
                                + fields["cache_read"], step_cost))
@@ -638,14 +866,19 @@ def read_usage(path: str, rates: Dict[str, Any],
         return {}
     if not steps:
         return {}
+    recent_costs = [c for _, c in recent if c is not None]
     return {
         "transcript": path,
         "steps": steps,
+        "priced_steps": priced_steps,
         "tokens": totals,
         "cost": cost,
         "context": recent[-1][0] if recent else 0,
-        "cost_per_step": sum(c for _, c in recent) / len(recent) if recent else 0.0,
+        "cost_per_step": sum(recent_costs) / len(recent_costs) if recent_costs else 0.0,
         "models": models,
+        # Excluded from `cost`, never approximated. Keyed by the raw model
+        # string so the route it arrived on stays visible.
+        "unpriced": unpriced,
         # Priced per call as it was read, not by re-pricing totals at one rate:
         # a mixed-tier session has no single rate, and picking the commonest
         # model misattributes every other tier's spend.
@@ -721,6 +954,13 @@ def _should_warn(start: str, usage: Dict[str, Any],
     return True
 
 
+def unpriced_lines(usage: Dict[str, Any]) -> List[str]:
+    """One line per unpriced model, for any cost report that reads `usage`."""
+    return ["unpriced     %s x%d -- %s; excluded from cost" % (model or "?", row["calls"], row["reason"])
+            for model, row in sorted((usage.get("unpriced") or {}).items(),
+                                     key=lambda item: -item[1]["calls"])]
+
+
 def cmd_cost(args: argparse.Namespace) -> int:
     quiet = args.format == "hook"
     if quiet and args.repo == ".":
@@ -765,6 +1005,8 @@ def cmd_cost(args: argparse.Namespace) -> int:
         print("models       %s" % " · ".join(
             "%s x%d" % (m or "?", n) for m, n in
             sorted(usage["models"].items(), key=lambda x: -x[1])))
+    for line in unpriced_lines(usage):
+        print(line)
     if budget.get("limit"):
         print("budget       $%s" % budget["limit"])
     for line in advisories:
@@ -930,6 +1172,14 @@ def cmd_rung(args: argparse.Namespace) -> int:
         return 0
     if tool_input.get("model"):
         return 0
+    subagent_type = tool_input.get("subagent_type")
+    if isinstance(subagent_type, str) and subagent_type:
+        # A subagent_type naming an agent definition that pins its own model
+        # has already had the choice made -- warning here would be about a
+        # dial that is not actually unset.
+        agents = pricing_module().read_agent_definitions(agents_dir_arg(args))
+        if subagent_type in agents and agents[subagent_type].get("model"):
+            return 0
     start = payload.get("cwd") if isinstance(payload.get("cwd"), str) else args.repo
     marker = os.path.join(state_dir(start), "rung-warned.json")
     prior = _load_json(marker)
@@ -1509,6 +1759,13 @@ def cmd_install(args: argparse.Namespace) -> int:
 # cli
 # --------------------------------------------------------------------------- #
 
+def cmd_rates(args: argparse.Namespace) -> int:
+    table = load_rates()
+    print(json.dumps({"snapshot_id": table.registry.snapshot_id,
+                      "rates": table.as_rows()}, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="spend", description="session cost, context hygiene, compaction safety")
@@ -1528,6 +1785,7 @@ def build_parser() -> argparse.ArgumentParser:
     guard.set_defaults(func=cmd_guard)
 
     rung = sub.add_parser("rung", help="PreToolUse: subagent spawned with no model")
+    rung.add_argument("--agents-dir", help="Claude Code agent directory (default: ~/.claude/agents)")
     rung.set_defaults(func=cmd_rung)
 
     models = sub.add_parser(
@@ -1543,8 +1801,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="omit an underlying family when an independent opinion is needed")
     models.add_argument("--catalog", help="live model catalog JSON")
     models.add_argument("--options", help="rung and archetype option map JSON")
+    models.add_argument("--harness", help="harness to select and spawn models for")
+    models.add_argument("--agents-dir", help="Claude Code agent directory (default: ~/.claude/agents)")
     models.add_argument("--format", choices=("text", "json"), default="text")
     models.set_defaults(func=cmd_models)
+
+    agents = sub.add_parser(
+        "agents", help="Claude Code agent definitions for recommended models")
+    agents.add_argument("--write", action="store_true",
+                        help="write the agent files (default: preview only)")
+    agents.add_argument("--all", action="store_true",
+                        help="every anthropic-route model option, not just currently "
+                             "recommended ones (default: models a rung preference recommends)")
+    agents.add_argument("--agents-dir", help="target directory (default: ~/.claude/agents)")
+    agents.add_argument("--options", help="rung and archetype option map JSON")
+    agents.add_argument("--format", choices=("text", "json"), default="text")
+    agents.set_defaults(func=cmd_agents)
 
     comp = sub.add_parser("compaction", help="floor, window and loop safety")
     comp.add_argument("action", choices=("measure", "check", "window"))
@@ -1567,7 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     inst.set_defaults(func=cmd_install)
 
     rates = sub.add_parser("rates", help="the rate table, as json")
-    rates.set_defaults(func=lambda a: (print(json.dumps(load_rates(), indent=2)), 0)[1])
+    rates.set_defaults(func=cmd_rates)
 
     return p
 

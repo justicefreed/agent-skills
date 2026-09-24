@@ -13,6 +13,7 @@ No test framework, matching the plugin: one file, standard library only.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,8 +23,8 @@ _spec = importlib.util.spec_from_file_location("spend", os.path.join(HERE, "spen
 spend = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(spend)
 
-# opus-5, $/M: in 5.0 · out 25.0 · write-5m 6.25 · write-1h 10.0 · read 0.5
-RATES = spend.DEFAULT_RATES
+# (anthropic, claude-opus-5), $/M: in 5.0 · out 25.0 · write-5m 6.25 · write-1h 10.0 · read 0.5
+RATES = spend.default_rates()
 _tmp = []
 
 
@@ -74,35 +75,91 @@ def check_same(name, got, want):
 
 M = 1_000_000
 
-# Provider wrappers, case, and punctuation must not change the underlying rate.
-check_same("cursor prefix resolves GPT-5.6 Sol",
-           spend.rate_for("cursor/GPT-5.6-sol", RATES),
-           RATES["gpt-5.6-sol"])
-check_same("cursor/claude prefix resolves Fable 5.1",
+# Rates are an exact (route, canonical id) lookup. A route prefix picks the
+# route; a bare Anthropic id is the anthropic route; nothing matches by substring.
+def rate(**r):
+    return {"in": r["i"], "out": r["o"], "cache_write": r["w5"],
+            "cache_write_1h": r["w1"], "cache_read": r["r"]}
+
+
+check_same("bare claude-opus-5-5 prices from its own row, not opus-5's",
+           spend.rate_for("claude-opus-5-5", RATES),
+           rate(i=4.0, o=20.0, w5=5.0, w1=8.0, r=0.2))
+check_same("lookup names the route and canonical id",
+           {k: v for k, v in RATES.lookup("claude-opus-5-5").items() if k != "rate"},
+           {"route": "anthropic", "model": "claude-opus-5-5", "reason": None})
+check_same("cursor prefix prices from the cursor row",
+           spend.rate_for("cursor/gpt-5.6-sol", RATES),
+           rate(i=4.0, o=20.0, w5=5.0, w1=5.0, r=0.4))
+check_same("cursor's untiered write covers both buckets for Fable 5.1",
            spend.rate_for("cursor/claude-fable-5-1", RATES),
-           RATES["fable-5.1"])
-check_same("GPT-5.6 Sol published rates",
-           RATES["gpt-5.6-sol"],
-           {"in": 4.0, "out": 20.0, "cache_write": 5.0,
-            "cache_write_1h": 5.0, "cache_read": 0.4})
-check_same("Fable 5.1 published rates",
-           RATES["fable-5.1"],
-           {"in": 10.0, "out": 50.0, "cache_write": 12.5,
-            "cache_write_1h": 20.0, "cache_read": 0.25})
-check_same("versioned model beats generic family alias",
-           spend.rate_for("anthropic/claude-sonnet-4-6", RATES),
-           RATES["sonnet-4.6"])
-check_same("fast variant beats base model",
-           spend.rate_for("cursor/GPT-5.6-Terra-Fast", RATES),
-           RATES["gpt-5.6-terra-fast"])
-check_same("generic alias requires a complete token",
-           spend.rate_for("provider/notopus-model", RATES),
-           RATES["default"])
+           rate(i=10.0, o=50.0, w5=12.5, w1=12.5, r=0.25))
+check_same("anthropic Fable 5.1 keeps its 1h tier",
+           spend.rate_for("claude-fable-5-1", RATES),
+           rate(i=10.0, o=50.0, w5=12.5, w1=20.0, r=0.25))
+check_same("ocx-cursor bills from cursor's row",
+           spend.rate_for("claude-ocx-cursor--gpt-5.6-terra", RATES),
+           rate(i=2.0, o=12.0, w5=2.5, w1=2.5, r=0.2))
+check_same("anthropic API alias resolves to the dated haiku id",
+           RATES.lookup("claude-haiku-4-5")["model"], "claude-haiku-4-5-20251001")
+check_same("cursor route name maps to its canonical id",
+           RATES.lookup("cursor/gemini-3.1-pro")["model"], "gemini-3.1-pro-preview")
+check_same("cursor dash stays null, not zero",
+           spend.rate_for("cursor/composer-2.5", RATES)["cache_write"], None)
+check_same("a model with no route rate is unpriced, with a reason",
+           (spend.rate_for("cursor/claude-opus-5", RATES),
+            RATES.lookup("cursor/claude-opus-5")["reason"]),
+           (None, "no cursor rate for claude-opus-5"))
+check_same("an unknown model is unpriced, never defaulted",
+           spend.rate_for("provider/notopus-model", RATES), None)
+# Case-fold is normalization, not alias guessing: provider ids, names and
+# prefixes are all lowercase, so a re-cased spelling has exactly one meaning.
+check_same("case is folded to the one thing it could mean",
+           spend.rate_for("cursor/GPT-5.6-sol", RATES),
+           rate(i=4.0, o=20.0, w5=5.0, w1=5.0, r=0.4))
+check_same("no short-name key survives in the rate table",
+           sorted({route for route, _ in RATES.rows}),
+           ["anthropic", "cursor", "openai"])
+
+# Overrides keep working, keyed by (route, canonical id). The old short-name
+# format is rejected with the canonical ids it could have meant.
+_over = RATES.with_overrides({"rates": [{
+    "route": "anthropic", "model": "claude-opus-5-5", "input": 1, "output": 2,
+    "cache_write_5m": 3, "cache_write_1h": 4, "cache_read": 0.5}]}, "test")
+check_same("a (route, id) override replaces that row",
+           spend.rate_for("claude-opus-5-5", _over),
+           rate(i=1.0, o=2.0, w5=3.0, w1=4.0, r=0.5))
+
+
+def rejected(data):
+    try:
+        RATES.with_overrides(data, "test")
+    except spend.SpendError as exc:
+        return str(exc)
+    return None
+
+
+_msg = rejected({"opus-5": {"in": 5.0, "out": 25.0, "cache_write": 6.25, "cache_read": 0.5}})
+check_same("short-name override key is rejected naming canonical ids",
+           bool(_msg) and "claude-opus-5" in _msg and "claude-opus-5-5" in _msg, True)
+check_same("override on a route name is rejected naming the canonical id",
+           "claude-sonnet-4-6" in (rejected({"rates": [{
+               "route": "cursor", "model": "claude-4.6-sonnet", "input": 1, "output": 1,
+               "cache_write": 1, "cache_read": 1}]}) or ""), True)
+check_same("override with only a 5m write tier is rejected",
+           "rates must be exactly" in (rejected({"rates": [{
+               "route": "anthropic", "model": "claude-opus-5", "input": 1, "output": 1,
+               "cache_write_5m": 1, "cache_read": 1}]}) or ""), True)
+check_same("override on a route that bills elsewhere is rejected",
+           "bills as 'cursor'" in (rejected({"rates": [{
+               "route": "ocx-cursor", "model": "claude-sonnet-5", "input": 1, "output": 1,
+               "cache_write": 1, "cache_read": 1}]}) or ""), True)
 
 # Model selection is two deterministic filters: the versioned policy says what
 # fits, and the live catalog says what can actually be spawned. A prose table
 # cannot make the second guarantee.
 _model_options = {
+    "preferences": {"economy": ["claude-sonnet-5"]},
     "archetypes": {
         "implementer": {
             "aliases": ["implementation"],
@@ -128,15 +185,22 @@ _model_catalog = [
 ]
 _selected = spend.select_models(
     _model_options, _model_catalog, "economy", "medium")
-check_same("model selector returns exact live slugs",
+check_same("model selector returns canonical ids",
            [row["model"] for row in _selected],
-           ["cursor/gpt-5.6-luna", "cursor/claude-sonnet-5"])
+           ["claude-sonnet-5", "gpt-5.6-luna"])
+check_same("model selector keeps the live slug that matched",
+           [row["catalog_slug"] for row in _selected],
+           ["cursor/claude-sonnet-5", "cursor/gpt-5.6-luna"])
 check_same("model selector emits only supported efforts",
-           [row["effort"] for row in _selected], ["medium", "low"])
+           [row["effort"] for row in _selected], ["low", "medium"])
 check_same("model selector can require an independent family",
            [row["model"] for row in spend.select_models(
                _model_options, _model_catalog, "economy", "medium", "gpt-5.6")],
-           ["cursor/claude-sonnet-5"])
+           ["claude-sonnet-5"])
+check_same("model preference never overrides an excluded family",
+           [row["model"] for row in spend.select_models(
+               _model_options, _model_catalog, "economy", "medium", "claude-sonnet")],
+           ["gpt-5.6-luna"])
 check_same("archetype aliases resolve to canonical policy",
            spend.resolve_archetype(
                "implementation", _model_options["archetypes"])[0],
@@ -163,14 +227,28 @@ check("no breakdown -> all 5m, nothing dropped", _legacy["cost"], 6.25)
 check("no breakdown -> tokens still total 1M",
       float(_legacy["tokens"]["cache_write"] + _legacy["tokens"]["cache_write_1h"]), float(M))
 
-# A rates.json written before the tier existed has no cache_write_1h key.
-# Falling back to the 5m rate would silently reintroduce the bug.
-_legacy_rates = {"default": {"in": 5.0, "out": 25.0,
-                             "cache_write": 6.25, "cache_read": 0.5}}
-check("rates table without cache_write_1h -> synthesized at 2x",
-      spend.read_usage(transcript([call("e", **write(M, ephemeral_1h=M))]),
-                       _legacy_rates)["cost"],
-      10.0)
+# An unpriced model's tokens still count, its cost is excluded, and the call is
+# reported with its reason. `<synthetic>` is not a model call at all.
+def model_call(request_id, model, **usage):
+    row = call(request_id, **usage)
+    row["message"]["model"] = model
+    return row
+
+
+_mixed = spend.read_usage(transcript([
+    call("e1", **write(M, ephemeral_1h=M)),
+    model_call("e2", "cursor/claude-opus-5", **write(M)),
+    model_call("e3", "<synthetic>", **write(M)),
+]), RATES)
+check("unpriced call's cost is excluded", _mixed["cost"], 10.0)
+check_same("unpriced call is reported with count and reason", _mixed["unpriced"],
+           {"cursor/claude-opus-5": {"calls": 1, "reason": "no cursor rate for claude-opus-5"}})
+check("synthetic lines are not model calls", float(_mixed["steps"]), 2.0)
+check("unpriced tokens still count", float(_mixed["tokens"]["cache_write"]), float(M))
+_dash = spend.read_usage(transcript([model_call("e4", "cursor/composer-2.5", **write(M))]), RATES)
+check_same("tokens in a null-priced bucket make the call unpriced",
+           _dash["unpriced"]["cursor/composer-2.5"]["reason"],
+           "composer-2.5 has no cache_write price")
 
 # One API response occupies one transcript line per content block, each with an
 # identical copy of `usage`. Summing lines overstated a measured bill by 2.23x.
@@ -293,6 +371,124 @@ guard_out("echo '`touch %s`$(touch %s)' %s" % (_marker, _marker, "b" * 40),
           SPEND_GUARD_BYTES="20")
 check_same("live: a payload is never re-expanded by the hook shell",
            os.path.exists(_marker), False)
+
+# Step 7: the transcript lookup tries the session id before the cwd slug, so
+# `spend cost` still finds this session's transcript from a subdirectory --
+# where the cwd-slug lookup, keyed to the directory the session STARTED in,
+# cannot.
+_proj_base = tempfile.mkdtemp()
+os.makedirs(os.path.join(_proj_base, "some-project-slug"))
+_session_transcript = os.path.join(_proj_base, "some-project-slug", "sess-xyz.jsonl")
+with open(_session_transcript, "w") as fh:
+    fh.write(json.dumps(call("s1", **write(1000))) + "\n")
+_env_saved = {k: os.environ.get(k) for k in
+             ("SPEND_CLAUDE_PROJECTS_DIR", "CLAUDE_CODE_SESSION_ID")}
+os.environ["SPEND_CLAUDE_PROJECTS_DIR"] = _proj_base
+os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-xyz"
+try:
+    check_same("transcript lookup finds this session by id",
+               spend.find_transcript_by_session(), _session_transcript)
+
+    class _Args:
+        transcript = None
+        repo = "/nonexistent/subdirectory/of/the/repo"
+
+    check_same("find_transcript prefers the session id over the cwd slug",
+               spend.find_transcript(_Args()), _session_transcript)
+finally:
+    for key, value in _env_saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+shutil.rmtree(_proj_base, ignore_errors=True)
+
+# Step 5: `spend agents --write` writes one file per recommended Claude model,
+# explicitly and only when asked -- never touching a file this tool did not
+# generate itself, most concretely one of opencodex's `ocx-*` definitions.
+_write_dir = tempfile.mkdtemp()
+_write_out = subprocess.run(
+    [sys.executable, os.path.join(HERE, "spend.py"), "agents",
+     "--agents-dir", _write_dir, "--write", "--format", "json"],
+    capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+_written = json.loads(_write_out.stdout)
+check_same("agents --write reports wrote: true", _written["wrote"], True)
+_haiku_path = os.path.join(_write_dir, "claude-haiku-4-5-20251001.md")
+check_same("agents --write creates a file named for the canonical id",
+           os.path.isfile(_haiku_path), True)
+check_same("the written file's own model: frontmatter is the canonical id",
+           spend.pricing_module().read_agent_definitions(_write_dir)
+           ["claude-haiku-4-5-20251001"]["model"], "claude-haiku-4-5-20251001")
+
+# Ruling (b): the default scope is only the Claude models a rung preference
+# currently recommends, not every anthropic-route option. The shipped
+# `model-options.json` has 7 anthropic-provider rows but only 3 appear in any
+# rung's `preferences` list (haiku/minimal, sonnet-5/economy, opus-5-5/
+# advanced+frontier); the other 4 (`claude-sonnet-4-6`, `claude-opus-4-8`,
+# `claude-opus-5`, `claude-fable-5-1`) are options the rung/archetype system
+# could select in principle but does not currently prefer.
+check_same("agents --write default scope is the 3 currently-preferred Claude models",
+           sorted(row["id"] for row in _written["models"]),
+           ["claude-haiku-4-5-20251001", "claude-opus-5-5", "claude-sonnet-5"])
+shutil.rmtree(_write_dir, ignore_errors=True)
+
+# `--all` restores the full anthropic-option scope (7 models) -- this is the
+# behaviour the default used to have unconditionally before ruling (b).
+# Falsification: dropping `--all` from this invocation and re-running against
+# the corrected `cmd_agents` reproduces the narrower 3-model default above,
+# i.e. `--all` is the thing making the difference, not stale caching.
+_all_dir = tempfile.mkdtemp()
+_all_out = subprocess.run(
+    [sys.executable, os.path.join(HERE, "spend.py"), "agents",
+     "--agents-dir", _all_dir, "--all", "--write", "--format", "json"],
+    capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+_all_written = json.loads(_all_out.stdout)
+check_same("agents --write --all covers every anthropic model option",
+           sorted(row["id"] for row in _all_written["models"]),
+           sorted(["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-5",
+                   "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
+                   "claude-fable-5-1"]))
+shutil.rmtree(_all_dir, ignore_errors=True)
+
+_rewrite_dir = tempfile.mkdtemp()
+with open(os.path.join(_rewrite_dir, "claude-sonnet-5.md"), "w") as fh:
+    fh.write('---\nname: "claude-sonnet-5"\ndescription: "hand written"\n'
+             'model: "claude-sonnet-5"\n---\n\n<!-- generated-by: opencodex -->\n')
+_rerun = subprocess.run(
+    [sys.executable, os.path.join(HERE, "spend.py"), "agents",
+     "--agents-dir", _rewrite_dir, "--write", "--format", "json"],
+    capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+_rerun_rows = {row["id"]: row for row in json.loads(_rerun.stdout)["models"]}
+check_same("agents --write never overwrites a file it did not generate",
+           _rerun_rows["claude-sonnet-5"]["skipped"], "generated by opencodex")
+shutil.rmtree(_rewrite_dir, ignore_errors=True)
+
+# Step 7: the rung hook stays silent when subagent_type names an agent
+# definition that already pins a model -- the choice has already been made,
+# even though the Task/Agent call itself carries no `model` field.
+_rung_agents_dir = tempfile.mkdtemp()
+with open(os.path.join(_rung_agents_dir, "ocx-claude-opus-5.md"), "w") as fh:
+    fh.write('---\nname: "ocx-claude-opus-5"\ndescription: "Routed worker."\n'
+             'model: "claude-ocx-cursor--claude-opus-5"\n---\n')
+
+
+def rung_out(tool_input):
+    payload = {"tool_name": "Task", "tool_input": tool_input}
+    env = dict(os.environ, SPEND_AGENTS_DIR=_rung_agents_dir,
+              SPEND_STATE_HOME=tempfile.mkdtemp())
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, "spend.py"), "rung"],
+        input=json.dumps(payload), text=True, env=env, timeout=60,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip()
+
+
+check_same("rung hook warns when model is unset and subagent_type is unset",
+           "MODEL unset" in rung_out({}), True)
+check_same("rung hook is silent when subagent_type pins a model",
+           rung_out({"subagent_type": "ocx-claude-opus-5"}), "")
+check_same("rung hook is silent when model is set explicitly",
+           rung_out({"model": "opus"}), "")
+shutil.rmtree(_rung_agents_dir, ignore_errors=True)
 
 for path in _tmp:
     try:

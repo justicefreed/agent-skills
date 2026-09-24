@@ -160,11 +160,18 @@ argument still holds.
 
 The fix derives the 5m tier by subtracting 1h from the flat total, so the
 authoritative field stays authoritative and a transcript predating the breakdown
-degrades to the old answer rather than to zero. `rate_for` synthesizes
-`cache_write_1h` at 2x input when a rates table predates the tier, because
-falling back to the 5m rate would reintroduce the bug in exactly the
-configuration least likely to be looked at. Pinned in
-`scripts/test_spend.py`.
+degrades to the old answer rather than to zero. Pinned in `scripts/test_spend.py`.
+
+> **Superseded (canonical model ids, 2026-09-23).** Rates are no longer a
+> hand-maintained `DEFAULT_RATES` table with a same-price-if-missing fallback.
+> Every rate now comes from the reviewed `(route, canonical id)` registry in
+> `references/pricing/current.json`, read through `pricing.py`. A route that
+> publishes one flat `cache_write` price (Cursor, OpenAI) bills both transcript
+> write buckets at it; a route that publishes tiered prices (Anthropic) keeps
+> them distinct. There is no more "predates the tier" 2x-input synthesis: a
+> model with no reviewed row for a route is `unpriced`, with a reason, and its
+> cost is excluded rather than approximated. See
+> `docs/canonical-model-ids-plan.md` and `docs/canonical-model-ids-L2-notes.md`.
 
 **Parsing is now single-sourced too.** `orch.py` had its own copy of the pricing
 loop -- rates were shared, parsing was not -- so the first fix landed in one of

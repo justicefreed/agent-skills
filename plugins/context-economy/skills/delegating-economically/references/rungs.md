@@ -46,6 +46,24 @@ appropriate for the requested work and available to this session, using the
 exact slug and a supported effort value. `--format json` gives an agent a
 machine-readable result.
 
+Every model the selector returns is a **canonical id** — the provider's own API
+id, never a Cursor slug, an `ocx-*` route name, or a short alias like `sonnet`
+or `opus`. Aliases are accepted as *input* (`--source-model opus`) and
+translated, with the translation and its table date reported; they never come
+back out as a recommendation. Under Claude Code, each row also carries a `spawn` field — the exact value
+the Agent tool accepts, kept on the route the recommendation was priced on:
+an agent definition named for the canonical id, or an alias, and only the
+latter when the harness's dated alias table still maps it to this exact id.
+A drifted alias — the table's `opus` pointing at last generation's Opus
+while the recommendation is this generation's — is refused rather than
+spawning the wrong model, and refusal still surfaces `via` alternatives. A
+routed (`ocx-*`) definition on a *different* route never appears as `spawn`;
+it is listed separately in `via` with its own route and price, because a
+different route bills differently for the same model. `spend agents --write`
+fills the first gap by writing one agent file per Claude model a rung
+preference currently recommends (`--all` for every anthropic-route option),
+on request only.
+
 Codex catalogs are discovered at `$CODEX_HOME/models_cache.json` or
 `~/.codex/models_cache.json`. Other harnesses can pass their equivalent JSON
 with `--catalog` or `SPEND_MODEL_CATALOG`; the accepted shape is either a list

@@ -81,6 +81,17 @@ an escalation — in `references/rungs.md`. Before dispatch, run
 `spend models --archetype <name>` or `spend models --rung <rung>` to intersect
 that policy with the harness's live catalog and get exact spawnable model slugs.
 
+**Recommendations are canonical ids; aliases are input only.** `spend models`
+names the provider's own API id (`claude-sonnet-5`, `claude-opus-5-5`), never a
+Cursor slug or a short alias like `sonnet`. Under Claude Code it also names a
+`spawn` field — an agent definition or, failing that, an alias, but only when
+the alias table still points at that exact id — because a short name accepted
+as input can still be stale as a spawn target. `spawn` always stays on the
+route the recommendation was priced on; an agent definition reaching the
+same model through a different, differently-billed route (an `ocx-*` bridge)
+shows up in a separate `via` list instead, never as `spawn`. You may type an
+alias when calling `spend`; you should never see one come back out.
+
 **Check the cache-read column before assuming a cheaper-sounding model is
 cheaper.** Cache reads are the majority of a real bill and their ordering is not
 the headline ordering: moving 580 measured Fable calls to Opus would have *saved
