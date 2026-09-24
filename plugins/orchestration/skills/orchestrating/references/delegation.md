@@ -43,18 +43,24 @@ model list.
 
 | Rung | Means |
 |---|---|
-| **frontier** | the provider's most capable model, above its default. **Escalation only** — never a starting point |
-| **default** | the model the provider selects when you choose nothing. **A moving target — see below** |
+| **frontier** | the provider's most capable model. **Escalation only** — never a starting point |
+| **advanced** | a more capable model than `economy`, below `frontier` — the rung above the anchor |
 | **economy** | a cheaper, faster model — the provider's "good for everyday tasks" tier. **The anchor** |
 | **minimal** | the smallest/fastest offered |
 | **contrasting family** | a different *model family*, chosen for independence rather than capability |
+
+`default` is not a rung. It names whatever model the provider selects when nothing is specified — the
+provider's own implicit choice, not a fixed point on this table — and it is why the row above
+`economy` moved without its name ever changing (see below). It survives only as the observed, unset
+state of a worker that loaded in on that implicit choice; `orch` refuses it wherever a rung is asked
+for, on `open`, `escalate --to`, and brief front matter, and suggests `advanced` in the error.
 
 Effort rungs are likewise relative: **default** (what the model reports as its own default),
 **one below default**, **lowest**, and — escalation only — **above default**.
 
 | Archetype | Work | Failure signature | Fallback start | Escalate only when |
 |---|---|---|---|---|
-| **Integrator / lander** | serial cherry-picks, conflict resolution, keeping a chain green | resolves a conflict by dropping a hunk; declares green from the wrong tree | economy model / default effort | a conflict needs semantic reconstruction rather than a mechanical resolution — then **default** |
+| **Integrator / lander** | serial cherry-picks, conflict resolution, keeping a chain green | resolves a conflict by dropping a hunk; declares green from the wrong tree | economy model / default effort | a conflict needs semantic reconstruction rather than a mechanical resolution — then **advanced** |
 | **Implementer** | writes the change for one scoped item | scope creep into neighbouring items; edits a generated file instead of its source | economy model / default effort | the change spans subsystems, or the first attempt came back with the scope wrong |
 | **Analyst** | traces behaviour, enumerates cases, builds an argument | confident narrative resting on an unverified premise | economy model / default effort | the argument is many hops deep, a premise is disputed, or a prior pass was refuted |
 | **Verifier / prober** | runs the suite, the build, the assertions; reports numbers | reports a green that could not have gone red | economy model / one below default | the guard cannot be made to go red and nobody knows why |
@@ -84,21 +90,24 @@ stay with you, and everything else must not.
 
 **Why the defaults sit where they do, and why nothing starts above `economy`.**
 
-- **`default` is a moving target, and it moved. `economy` is the anchor.** In the program this
-  catalog was derived from, *every* worker ran on the provider's **default model** at its **default
-  effort**; neither dial was ever set, and a more capable model was available the whole time. That
-  included the analyses and adversarial passes that produced the best results, and the ones that
-  correctly refuted the orchestrator. So the original conclusion held: the evidence for "default is
-  enough" was strong and the evidence for "more is better" was absent.
+- **The provider's implicit choice is a moving target, and it moved. `economy` is the anchor.** In
+  the program this catalog was derived from, *every* worker ran on the provider's **implicit
+  choice** at its **default effort**; neither dial was ever set, and a more capable model was
+  available the whole time. That included the analyses and adversarial passes that produced the
+  best results, and the ones that correctly refuted the orchestrator. So the original conclusion
+  held: the evidence for "the implicit choice is enough" was strong and the evidence for "more is
+  better" was absent.
 
-  What that argument missed is that **`default` names whichever model the provider currently
-  selects, and the referent drifted up a tier.** The rung wording never changed, so nothing looked
-  stale — but the sentence that once meant a Sonnet-class model came to mean an Opus-class one, and
-  it cost real money: measured across four days on one machine, 6,509 calls in lane worktrees cost
-  **$616 where the same tokens one rung down cost $246**. That is 39% of the whole bill, spent by a
-  word rather than by a decision (`cost.md`). The original evidence was never evidence *for the
-  frontier tier* — it was evidence that **whatever the everyday tier happens to be is enough**, and
-  today that is `economy`.
+  What that argument missed is that **the provider's implicit choice is not a fixed point: it names
+  whichever model the provider currently selects, and the referent drifted up a tier.** The rung
+  above `economy` used to be called `default` for exactly this reason, and the name was the bug — it
+  never changed, so nothing looked stale, but the sentence that once meant a Sonnet-class model came
+  to mean an Opus-class one, and it cost real money: measured across four days on one machine, 6,509
+  calls in lane worktrees cost **$616 where the same tokens one rung down cost $246**. That is 39% of
+  the whole bill, spent by a word rather than by a decision (`cost.md`). The original evidence was
+  never evidence *for the frontier tier* — it was evidence that **whatever the everyday tier happens
+  to be is enough**, and today that is `economy`. The rung above it is now named `advanced`, a fixed
+  point instead of a moving one, precisely so this cannot happen again unnoticed.
 
   The same argument now applies one rung lower and is untested there, which is exactly why
   escalation is instrumented. The baseline to beat is on record: of 31 lane tasks that finished on
@@ -111,9 +120,9 @@ stay with you, and everything else must not.
   work the human has asked for at that level, or for an escalation you can justify from an observed
   failure.
 - **Escalation is cheap and reversible; over-provisioning is neither.** `RETUNE` raises a running
-  worker's effort without touching its instructions, so the cost of starting at default and being
-  wrong is one adjustment. The cost of starting high on every dispatch is paid on every dispatch,
-  including the majority that did not need it.
+  worker's effort without touching its instructions, so the cost of starting at the fallback and
+  being wrong is one adjustment. The cost of starting high on every dispatch is paid on every
+  dispatch, including the majority that did not need it.
 - **The cheap verifier depends on a contract, and is only safe because of it.** A cheaper verifier is
   more likely to accept a vacuous green — the exact failure that matters most. It is acceptable at
   all *only* because the report contract requires a falsification line and the orchestrator re-checks
@@ -126,10 +135,11 @@ stay with you, and everything else must not.
   is `exit 0` on a command I can re-run myself in a second" is.
 - **Model and effort are separate decisions, and the model matters more.** Most of the available
   saving is in the *model*, not the dial: a mechanical sweep on a minimal model at lowest effort is
-  far cheaper than the same work on the default model at any setting. Reach for the model rung first.
+  far cheaper than the same work on the provider's implicit choice at any setting. Reach for the
+  model rung first.
 
 Seven of these nine archetypes start at or below `economy`, and none starts above it. If you find
-yourself wanting the `default` rung, the frontier model, or an above-default dial as a *starting
+yourself wanting `advanced`, the frontier model, or an above-default effort dial as a *starting
 point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and compounds
 across every future dispatch, whereas more capability buys one better guess at the same ambiguity.
 
@@ -194,14 +204,14 @@ Then:
   this task feels hard. Then run it through the tracker, which demands the signal in writing:
 
   ```bash
-  orch escalate e1 --to default --reason "first pass came back with the scope wrong"
+  orch escalate e1 --to advanced --reason "first pass came back with the scope wrong"
   ```
 
   `escalate` only ever raises; to fix a *mis-recorded* rung use `orch update e1 --model <rung>`. The
   reason is mandatory and the record outlives the entry, because the reasons are the only thing that
-  ever corrects a rung default by measurement instead of by feel. `orch escalate --log` reads them
-  back grouped by archetype — and **an archetype that escalates every time is a wrong default, not a
-  run of bad luck.** Fix its row in the table above rather than escalating it forever.
+  ever corrects a rung's fallback start by measurement instead of by feel. `orch escalate --log`
+  reads them back grouped by archetype — and **an archetype that escalates every time has the wrong
+  fallback, not a run of bad luck.** Fix its row in the table above rather than escalating it forever.
 - **A profile is launch configuration only.** Never treat it as a worker's current state — `RETUNE`
   may have changed it. Record model/effort as provenance if useful, never as truth.
 - **Contrast compares model *family*, not provider id.** A bridged provider hosting the same

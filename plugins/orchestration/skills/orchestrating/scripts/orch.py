@@ -96,22 +96,35 @@ WORKER_MODE_DEFAULT = os.environ.get("ORCH_WORKER_MODE") or "auto"
 # names, for the reason `delegation.md` gives: a table of model names rots the
 # moment a provider ships a release. The ordering is what makes "escalate" and
 # "above economy" computable rather than a judgment call.
-MODEL_RUNGS = ("minimal", "economy", "default", "frontier")
+#
+# `default` is retired as a rung name -- it never named a fixed point, only
+# whatever the provider currently selects when nothing is specified, and what
+# it selected drifted up a tier without the word changing. The slot above
+# `economy` is `advanced`. `default` survives with exactly one meaning now: the
+# observed, unset state of a worker that loaded in on the provider's own
+# choice -- never a rung, never something `open` or `escalate` will accept.
+MODEL_RUNGS = ("minimal", "economy", "advanced", "frontier")
+
+# A rung value already written into a tracker before this rename may still
+# carry the literal string "default", meaning the rung above economy. Reading
+# it back must not crash, so `stored_rung_index`/`display_rung` translate it;
+# fresh input never gets this leniency -- see `reject_default_rung`.
+LEGACY_DEFAULT_RUNG = "advanced"
 
 # The rung a dispatch gets when nothing says otherwise. It is `economy` and not
-# `default` because `default` is not a fixed point: it means whatever the
-# provider currently selects, and what it selects moved up a tier. The catalog
-# in `delegation.md` was derived from a program where every worker ran on the
-# provider default and 90% of tasks needed one round -- but that default was a
-# Sonnet-class model at the time and is an Opus-class one now, so the unchanged
-# sentence quietly became a 2.5x instruction. Measured over four days on one
-# machine: 6,509 Opus-class calls in lane worktrees cost $616 against $246 for
-# the same tokens one rung down, which is 39% of the whole bill riding on a word
-# whose meaning drifted.
+# `advanced` because the provider's own implicit choice is not a fixed point:
+# it means whatever the provider currently selects, and what it selects moved
+# up a tier. The catalog in `delegation.md` was derived from a program where
+# every worker ran on the provider's implicit choice and 90% of tasks needed
+# one round -- but that choice was a Sonnet-class model at the time and is an
+# Opus-class one now, so the unchanged sentence quietly became a 2.5x
+# instruction. Measured over four days on one machine: 6,509 Opus-class calls
+# in lane worktrees cost $616 against $246 for the same tokens one rung down,
+# which is 39% of the whole bill riding on a word whose meaning drifted.
 WORKER_MODEL_DEFAULT = os.environ.get("ORCH_WORKER_MODEL") or "economy"
 
 # Above this needs a reason recorded. Splitting "flag" from "refuse" is
-# deliberate: `default` is a defensible everyday choice that should still be
+# deliberate: `advanced` is a defensible everyday choice that should still be
 # visible on the roster, whereas `frontier` is escalation-only by policy, so it
 # is the one rung `open` will not accept silently.
 MODEL_FLAG_ABOVE = "economy"
@@ -119,11 +132,57 @@ MODEL_REFUSE_WITHOUT_REASON = {"frontier"}
 
 
 def rung_index(rung: str) -> int:
-    """Position in MODEL_RUNGS, or -1 for anything unrecognised."""
+    """Position in MODEL_RUNGS, or -1 for anything unrecognised.
+
+    Strict: the legacy "default" spelling is unrecognised here, on purpose --
+    this is the function fresh input is checked against. Reading a tracker
+    already on disk goes through `stored_rung_index` instead.
+    """
     try:
         return MODEL_RUNGS.index((rung or "").strip().lower())
     except ValueError:
         return -1
+
+
+def stored_rung_index(rung: str) -> int:
+    """Position for a rung value already recorded in a tracker.
+
+    Unlike `rung_index`, this accepts the retired "default" spelling as
+    `LEGACY_DEFAULT_RUNG`, because entries written before the rename hold it
+    and must still compare correctly against a fresh rung -- e.g. `escalate`
+    deciding whether a target actually raises the current one.
+    """
+    value = (rung or "").strip().lower()
+    if value == "default":
+        value = LEGACY_DEFAULT_RUNG
+    try:
+        return MODEL_RUNGS.index(value)
+    except ValueError:
+        return -1
+
+
+def display_rung(rung: str) -> str:
+    """Human label for a stored rung value, marking the legacy spelling."""
+    value = (rung or "").strip().lower()
+    if value == "default":
+        return '%s (legacy "default")' % LEGACY_DEFAULT_RUNG
+    return value
+
+
+def reject_default_rung(value: str, label: str) -> None:
+    """Refuse the retired "default" spelling on fresh input, with the hint.
+
+    Called from every place a rung arrives from outside a tracker file: brief
+    front matter, `--model`, `--to`. A tracker entry already on disk goes
+    through `stored_rung_index`/`display_rung` instead -- it is read, not
+    rejected.
+    """
+    if (value or "").strip().lower() == "default":
+        raise OrchError(
+            "%s: 'default' is not a rung -- it names whatever model a worker "
+            "happens to load in with, the provider's own implicit choice, "
+            "never a dispatch decision. Did you mean 'advanced' (the rung "
+            "above economy)?" % label)
 
 # An unfilled template slot -- `<one line, imperative>` -- is the likeliest form
 # of copy-the-template-without-reading-it, so it is rejected as a placeholder.
@@ -549,13 +608,15 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
                 "must be able to find later." % path
             )
 
-    if "model" in fields and rung_index(fields["model"]) < 0:
-        raise OrchError(
-            "brief %s: model must be one of %s -- a RUNG, not a model name.\n"
-            "Names are resolved against the provider's live model list at spawn "
-            "time, because a name written into a brief is wrong the next time "
-            "the provider ships." % (path, ", ".join(MODEL_RUNGS))
-        )
+    if "model" in fields:
+        reject_default_rung(fields["model"], "brief %s: model" % path)
+        if rung_index(fields["model"]) < 0:
+            raise OrchError(
+                "brief %s: model must be one of %s -- a RUNG, not a model name.\n"
+                "Names are resolved against the provider's live model list at "
+                "spawn time, because a name written into a brief is wrong the "
+                "next time the provider ships." % (path, ", ".join(MODEL_RUNGS))
+            )
 
     if "progress_artifact" in fields:
         if is_placeholder(fields["progress_artifact"]):
@@ -603,11 +664,12 @@ def entry_summary(entry: Dict[str, Any]) -> str:
     rung = entry.get("model")
     if not rung:
         flags.append("NO-MODEL")
-    elif rung_index(rung) > rung_index(MODEL_FLAG_ABOVE):
-        # `TIER:frontier` beside `HIGH-TIER:default` read as though `default`
-        # were the higher of the two. The rung is the fact; whether anyone
-        # justified it is the suffix.
-        flags.append("TIER:" + rung +
+    elif stored_rung_index(rung) > rung_index(MODEL_FLAG_ABOVE):
+        # `TIER:frontier` beside `HIGH-TIER:advanced` read as though the lower
+        # one were higher. The rung is the fact; whether anyone justified it is
+        # the suffix. A legacy "default" entry renders with its translation
+        # named, so it never reads as the retired rung.
+        flags.append("TIER:" + display_rung(rung) +
                      ("" if entry.get("model_reason") else ":NO-REASON"))
     return "  ".join(filter(None, [
         entry["entry"],
@@ -756,6 +818,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     # either -- it selects whatever the provider currently calls its default,
     # which is the most expensive rung anyone reaches by accident.
     model = str(args.model or fields.get("model") or WORKER_MODEL_DEFAULT).strip().lower()
+    reject_default_rung(model, "--model")
     if rung_index(model) < 0:
         raise OrchError("--model must be one of %s. Got %r."
                         % (", ".join(MODEL_RUNGS), model))
@@ -917,6 +980,7 @@ def cmd_update(args: argparse.Namespace) -> int:
         # rung deliberately goes through `escalate`, which demands a reason and
         # keeps it.
         rung = args.model.strip().lower()
+        reject_default_rung(rung, "--model")
         if rung_index(rung) < 0:
             raise OrchError("--model must be one of %s" % ", ".join(MODEL_RUNGS))
         entry["model"] = rung
@@ -1721,26 +1785,35 @@ FRONTDESK_MIN_TURNS = int(os.environ.get("ORCH_FRONTDESK_MIN_TURNS", 20))
 FRONTDESK_DISPATCHES = int(os.environ.get("ORCH_FRONTDESK_DISPATCHES", 6))
 
 
-def load_rates(repo_key: Optional[str], program: Optional[str]) -> Dict[str, Any]:
+def load_rates(repo_key: Optional[str], program: Optional[str]) -> Any:
     """The shared table, with a program-local `rates.json` layered on top.
 
     ORCH_RATES and SPEND_RATES are both honoured by spend.py itself; the only
     thing added here is the per-program override, which is the one piece of rate
-    handling that genuinely belongs to an orchestration program.
+    handling that genuinely belongs to an orchestration program. It uses
+    spend.py's format -- rows keyed by (route, canonical id) -- and a malformed
+    one is an error rather than silently ignored.
     """
-    rates = _spend_module().load_rates()
-    if repo_key and program:
-        path = os.path.join(program_dir(repo_key, program), "rates.json")
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                return {**rates, **json.load(fh)}
-        except (OSError, ValueError):
-            pass
-    return rates
+    spend = _spend_module()
+    try:
+        rates = spend.load_rates()
+        if repo_key and program:
+            path = os.path.join(program_dir(repo_key, program), "rates.json")
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except OSError:
+                return rates
+            except ValueError as exc:
+                raise OrchError("%s is not JSON: %s" % (path, exc))
+            return rates.with_overrides(data, path)
+        return rates
+    except spend.SpendError as exc:
+        raise OrchError(str(exc))
 
 
-def rate_for(model: str, rates: Dict[str, Any]) -> Dict[str, float]:
-    """Longest key wins, so `sonnet-4-6` beats `sonnet` on a 4.6 model id."""
+def rate_for(model: str, rates: Any) -> Optional[Dict[str, Optional[float]]]:
+    """Exact (route, canonical id) lookup in spend.py; None means unpriced."""
     return _spend_module().rate_for(model, rates)
 
 
@@ -1829,7 +1902,7 @@ def _human_turn_text(line: str) -> Optional[str]:
     return text
 
 
-def read_usage(path: str, rates: Dict[str, Any]) -> Dict[str, Any]:
+def read_usage(path: str, rates: Any) -> Dict[str, Any]:
     """Summarise a transcript, adding the relay/human-turn counts orch reports.
 
     The pricing loop -- requestId dedup, the 5m/1h cache-write split, per-call
@@ -2032,8 +2105,12 @@ def cmd_cost(args: argparse.Namespace) -> int:
         if not advisories or not _should_warn(repo_key, program, usage,
                                               advisories):
             return 0
-        text = ("COST — $%.0f this session, ~$%.2f per model call at %dK "
-                "context.\n\n%s\n" % (usage["cost"], usage["cost_per_step"],
+        unpriced = sum(row["calls"] for row in (usage.get("unpriced") or {}).values())
+        text = ("COST — $%.0f this session%s, ~$%.2f per model call at %dK "
+                "context.\n\n%s\n" % (usage["cost"],
+                                      " (excludes %d unpriced calls)" % unpriced
+                                      if unpriced else "",
+                                      usage["cost_per_step"],
                                       usage["context"] // 1000,
                                       "\n\n".join(advisories)))
         _mark_frontdesk_suggested(repo_key, program, advisories)
@@ -2055,6 +2132,8 @@ def cmd_cost(args: argparse.Namespace) -> int:
     print("cost share   %s" % " · ".join(
         "%s %.0f%%" % (k.replace("_", " "), v * 100)
         for k, v in sorted(usage["shares"].items(), key=lambda x: -x[1])))
+    for line in _spend_module().unpriced_lines(usage):
+        print(line)
     if open_entries:
         print("open work    %d dispatches" % open_entries)
     if budget.get("limit"):
@@ -2200,6 +2279,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
             "default; `orch escalate --log` is where they are read back.")
 
     target = args.to.strip().lower()
+    reject_default_rung(target, "--to")
     if rung_index(target) < 0:
         raise OrchError("--to must be one of %s. Got %r."
                         % (", ".join(MODEL_RUNGS), args.to))
@@ -2209,12 +2289,12 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     entry = find_entry(data, args.entry)
     current = entry.get("model") or WORKER_MODEL_DEFAULT
 
-    if rung_index(target) <= rung_index(current):
+    if rung_index(target) <= stored_rung_index(current):
         raise OrchError(
             "%s is already on %r, which is not below %r. `escalate` only ever "
             "raises -- it is the escape hatch, not the model field.\n"
             "To correct a mis-recorded rung use `orch update %s --model %s`."
-            % (entry["entry"], current, target, entry["entry"], target))
+            % (entry["entry"], display_rung(current), target, entry["entry"], target))
 
     entry["model"] = target
     entry["model_reason"] = reason
@@ -4330,9 +4410,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the container this lane runs in, once the spawn has "
                          "minted it")
     sp.add_argument("--mode", help="the session mode the agent is actually in")
-    sp.add_argument("--model", choices=MODEL_RUNGS,
-                    help="correct a mis-recorded rung; to RAISE one, use "
-                         "`orch escalate`")
+    sp.add_argument("--model",
+                    help="correct a mis-recorded rung, one of %s; to RAISE one, "
+                         "use `orch escalate`" % ", ".join(MODEL_RUNGS))
     sp.add_argument("--status", choices=STATUSES)
     sp.add_argument("--pending-message",
                     help="message to deliver when the worker next goes idle")
@@ -4612,7 +4692,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "escalate", help="raise a lane's model rung, on a recorded signal")
     sp.add_argument("entry", nargs="?", help="entry id or agent id")
-    sp.add_argument("--to", choices=MODEL_RUNGS, help="the rung to raise to")
+    sp.add_argument("--to", help="the rung to raise to, one of %s"
+                                 % ", ".join(MODEL_RUNGS))
     sp.add_argument("--reason", help="the observed signal; required, and kept")
     sp.add_argument("--log", action="store_true",
                     help="read the record back, grouped by archetype")
