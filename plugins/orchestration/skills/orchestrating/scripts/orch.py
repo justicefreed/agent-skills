@@ -277,11 +277,11 @@ def read_dirs() -> List[str]:
     `references/substrates/_capabilities.md` just as another stalled on a brief.
 
     Both spellings of each are returned, because a rule written for one does not
-    match a read of the other and the installed skill is normally a symlink into
-    a checkout.
+    match a read of the other and an older install may be a symlink into a
+    checkout; `scripts/link-skills.sh` now installs copies.
 
     The skill directory is taken from where the skill is *installed*, not from
-    where this file happens to be running. `scripts/link-skills.sh` links into
+    where this file happens to be running. `scripts/link-skills.sh` copies into
     `~/.claude/skills` and `~/.agents/skills`, and those are the copies a worker
     reads; deriving it from `__file__` instead would write a permanent rule for
     whichever throwaway worktree the orchestrator was in at the time.
@@ -290,7 +290,7 @@ def read_dirs() -> List[str]:
                               "orchestrating")
                  for base in (".claude", ".agents")]
     skills = [d for d in installed if os.path.exists(d)]
-    if not skills:      # not linked; the running copy is the only one there is
+    if not skills:      # not installed; the running copy is the only one there is
         skills = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
 
     out: List[str] = []

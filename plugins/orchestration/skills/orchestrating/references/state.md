@@ -36,8 +36,8 @@ Choosing a better mode does not fix either; only scope does. `orch permissions -
 narrow `Read(//<dir>/**)` rule per directory to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`),
 covering the state root and the installed skill, which settles it for every worker in every
 repository. Run it once per machine; `orch permissions` alone checks and exits 3. Three details are
-deliberate: both spellings of each directory are granted, since the installed skill is a symlink into
-a checkout and a rule for one spelling need not match a read of the other; the skill path comes from
+deliberate: both spellings of each directory are granted, since an installed skill may be a symlink into
+a checkout (an older install) and a rule for one spelling need not match a read of the other; the skill path comes from
 where the skill is *installed* rather than from where the script is running, so a throwaway worktree
 never earns a permanent rule; and a settings file that does not parse is never rewritten. `orch open`
 warns when the rules are absent. Settings are read at launch, so a grant reaches the next worker

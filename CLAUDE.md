@@ -46,9 +46,12 @@ the skill directory and reference them relatively; `${CLAUDE_PLUGIN_ROOT}` is Cl
 and must not appear in a path a non-Claude harness has to resolve. Where a path genuinely differs by
 harness, put the resolution table in a reference file rather than in `SKILL.md`.
 
-Run `scripts/link-skills.sh` to link every shipped skill into `~/.claude/skills` and
-`~/.agents/skills`. Entries are symlinks into this repo, so `git pull` keeps them current; re-run
-after adding, renaming or removing a skill.
+Run `scripts/link-skills.sh` to install every shipped skill into `~/.claude/skills`,
+`~/.codex/skills`, `~/.cursor/skills` and `~/.agents/skills`, and each plugin's root into
+`~/.agents/plugins/<plugin>`. Entries are **copies**, not symlinks — some harnesses (abacusai) do
+not follow symlinks — so re-run after `git pull` as well as after adding, renaming or removing a
+skill. A skill script that needs a file outside its own skill directory must find it through the
+installed plugin root, never through `..` from the skill directory.
 
 ## Validating
 

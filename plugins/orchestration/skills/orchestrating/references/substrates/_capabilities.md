@@ -68,8 +68,8 @@ that path depends on the harness:
 | Harness | Resolution |
 |---|---|
 | Claude Code (plugin install) | `${CLAUDE_PLUGIN_ROOT}/skills/orchestrating/scripts/orch.py` |
-| Claude Code (`~/.claude/skills` link) | `~/.claude/skills/orchestrating/scripts/orch.py` |
-| Codex / `~/.agents/skills` link | `~/.agents/skills/orchestrating/scripts/orch.py` |
+| Claude Code (`~/.claude/skills` install) | `~/.claude/skills/orchestrating/scripts/orch.py` |
+| Codex, abacusai / `~/.agents/skills` install | `~/.agents/skills/orchestrating/scripts/orch.py` |
 | Anything else | the skill base directory the harness announced, plus `scripts/orch.py` |
 
 Verify the path resolves before the first dispatch. A tracker command that silently fails to run

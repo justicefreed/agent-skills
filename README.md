@@ -124,7 +124,7 @@ Design record: [`docs/BROWSER-VERIFICATION.md`](./docs/BROWSER-VERIFICATION.md).
 # Route A — plugin install: skill + hook together
 claude plugin install browser-verification@justicefreed
 
-# Route B — symlinked skills: link, then opt in to the hook separately
+# Route B — copied skills: install, then opt in to the hook separately
 scripts/link-skills.sh
 scripts/chrome-guard-hook.sh enable                 # ~/.claude/settings.json
 scripts/chrome-guard-hook.sh enable --project DIR   # or one repo's .claude/settings.json

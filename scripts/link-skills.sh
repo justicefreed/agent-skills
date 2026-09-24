@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Link every shipped skill into the local harness skill directories.
-# Entries are symlinks into this repo, so `git pull` keeps installed skills current.
-# Re-run after adding, renaming, or removing a skill.
+# Install every shipped skill into the local harness skill directories.
+# Entries are COPIES, not symlinks: some harnesses (abacusai) do not follow
+# symlinks in ~/.agents/skills. Re-run after `git pull`, and after adding,
+# renaming or removing a skill -- installs this checkout made that the manifest
+# no longer ships are pruned. The copying and ownership rules live in
+# install_copy.py.
 #
 # Portability: macOS ships bash 3.2, so no mapfile, no associative arrays, and no
 # `"${arr[@]}"` on a possibly-empty array under `set -u`. Kept array-free deliberately.
@@ -9,28 +12,22 @@ set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Every entry installed below is a symlink INTO $REPO, so $REPO has to outlive
-# the install. A linked worktree does not: it is reclaimed when its lane closes,
-# and each link then dangles. That is silent for a skill -- the file is simply
-# not found -- but not for the status line, which runs
-# `~/.claude/skills/orchestrating/scripts/orch.py` after every assistant message
-# in every session on the machine. Same hazard as a hook pinned to a disposable
-# checkout, one layer up; see `spend.py`'s HOOK_DIRS for the other half.
-#
-# A primary checkout resolves --git-dir and --git-common-dir to the same path; a
-# linked worktree points the first at <common>/worktrees/<name>. That is the
-# whole test, and it is also how `orch.py` keys state that must SURVIVE a
-# worktree -- the same distinction, read the other way round.
+# A linked worktree is a lane: reclaimed when the lane closes, and holding
+# work nobody has reviewed. Installing from one would put that unmerged code
+# into every session on the machine -- including the status line, which runs
+# `~/.claude/skills/orchestrating/scripts/orch.py` after every assistant
+# message. A primary checkout resolves --git-dir and --git-common-dir to the
+# same path; a linked worktree points the first at <common>/worktrees/<name>.
 if [ -z "${LINK_SKILLS_ALLOW_WORKTREE:-}" ] &&
    git_dir="$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null)" &&
    common_dir="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" &&
    [ "$git_dir" != "$common_dir" ]; then
   primary="$(git -C "$REPO" worktree list --porcelain 2>/dev/null \
              | sed -n '1s/^worktree //p')"
-  echo "Refusing to link from a linked worktree:" >&2
+  echo "Refusing to install from a linked worktree:" >&2
   echo "  $REPO" >&2
-  echo "Links would point here, and this checkout is reclaimed when its lane" >&2
-  echo "closes -- taking every installed skill, and the status line, with it." >&2
+  echo "It is a lane: unmerged, and reclaimed when the lane closes. Installing" >&2
+  echo "it would put that work into every session on the machine." >&2
   [ -n "$primary" ] && echo "Run it from the primary checkout instead:" >&2 \
                     && echo "  $primary/scripts/link-skills.sh" >&2
   echo "Set LINK_SKILLS_ALLOW_WORKTREE=1 if this worktree really is permanent." >&2
@@ -64,45 +61,52 @@ for rel in data.get("skills", []):
   done
 }
 
-count=0
-linked=0
+COPY="$REPO/scripts/install_copy.py"
+failed=0
+
+SKILLS="$(skill_paths)"
+if [ -z "$SKILLS" ]; then
+  echo "No skills listed in any plugin manifest — nothing to install." >&2
+  exit 1
+fi
+
+# Skill scripts reach past their own directory into the plugin root --
+# delegating-economically's `spend` is `<plugin>/scripts/spend.py`, and orch.py
+# finds it as a sibling plugin. A symlinked skill got that for free by resolving
+# into this checkout; a copied one cannot, so each shipping plugin's root is
+# installed too, at the location both scripts search: ~/.agents/plugins/<name>.
+PLUGINS="$(for manifest in "$REPO"/plugins/*/.claude-plugin/plugin.json; do
+  [ -e "$manifest" ] && dirname "$(dirname "$manifest")"
+done)"
+
+install_all() {  # $1 = target directory, $2 = newline-separated source dirs
+  mkdir -p "$1"
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    if [ ! -d "$src" ]; then
+      echo "  FAIL  $(basename "$src") (listed in manifest but missing on disk: $src)" >&2
+      failed=1
+      continue
+    fi
+    "$PY" "$COPY" install --repo "$REPO" --src "$src" \
+      --dest "$1/$(basename "$src")" || failed=1
+  done <<EOF
+$2
+EOF
+  printf '%s\n' "$2" | "$PY" "$COPY" prune --repo "$REPO" --target "$1" || failed=1
+}
 
 # These providers discover user skills from different locations. `.agents` is
 # retained for harnesses following the cross-harness Agent Skills convention,
 # including Paseo-hosted provider processes.
 for target in "$HOME/.claude/skills" "$HOME/.codex/skills" \
               "$HOME/.cursor/skills" "$HOME/.agents/skills"; do
-  mkdir -p "$target"
-  while IFS= read -r src; do
-    [ -n "$src" ] || continue
-    count=$((count + 1))
-    name="$(basename "$src")"
-    dest="$target/$name"
-
-    if [ ! -d "$src" ]; then
-      echo "  SKIP  $name (listed in manifest but missing on disk: $src)" >&2
-      continue
-    fi
-
-    # Replace only our own symlinks; never clobber a real directory.
-    if [ -L "$dest" ]; then
-      rm "$dest"
-    elif [ -e "$dest" ]; then
-      echo "  SKIP  $name ($dest exists and is not a symlink)" >&2
-      continue
-    fi
-
-    ln -s "$src" "$dest"
-    linked=$((linked + 1))
-    echo "  LINK  $dest -> $src"
-  done <<EOF
-$(skill_paths)
-EOF
+  install_all "$target" "$SKILLS"
 done
+install_all "$HOME/.agents/plugins" "$PLUGINS"
 
-if [ "$count" -eq 0 ]; then
-  echo "No skills listed in any plugin manifest — nothing to link." >&2
+if [ "$failed" -ne 0 ]; then
+  echo "Failed: see FAIL lines above." >&2
   exit 1
 fi
-
-echo "Done. $linked symlink(s) created."
+echo "Done."

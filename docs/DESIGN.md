@@ -34,7 +34,7 @@ Grouping rule: skills sharing a `references/` corpus, or always enabled together
 plugin — because `${CLAUDE_PLUGIN_ROOT}` resolves per-plugin and cross-plugin sharing is not clean.
 
 Cross-harness support follows `mattpocock/skills`: `AGENTS.md` symlinked to `CLAUDE.md`, a
-`scripts/link-skills.sh` that links into both `~/.claude/skills` and `~/.agents/skills`, and skill-
+`scripts/link-skills.sh` that installs (copies) into both `~/.claude/skills` and `~/.agents/skills`, and skill-
 local `references/` (portable, unlike `${CLAUDE_PLUGIN_ROOT}`).
 
 ## 3. One skill, not several

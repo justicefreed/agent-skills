@@ -1591,12 +1591,13 @@ def settings_path() -> str:
 # worktree and every hook points into a directory that disappears when the
 # worktree is reclaimed -- and since each one ends in `exit 0`, the result is no
 # cost line, no guard, no rung prompt, and no error to notice. These candidates
-# outlive any checkout.
+# outlive any checkout. `scripts/link-skills.sh` installs copies, not
+# symlinks, so an installed skill directory no longer leads back to its plugin
+# root; the installer copies that root to ~/.agents/plugins/context-economy.
 HOOK_DIRS = (
     '"$SPEND_SKILL_DIR"',
     '"$CLAUDE_PLUGIN_ROOT"',
-    '"$HOME/.claude/skills/delegating-economically/../.."',
-    '"$HOME/.agents/skills/delegating-economically/../.."',
+    '"$HOME/.agents/plugins/context-economy"',
 )
 
 DESIRED_HOOKS = (

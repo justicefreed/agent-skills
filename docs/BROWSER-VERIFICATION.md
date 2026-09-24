@@ -25,7 +25,7 @@ headless mode. Root-cause trace with Chromium source references:
 
 - `claude plugin install browser-verification@justicefreed`: skill and hook arrive together;
   `claude plugin disable browser-verification@justicefreed` removes both.
-- `scripts/link-skills.sh` links only the skill. `scripts/chrome-guard-hook.sh enable|disable|status`
+- `scripts/link-skills.sh` installs only the skill (as a copy). `scripts/chrome-guard-hook.sh enable|disable|status`
   adds or removes the hook entry in `~/.claude/settings.json` (or a project's, with `--project`),
   touching nothing else in the file. `NO_GOOGLE_CHROME_HOOK=off|always|auto` overrides at runtime.
 

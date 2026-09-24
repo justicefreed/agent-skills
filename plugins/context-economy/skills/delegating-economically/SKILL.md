@@ -18,7 +18,8 @@ against context carried, over 9,138 Opus calls:
 | 200–300K | $0.152 |
 | 400–500K | $0.271 |
 
-Run `spend cost` for this session's numbers. Everything below is on disk, so
+Run `spend cost` for this session's numbers (`spend` is `scripts/spend.py` in the plugin root;
+where that is per install: `references/paths.md`). Everything below is on disk, so
 asking costs no model tokens.
 
 ## 1. Delegate, or do it inline?

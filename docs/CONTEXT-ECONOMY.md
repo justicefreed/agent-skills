@@ -127,8 +127,10 @@ provider and stay correct as models turn over; names rot. The anchor is `economy
 because `default` drifted from Sonnet-class to Opus-class and cost $616 against a measured $246 —
 an anchor that moves under you is worse than no anchor.
 
-**`..` through a symlink is kernel-resolved.** The hook path needs `../..` from a linked *skill*
-directory to reach the plugin root, because the kernel resolves the symlink before applying `..`.
+**Installed skills are copies, so hooks find the plugin root directly.** Hooks once reached the
+plugin root through `../..` from a symlinked *skill* directory, relying on the kernel resolving the
+symlink before `..`. `link-skills.sh` now installs copies (abacusai does not follow symlinks) and
+copies the plugin root to `~/.agents/plugins/context-economy`, which is where the hooks look.
 
 `spend install` used to be exempt from that, by baking in `os.path.realpath(__file__)` at install
 time — which looked like the safer choice and was the opposite. An absolute path is only as durable
