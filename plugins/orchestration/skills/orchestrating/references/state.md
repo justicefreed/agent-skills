@@ -94,16 +94,18 @@ recorded before the mode was tracked. Use `orch update <e> --mode <id>` to recor
 write down the bad state before anyone can report it.
 
 **The model rung rides the same rails**, because it has the same failure mode — forgotten at spawn,
-and expensive rather than neutral when forgotten. `open` fills in `ORCH_WORKER_MODEL` (default
-`economy`) unless front matter or `--model` says otherwise, refuses `frontier` without
-`--model-reason`, and names the rung in the same printed fragment. `roster` flags `TIER:<rung>` above
-`economy`, suffixed `:NO-REASON` when unjustified, and `NO-MODEL` on an entry recorded before the
-rung was tracked. `orch update <e> --model <rung>` is the correction path; raising a rung goes
+and expensive rather than neutral when forgotten. `open` takes the rung and effort from the brief's
+`archetype`, refuses anything above that start without `--model-reason` and `--evidence`, resolves
+the rung to exact models, and prints them with the settings and labels to spawn with. `roster` flags
+`TIER:<rung>` above the archetype's start (above `economy` for older entries), suffixed `:NO-REASON`
+when unjustified; `TIER-MISMATCH:<id>` when the recorded spawn is not one of the resolved models;
+`EFFORT:`, `LONG-CTX`, `SAME-FAMILY`, `SPAWN-OVERRIDE` and `ROUNDS:<n>` for the other dials; and
+`NO-MODEL` on an entry recorded before the rung was tracked. `orch update <e> --model <rung>` is the correction path; raising a rung goes
 through `orch escalate`, which demands the signal and keeps it. Rungs only — a model *name* in a
 brief is rejected, because it is wrong the next time the provider ships. See `delegation.md` §3–4.
 
 Required brief front matter — `title`, `worktree`, `expected_artifacts`, `advances`,
-`consumption` — is read from the file, never retyped. `orch` rejects placeholders (`unknown`,
+`consumption`, `archetype` — is read from the file, never retyped. `orch` rejects placeholders (`unknown`,
 `tbd`, `n/a`, …): a required field answered with a placeholder is an omission in costume.
 `advances` accepts the literal `none`, because an explicit *none* is a decision and a blank is not.
 
@@ -112,8 +114,8 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | Command | Purpose |
 |---|---|
 | `orch programs` | what programs exist for this repo |
-| `orch open --brief P [--agent-id ID] [--workspace-id ID] [--mode M] [--model R] [--model-reason S] [--program N] [--tracker ID]` | record a dispatch |
-| `orch update E [--agent-id] [--session-name] [--workspace-id] [--mode] [--model] [--status] [--pending-message] [--note]` | amend an open entry |
+| `orch open --brief P [--agent-id ID] [--workspace-id ID] [--mode M] [--model R] [--effort L] [--long-context] [--model-reason S --evidence X] [--author-family F \| --same-family-ok S] [--program N] [--tracker ID]` | record a dispatch; resolve its archetype to models |
+| `orch update E [--agent-id] [--session-name] [--workspace-id] [--mode] [--model] [--spawned-model ID] [--status] [--pending-message] [--note]` | amend an open entry |
 | `orch permissions [--install]` | check, or grant, the one read a worker needs to start |
 | `orch mint-child E` | allocate a sub-orchestrator's tracker id (idempotent) |
 | `orch close E --consumed "<what happened>"` | delete a consumed entry |
@@ -128,7 +130,7 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch inbox list [--to T] [--all]` | the inbox log, delivered items included |
 | `orch cost [--transcript P \| --for T] [--format json]` | calls, context, cost per call, share by component |
 | `orch budget [--set N]` | show or set this program's spend limit in USD |
-| `orch escalate E --to R --reason S` | raise a lane's model rung, on a signal that is recorded |
+| `orch escalate E [--to R] [--effort L] [--long-context] --scope task\|attempt --reason S --evidence X` | raise a lane's rung, effort or context, on a signal that is recorded |
 | `orch escalate --log [--json]` | the escalations so far, grouped by archetype |
 | `orch wake register --id I --insures E[,E\|external:W] [--kind K]` | bind a heartbeat to the lanes it insures |
 | `orch wake clear --id I [--reason R]` | forget a wake you have deleted at the substrate |
@@ -138,6 +140,7 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
 | `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
+| `orch spawn-guard` | the PreToolUse hook on Paseo spawn, RETUNE and prompt; refuses a spawn that does not match its entry, counts lane rounds |
 | `orch compaction measure\|check\|window` | context floor and safe auto-compact window; `check` is the session-start loop detector; `window` is what a launcher asks |
 | `orch rotate begin\|claim\|complete\|status\|abort` | replace a live agent; see `../rotation.md` for the order and who runs which |
 

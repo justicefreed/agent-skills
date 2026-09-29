@@ -81,6 +81,8 @@ def write_brief(root, model):
             "  - out.txt\n"
             "advances: none\n"
             "consumption: this test reads it\n"
+            "archetype: implementer\n"
+            "subsystems: [tracker, roster]\n"
             "model: %s\n"
             "---\n\n# body\n" % (root, model)
         )
@@ -93,7 +95,12 @@ def write_brief(root, model):
 
 root = make_repo()
 brief = write_brief(root, "advanced")
-code, out, err = run(root, "open", "--brief", brief)
+# Above the implementer's economy start, so it is a pre-dispatch escalation:
+# it needs the signal and a checkable pointer to it (the rest is pinned in
+# test_orch_dispatch.py).
+code, out, err = run(root, "open", "--brief", brief, "--model-reason",
+                     "change spans the tracker and the roster",
+                     "--evidence", "field:subsystems")
 check_same("open with model: advanced succeeds", code, 0)
 check_true("open with model: advanced prints an entry id", out.strip().startswith("e"))
 
@@ -127,7 +134,8 @@ program3 = orch.resolve_program(repo_key3, None)
 tracker3 = orch.tracker_path(repo_key3, program3, "root")
 entry_id = orch.load_tracker(tracker3)["entries"][0]["entry"]
 code, out, err = run(root3, "escalate", entry_id, "--to", "default",
-                       "--reason", "checking the retired rung is refused")
+                       "--reason", "checking the retired rung is refused",
+                       "--scope", "attempt", "--evidence", "field:subsystems")
 check_same("escalate --to default is rejected (nonzero exit)", code == 0, False)
 check_true("escalate --to default names it not a rung", "not a rung" in err)
 

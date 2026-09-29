@@ -45,11 +45,20 @@ REQUIRED_BRIEF_FIELDS = (
     "expected_artifacts",
     "advances",
     "consumption",
+    # Required because it is the one field that decides what a lane costs. As
+    # provenance it was ignored: every lane in one program started a rung above
+    # its archetype, copied from the previous brief's front matter.
+    "archetype",
 )
 OPTIONAL_BRIEF_FIELDS = (
-    "archetype",
     "model",
+    "model_reason",
+    "escalation_evidence",
     "effort",
+    "long_context",
+    "author_family",
+    "reviews",
+    "same_family_ok",
     "mode",
     "progress_artifact",
     "tracker_id",
@@ -129,6 +138,26 @@ WORKER_MODEL_DEFAULT = os.environ.get("ORCH_WORKER_MODEL") or "economy"
 # is the one rung `open` will not accept silently.
 MODEL_FLAG_ABOVE = "economy"
 MODEL_REFUSE_WITHOUT_REASON = {"frontier"}
+
+# Effort, relative to the model's own default, cheapest first. The archetype
+# names its start; above it is an escalation like any rung.
+EFFORT_LEVELS = ("lowest", "one-below-default", "default", "above-default")
+
+# What an escalation is about. A `task` escalation is a property of the work
+# (it really spans subsystems) and carries to a fresh lane opened from the same
+# brief; an `attempt` escalation answers one weak pass and does not -- a fresh
+# agent restarts at the archetype's rung.
+ESCALATION_SCOPES = ("task", "attempt")
+
+# Follow-up prompts to one lane before the spawn guard advises a fresh agent.
+# Each follow-up re-reads the lane's whole history; by the sixth round of one
+# measured fix lane most of every call was earlier rounds' context.
+LANE_ROUNDS_MAX = int(os.environ.get("ORCH_LANE_ROUNDS_MAX", 3))
+
+# Labels `open` prints for the spawn, which is how the spawn guard ties a
+# create_agent call to the entry whose rung it must honour.
+LABEL_ENTRY, LABEL_TRACKER, LABEL_PROGRAM, LABEL_OVERRIDE = (
+    "orch_entry", "orch_tracker", "orch_program", "orch_override")
 
 
 def rung_index(rung: str) -> int:
@@ -640,7 +669,7 @@ def find_entry(data: Dict[str, Any], ref: str) -> Dict[str, Any]:
                     % (ref, data["tracker_id"], known))
 
 
-def entry_summary(entry: Dict[str, Any]) -> str:
+def entry_flags(entry: Dict[str, Any]) -> List[str]:
     flags = []
     if entry["status"] == "pending" and not entry.get("agent_id"):
         flags.append("NO-AGENT-ID")
@@ -662,15 +691,40 @@ def entry_summary(entry: Dict[str, Any]) -> str:
     # looks identical to a lane on the cheapest one until the invoice arrives.
     # So the roster says it out loud, and says whether anyone justified it.
     rung = entry.get("model")
+    # Above the archetype's own start where it is recorded; entries opened
+    # before archetypes set the start fall back to "above economy".
+    start = entry.get("start_rung") or MODEL_FLAG_ABOVE
     if not rung:
         flags.append("NO-MODEL")
-    elif stored_rung_index(rung) > rung_index(MODEL_FLAG_ABOVE):
+    elif stored_rung_index(rung) > rung_index(start):
         # `TIER:frontier` beside `HIGH-TIER:advanced` read as though the lower
         # one were higher. The rung is the fact; whether anyone justified it is
         # the suffix. A legacy "default" entry renders with its translation
         # named, so it never reads as the retired rung.
         flags.append("TIER:" + display_rung(rung) +
                      ("" if entry.get("model_reason") else ":NO-REASON"))
+    # What was spawned against what was decided. The session this guards
+    # decided nothing and spawned the provider default, which happened to sit
+    # on the rung it would have chosen -- so nothing ever looked wrong.
+    spawned = entry.get("spawned_model")
+    if spawned and entry.get("resolved_models") and spawned not in entry["resolved_models"]:
+        flags.append("TIER-MISMATCH:" + spawned)
+    if (entry.get("start_effort") and
+            effort_index(entry.get("effort")) > effort_index(entry["start_effort"])):
+        flags.append("EFFORT:" + str(entry["effort"]))
+    if entry.get("long_context"):
+        flags.append("LONG-CTX")
+    if entry.get("same_family_ok"):
+        flags.append("SAME-FAMILY")
+    if entry.get("spawn_override"):
+        flags.append("SPAWN-OVERRIDE")
+    if int(entry.get("prompts_sent") or 0) > LANE_ROUNDS_MAX:
+        flags.append("ROUNDS:%d" % entry["prompts_sent"])
+    return flags
+
+
+def entry_summary(entry: Dict[str, Any]) -> str:
+    flags = entry_flags(entry)
     return "  ".join(filter(None, [
         entry["entry"],
         entry["status"],
@@ -813,29 +867,107 @@ def cmd_open(args: argparse.Namespace) -> int:
             "--ask-mode-ok if this dispatch genuinely is meant to stop and "
             "wait." % (mode, WORKER_MODE_DEFAULT))
 
-    # Same argument one dial over. A model rung left to the spawn call is a
-    # field that gets forgotten, and forgetting this one does not fail safe
-    # either -- it selects whatever the provider currently calls its default,
-    # which is the most expensive rung anyone reaches by accident.
-    model = str(args.model or fields.get("model") or WORKER_MODEL_DEFAULT).strip().lower()
+    # Same argument one dial over, and the archetype decides it. A rung left
+    # to the spawn call is forgotten; a rung left to the brief is copied from
+    # the last brief. Both happened: every lane in one program started at
+    # `advanced` because the previous brief said so, with a reason written
+    # after the choice. So the archetype's rung is the start and the ceiling,
+    # and anything above it is an escalation made before dispatch -- with a
+    # reason, a checkable pointer to the evidence, and a record in the log.
+    archetype, policy = resolve_archetype(fields["archetype"])
+    start_rung = policy["rung"]
+    start_effort = policy["effort"]
+    model = str(args.model or fields.get("model") or start_rung).strip().lower()
     reject_default_rung(model, "--model")
     if rung_index(model) < 0:
         raise OrchError("--model must be one of %s. Got %r."
                         % (", ".join(MODEL_RUNGS), model))
-    model_reason = (args.model_reason or fields.get("model_reason") or "").strip()
-    if model in MODEL_REFUSE_WITHOUT_REASON and not model_reason:
-        raise OrchError(
-            "model %r is escalation-only: it is the top of the dial, and "
-            "`delegation.md` starts no archetype there.\n"
-            "If this dispatch has earned it, say why: --model-reason \"<the "
-            "observed signal>\". A reason is required because the reasons are "
-            "the evidence -- `orch escalate --log` is how the rung defaults ever "
-            "get corrected by measurement instead of by feel.\n"
-            "Otherwise start at %r and escalate with `orch escalate` on a signal; "
-            "that costs one adjustment, and starting high costs every dispatch."
-            % (model, WORKER_MODEL_DEFAULT))
+    effort = str(args.effort or fields.get("effort") or start_effort).strip().lower()
+    if effort_index(effort) < 0:
+        raise OrchError("effort must be one of %s, relative to the model's own "
+                        "default. Got %r." % (", ".join(EFFORT_LEVELS), effort))
+    long_context = bool(args.long_context or str(fields.get("long_context", "")).strip().lower()
+                        in ("true", "yes", "1"))
+    model_reason = str(args.model_reason or fields.get("model_reason") or "").strip()
     if is_placeholder(model_reason) and model_reason:
         raise OrchError("--model-reason is a placeholder (%r)." % model_reason)
+
+    brief_abs = os.path.abspath(args.brief)
+    raised = []
+    if rung_index(model) > rung_index(start_rung):
+        raised.append(("to", model, rung_index, "rung %s above %s's %s start"
+                       % (model, archetype, start_rung)))
+    if effort_index(effort) > effort_index(start_effort):
+        raised.append(("effort", effort, effort_index, "effort %s above %s's %s"
+                       % (effort, archetype, start_effort)))
+    if long_context:
+        raised.append(("long_context", True, lambda v: 1 if v else 0,
+                       "a long-context variant"))
+    evidence = None
+    carried = []
+    if raised:
+        repo_key_early = repo_identity(args.repo)[0]
+        program_early = args.program or (resolve_program(repo_key_early, None)
+                                         if list_programs(repo_key_early) else None)
+        uncovered = []
+        for field, wanted, order, what in raised:
+            rec = (carried_escalation(repo_key_early, program_early, brief_abs,
+                                      field, wanted, order) if program_early else None)
+            if rec:
+                carried.append(rec)
+            else:
+                uncovered.append(what)
+        if uncovered:
+            if not model_reason:
+                raise OrchError(
+                    "%s is an escalation, and this dispatch has not earned it "
+                    "yet.\nStart at %s / %s effort and escalate on a signal -- "
+                    "that costs one adjustment, and starting high costs every "
+                    "dispatch. If the evidence is visible before dispatch, give "
+                    "it: --model-reason \"<the signal>\" --evidence "
+                    "field:<brief field>|entry:<id>|<path>. If you want a higher "
+                    "start because the brief feels vague, fix the brief."
+                    % ("; ".join(uncovered), start_rung, start_effort))
+            evidence = check_evidence(args.evidence or fields.get("escalation_evidence"),
+                                      fields, "--evidence")
+        elif not model_reason:
+            model_reason = "carried from %s: %s" % (
+                ", ".join(sorted({r.get("entry", "?") for r in carried})),
+                "; ".join(sorted({r.get("reason", "") for r in carried})))
+
+    # Independence. A reviewer's model must come from a different lineage than
+    # the author of what it reviews -- two sizes of one lineage share its blind
+    # spots -- so the author is resolved here and excluded from the rung.
+    exclude: List[str] = []
+    same_family_ok = str(args.same_family_ok or fields.get("same_family_ok") or "").strip()
+    if policy.get("requires_exclude_family") and not same_family_ok:
+        author = str(args.author_family or fields.get("author_family") or "").strip()
+        reviews = str(fields.get("reviews") or "").strip()
+        if not author and reviews:
+            repo_key_r = repo_identity(args.repo)[0]
+            for prog in [p["program"] for p in list_programs(repo_key_r)]:
+                for _, tdata in _read_all_trackers(repo_key_r, prog, True, "root"):
+                    for other in tdata["entries"]:
+                        if other["entry"] == reviews and other.get("spawned_model"):
+                            author = other["spawned_model"]
+            if not author:
+                raise OrchError(
+                    "brief reviews %r, but no open entry by that id recorded a "
+                    "spawned model. Name the author's family instead: "
+                    "author_family: <family> (for example claude-opus)." % reviews)
+        if not author:
+            raise OrchError(
+                "%s needs the author's family, because its independence is the "
+                "point: brief `author_family: <family>` or `reviews: <entry>`, or "
+                "--author-family. If no other lineage is reachable, say so: "
+                "--same-family-ok \"<why>\"." % archetype)
+        exclude = lineages_for(lineage_of_model(author) or author)
+    resolved = rung_models(model, exclude)
+    if not resolved:
+        raise OrchError(
+            "the catalogue has no %s models outside lineage %s. Pass "
+            "--same-family-ok \"<why>\" to review within it, on the record."
+            % (model, ", ".join(exclude)))
 
     if args.program:
         program = args.program
@@ -898,12 +1030,20 @@ def cmd_open(args: argparse.Namespace) -> int:
         "progress_artifact": fields.get("progress_artifact"),
         "agent_id": args.agent_id,
         "session_name": None,
-        "archetype": fields.get("archetype"),
+        "archetype": archetype,
         "review": fields.get("review", "integrator"),
         "review_waiver": fields.get("review_waiver"),
         "model": model,
         "model_reason": model_reason or None,
-        "effort": fields.get("effort"),
+        "start_rung": start_rung,
+        "effort": effort,
+        "start_effort": start_effort,
+        "long_context": long_context,
+        "exclude_lineages": exclude,
+        "same_family_ok": same_family_ok or None,
+        "resolved_models": [row["model"] for row in resolved],
+        "spawned_model": None,
+        "prompts_sent": 0,
         "mode": mode,
         "child_tracker": None,
         "pending_message": None,
@@ -915,19 +1055,44 @@ def cmd_open(args: argparse.Namespace) -> int:
         entry["status"] = "running"
     data["entries"].append(entry)
     save_tracker(path, data)
+    if raised and evidence:
+        append_escalation(repo_key, program, {
+            "at": _now(), "entry": entry_id, "title": entry.get("title"),
+            "archetype": archetype, "brief_path": brief_abs, "at_open": True,
+            "scope": "task", "from": start_rung, "to": model,
+            "effort_from": start_effort, "effort": effort,
+            "long_context": long_context or None,
+            "reason": model_reason, "evidence": evidence,
+        })
 
     print(entry_id)
+    labels = {LABEL_ENTRY: entry_id}
+    if tracker_id != "root":
+        labels[LABEL_TRACKER] = tracker_id
+    if len(list_programs(repo_key)) > 1:
+        labels[LABEL_PROGRAM] = program
+    # Printed, never described: the failure this prevents is a forgotten field,
+    # and a description can be read and still not copied. The rung is resolved
+    # to exact models here because "the advanced rung of the provider's list"
+    # was answered with the provider default, which happened to be advanced --
+    # and on a provider whose default is cheap the same gap under-powers a lane.
+    print("%s %s -> %s / %s effort%s -> spawn one of: %s%s"
+          % (entry_id, archetype, model, effort,
+             " (long context)" if long_context else "",
+             ", ".join(row["model"] for row in resolved),
+             " [excluding lineage %s]" % ", ".join(exclude) if exclude else ""),
+          file=sys.stderr)
+    flags = entry_flags(entry)
+    if flags:
+        print("flags: " + " ".join(flags), file=sys.stderr)
     if not args.agent_id:
-        # The settings fragment is printed rather than described, because the
-        # failure this prevents is a forgotten field and a description is
-        # something you can read and still forget to copy.
-        print("recorded before spawn. Spawn with settings %s and the %s rung of "
-              "the provider's model list -- omit the mode and the worker comes "
-              "up in Always Ask, which halts it on its first tool call; omit the "
-              "model and it comes up on the provider default, which is the "
-              "expensive rung. Then run:\n"
+        print("recorded before spawn. Spawn with provider <provider>/<one of the "
+              "models above>, settings %s and labels %s -- the spawn guard "
+              "refuses any other model, a missing mode (Always Ask halts the "
+              "worker on its first tool call), and an unlabelled spawn while "
+              "entries are pending. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>%s"
-              % (json.dumps({"modeId": mode}), model, entry_id,
+              % (json.dumps({"modeId": mode}), json.dumps(labels), entry_id,
                  "" if entry["workspace_id"] or not lane_has_own_tree(entry, args.repo)
                  else " --workspace-id <id>"),
               file=sys.stderr)
@@ -984,7 +1149,25 @@ def cmd_update(args: argparse.Namespace) -> int:
         if rung_index(rung) < 0:
             raise OrchError("--model must be one of %s" % ", ".join(MODEL_RUNGS))
         entry["model"] = rung
+        if entry.get("resolved_models") is not None:
+            entry["resolved_models"] = [
+                row["model"] for row in rung_models(rung, entry.get("exclude_lineages"))]
         changed.append("model")
+    if getattr(args, "spawned_model", None):
+        # The record the spawn guard writes itself under Claude Code. On a
+        # harness with no PreToolUse hook this is the only way the roster can
+        # compare what was spawned with what was decided.
+        canonical, long_ctx = canonical_spawn_model(args.spawned_model)
+        if canonical is None:
+            raise OrchError(
+                "--spawned-model %r does not resolve to a canonical id. Aliases "
+                "are refused because what they name drifts; pass the provider's "
+                "own id." % args.spawned_model)
+        entry["spawned_model"] = canonical
+        if long_ctx and not entry.get("long_context"):
+            entry["notes"].append({"at": _now(), "note": "spawned long-context "
+                                   "variant without a long-context escalation"})
+        changed.append("spawned_model")
     if args.pending_message is not None:
         entry["pending_message"] = args.pending_message or None
         changed.append("pending_message")
@@ -1785,6 +1968,148 @@ FRONTDESK_MIN_TURNS = int(os.environ.get("ORCH_FRONTDESK_MIN_TURNS", 20))
 FRONTDESK_DISPATCHES = int(os.environ.get("ORCH_FRONTDESK_DISPATCHES", 6))
 
 
+# --------------------------------------------------------------------------- #
+# the archetype catalogue: context-economy's model-options.json, never a copy
+# --------------------------------------------------------------------------- #
+#
+# The archetype decides a lane's starting rung, effort and independence, and a
+# rung decides which models may be spawned for it. Both answers come from the
+# one catalogue `spend models` reads, found the same way `orch cost` finds
+# spend.py. A second table here is how the copies drifted before.
+
+_CATALOGUE: Any = None
+
+
+def catalogue() -> Dict[str, Any]:
+    global _CATALOGUE
+    if _CATALOGUE is None:
+        spend = _spend_module()
+        _CATALOGUE = spend.load_model_options()
+    return _CATALOGUE
+
+
+def resolve_archetype(name: Any) -> Tuple[str, Dict[str, Any]]:
+    archetypes = catalogue()["archetypes"]
+    wanted = str(name or "").strip().lower().replace("_", "-")
+    for canonical, policy in archetypes.items():
+        if wanted == canonical or wanted in policy.get("aliases", []):
+            return canonical, policy
+    raise OrchError(
+        "archetype %r is not in the catalogue. One of: %s.\n"
+        "The archetype sets the lane's starting rung, effort and independence "
+        "-- see the delegating-economically skill's references/rungs.md."
+        % (name, ", ".join(sorted(archetypes))))
+
+
+def effort_index(effort: Any) -> int:
+    try:
+        return EFFORT_LEVELS.index(str(effort or "").strip().lower())
+    except ValueError:
+        return -1
+
+
+def rung_models(rung: str, exclude: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """The catalogue's models for a rung, preferred first, minus excluded lineages."""
+    spend = _spend_module()
+    options = catalogue()
+    excluded = set(exclude or [])
+    rows = [row for row in options["models"]
+            if rung in row.get("rungs", []) and spend.lineage_of(row) not in excluded]
+    rows.sort(key=lambda row: spend._preference_rank(options, rung, row["id"]))
+    return [{"model": row["id"], "provider": row.get("provider"),
+             "lineage": spend.lineage_of(row)} for row in rows]
+
+
+def lineages_for(name: str) -> List[str]:
+    return sorted(_spend_module().excluded_lineages(catalogue(), name))
+
+
+def lineage_of_model(model_id: Optional[str]) -> Optional[str]:
+    spend = _spend_module()
+    for row in catalogue()["models"]:
+        if row.get("id") == model_id:
+            return spend.lineage_of(row)
+    return None
+
+
+_CONTEXT_SUFFIX = re.compile(r"\[[^\]]*\]$")
+
+
+def canonical_spawn_model(value: Any) -> Tuple[Optional[str], bool]:
+    """(canonical id, long-context?) for a spawn's model string.
+
+    Accepts a canonical id, a route name (`cursor/claude-4.6-sonnet`), and a
+    Paseo `provider/model` pair (`claude/claude-opus-5-5`). A `[1m]`-style
+    suffix is the long-context variant, reported separately because it is its
+    own dial. An alias (`opus`) resolves to None: which model an alias names
+    drifts, which is exactly the failure this guards.
+    """
+    text = str(value or "").strip()
+    long_context = bool(_CONTEXT_SUFFIX.search(text))
+    text = _CONTEXT_SUFFIX.sub("", text)
+    registry = _spend_module().default_rates().registry
+    for candidate in (text, text.split("/", 1)[-1]):
+        resolved = registry.resolve_route_name(candidate)
+        if resolved:
+            return resolved[1], long_context
+    return None, long_context
+
+
+def check_evidence(value: Any, fields: Dict[str, Any], label: str) -> str:
+    """An escalation's evidence, which must be checkable rather than prose.
+
+    `field:<name>` -- a brief front matter field that must be non-empty (the
+    brief *names* the subsystems a change spans); `entry:<id>` -- a lane whose
+    outcome is the signal; otherwise a path that must exist (a report, a log).
+    Nothing here can tell a reason written after the fact from one written
+    before, but a pointer can be audited and a sentence cannot.
+    """
+    text = str(value or "").strip()
+    if not text or is_placeholder(text):
+        raise OrchError(
+            "%s is required: field:<brief field>, entry:<id>, or a path to the "
+            "report or log that shows the signal." % label)
+    if text.startswith("field:"):
+        name = text[len("field:"):].strip()
+        got = fields.get(name)
+        empty = (not got) or (isinstance(got, str) and is_placeholder(got))
+        if empty:
+            raise OrchError(
+                "%s points at brief field %r, which is missing or empty. Name "
+                "the subsystems, dependent steps or targets in the brief itself."
+                % (label, name))
+        return text
+    if re.match(r"^entry:e\d+$", text):
+        return text
+    if not os.path.exists(os.path.expanduser(text)):
+        raise OrchError(
+            "%s %r is neither field:<name>, entry:<id>, nor an existing path."
+            % (label, text))
+    return os.path.abspath(os.path.expanduser(text))
+
+
+def append_escalation(repo_key: str, program: str, record: Dict[str, Any]) -> None:
+    records = load_escalations(repo_key, program)
+    records.append(record)
+    spath = escalations_path(repo_key, program)
+    os.makedirs(os.path.dirname(spath), exist_ok=True)
+    with open(spath, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, indent=2)
+        fh.write("\n")
+
+
+def carried_escalation(repo_key: str, program: str, brief_path: str,
+                       field: str, wanted: str, order) -> Optional[Dict[str, Any]]:
+    """A task-scope escalation for this brief that already covers `wanted`."""
+    for rec in reversed(load_escalations(repo_key, program)):
+        if rec.get("brief_path") != brief_path or rec.get("scope") != "task":
+            continue
+        got = rec.get(field)
+        if got is not None and order(got) >= order(wanted):
+            return rec
+    return None
+
+
 def load_rates(repo_key: Optional[str], program: Optional[str]) -> Any:
     """The shared table, with a program-local `rates.json` layered on top.
 
@@ -2255,76 +2580,110 @@ def cmd_escalate(args: argparse.Namespace) -> int:
             group = by_archetype[archetype]
             print("\n  %s — %d" % (archetype, len(group)))
             for rec in group:
-                print("    %s  %s -> %s  %s"
+                print("    %s  %s -> %s  %-7s %s%s"
                       % (str(rec.get("at", ""))[:10], rec.get("from", "?"),
-                         rec.get("to", "?"), rec.get("reason", "")))
+                         rec.get("to", "?"),
+                         ("open" if rec.get("at_open") else rec.get("scope") or "-"),
+                         rec.get("reason", ""),
+                         ("  [%s]" % rec["evidence"]) if rec.get("evidence") else ""))
         print("\nAn archetype that escalates every time is a wrong default, not "
-              "a run of bad luck. Fix its row in delegation.md.")
+              "a run of bad luck. Fix its row in the catalogue (rungs.md and "
+              "model-options.json).")
         return 0
 
     if not args.entry:
         raise OrchError("name an entry to escalate, or pass --log to read the "
                         "record")
-    if not args.to:
-        raise OrchError("--to <rung> is required; one of %s"
+    if not (args.to or args.effort or args.long_context):
+        raise OrchError("say what to raise: --to <rung> (one of %s), --effort "
+                        "<level>, and/or --long-context"
                         % ", ".join(MODEL_RUNGS))
+    target = args.to.strip().lower() if args.to else None
+    if target is not None:
+        reject_default_rung(target, "--to")
+        if rung_index(target) < 0:
+            raise OrchError("--to must be one of %s. Got %r."
+                            % (", ".join(MODEL_RUNGS), args.to))
+    effort = args.effort.strip().lower() if args.effort else None
+    if effort is not None and effort_index(effort) < 0:
+        raise OrchError("--effort must be one of %s." % ", ".join(EFFORT_LEVELS))
     reason = (args.reason or "").strip()
     if not reason or is_placeholder(reason):
         raise OrchError(
             "--reason is required, and it is not paperwork. Escalate on an "
-            "observed signal -- the archetype's failure signature in "
-            "`delegation.md`, a refuted premise, a worker that says it cannot "
-            "make its guard go red -- never on a hunch that the task feels "
-            "hard.\nThe reasons are the only evidence that ever corrects a rung "
-            "default; `orch escalate --log` is where they are read back.")
-
-    target = args.to.strip().lower()
-    reject_default_rung(target, "--to")
-    if rung_index(target) < 0:
-        raise OrchError("--to must be one of %s. Got %r."
-                        % (", ".join(MODEL_RUNGS), args.to))
+            "observed signal -- the archetype's failure signature in the "
+            "catalogue (rungs.md), a refuted premise, a worker that says it "
+            "cannot make its guard go red -- never on a hunch that the task "
+            "feels hard.\nThe reasons are the only evidence that ever corrects "
+            "a rung default; `orch escalate --log` is where they are read back.")
+    if args.scope not in ESCALATION_SCOPES:
+        raise OrchError(
+            "--scope is required: `task` when the signal is about the work (it "
+            "spans subsystems; a fresh lane from this brief keeps the rung) or "
+            "`attempt` when it is about one weak pass (a fresh lane restarts at "
+            "the archetype's rung).")
 
     path = tracker_path(repo_key, program, args.tracker)
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
+    brief = entry.get("brief_path")
+    fields = parse_front_matter(brief) if brief and os.path.exists(brief) else {}
+    evidence = check_evidence(args.evidence, fields, "--evidence")
     current = entry.get("model") or WORKER_MODEL_DEFAULT
+    current_effort = entry.get("effort")
 
-    if rung_index(target) <= stored_rung_index(current):
+    if target is not None and rung_index(target) <= stored_rung_index(current):
         raise OrchError(
             "%s is already on %r, which is not below %r. `escalate` only ever "
             "raises -- it is the escape hatch, not the model field.\n"
             "To correct a mis-recorded rung use `orch update %s --model %s`."
             % (entry["entry"], display_rung(current), target, entry["entry"], target))
+    if effort is not None and effort_index(effort) <= effort_index(current_effort):
+        raise OrchError("%s effort is already %r; `escalate` only raises."
+                        % (entry["entry"], current_effort))
 
-    entry["model"] = target
+    changes = []
+    if target is not None:
+        entry["model"] = target
+        if entry.get("resolved_models") is not None:
+            entry["resolved_models"] = [
+                row["model"] for row in rung_models(target, entry.get("exclude_lineages"))]
+        changes.append("%s -> %s" % (current, target))
+    if effort is not None:
+        entry["effort"] = effort
+        changes.append("effort %s -> %s" % (current_effort, effort))
+    if args.long_context:
+        entry["long_context"] = True
+        changes.append("long context")
     entry["model_reason"] = reason
-    entry["notes"].append({"at": _now(),
-                           "note": "escalated %s -> %s: %s" % (current, target, reason)})
+    entry["notes"].append({"at": _now(), "note": "escalated %s (%s): %s"
+                           % (", ".join(changes), args.scope, reason)})
     entry["updated_at"] = _now()
     save_tracker(path, data)
 
-    records = load_escalations(repo_key, program)
-    records.append({
+    append_escalation(repo_key, program, {
         "at": _now(),
         "entry": entry["entry"],
         "title": entry.get("title"),
         "archetype": entry.get("archetype"),
+        "brief_path": brief,
+        "scope": args.scope,
         "from": current,
-        "to": target,
+        "to": target or current,
+        "effort_from": current_effort,
+        "effort": effort or current_effort,
+        "long_context": True if args.long_context else None,
         "reason": reason,
+        "evidence": evidence,
     })
-    spath = escalations_path(repo_key, program)
-    os.makedirs(os.path.dirname(spath), exist_ok=True)
-    with open(spath, "w", encoding="utf-8") as fh:
-        json.dump(records, fh, indent=2)
-        fh.write("\n")
 
-    print("%s escalated %s -> %s" % (entry["entry"], current, target))
-    print("Recorded. Now RETUNE the running agent to the %s rung of the "
-          "provider's model list -- this wrote down the decision, it did not "
-          "reach the worker. A tracker that says %s while the agent still runs "
-          "on %s is worse than one that said nothing."
-          % (target, target, current), file=sys.stderr)
+    print("%s escalated %s (%s)" % (entry["entry"], ", ".join(changes), args.scope))
+    print("Recorded. Now RETUNE the running agent to one of: %s -- this wrote "
+          "down the decision, it did not reach the worker, and the spawn guard "
+          "refuses any other model. A tracker that says %s while the agent still "
+          "runs on %s is worse than one that said nothing."
+          % (", ".join(entry.get("resolved_models") or ["the %s rung" % entry["model"]]),
+             entry["model"], current), file=sys.stderr)
     return 0
 
 
@@ -2620,6 +2979,199 @@ def cmd_guard(args: argparse.Namespace) -> int:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "additionalContext": text}}))
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# spawn guard: what is spawned must be what was decided
+# --------------------------------------------------------------------------- #
+#
+# `open` decides a lane's rung and resolves it to models; nothing used to check
+# the spawn against that decision. One program opened every lane, then spawned
+# each on the provider default -- which happened to be the advanced rung, so
+# the gap never showed. This PreToolUse hook closes it: a Paseo create_agent
+# must carry the entry's label, a model the entry resolved to, and the mode it
+# recorded; a RETUNE may not raise the model past what `escalate` recorded, or
+# clear it onto the provider default; and follow-up prompts to one lane are
+# counted, because each re-reads the lane's whole history.
+
+SPAWN_TOOLS = ("mcp__paseo__create_agent", "mcp__paseo__update_agent",
+               "mcp__paseo__send_agent_prompt")
+
+
+def _deny(reason: str) -> int:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": reason}}))
+    return 0
+
+
+def _advise(text: str) -> int:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "additionalContext": text}}))
+    return 0
+
+
+def _entry_by_agent(repo_key: str, agent_id: str
+                    ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    for prog in [p["program"] for p in list_programs(repo_key)]:
+        pdir = program_dir(repo_key, prog)
+        for name in tracker_names(pdir):
+            path = os.path.join(pdir, name + ".json")
+            data = load_tracker(path)
+            for entry in data["entries"]:
+                if entry.get("agent_id") == agent_id:
+                    return path, data, entry
+    return None
+
+
+def _check_spawn_model(entry: Dict[str, Any], value: Any, verb: str) -> Optional[str]:
+    """A refusal reason, or None when the model honours the entry's decision."""
+    canonical, long_context = canonical_spawn_model(value)
+    allowed = entry.get("resolved_models")
+    if long_context and not entry.get("long_context"):
+        return ("%s %s asks for a long-context variant (%s), which is its own "
+                "dial and escalation-only: `orch escalate %s --long-context "
+                "--scope task|attempt --reason ... --evidence ...` if the working "
+                "set genuinely does not fit." % (verb, entry["entry"], value, entry["entry"]))
+    if not allowed:
+        return None
+    if canonical is None:
+        return ("%s %s names model %r, which does not resolve to a canonical id. "
+                "An alias is refused because what it names drifts. Use one of: %s."
+                % (verb, entry["entry"], value, ", ".join(allowed)))
+    if canonical not in allowed:
+        return ("%s %s with %s, but the entry is on the %s rung%s, which resolves "
+                "to: %s. To go higher, `orch escalate %s` on a recorded signal "
+                "first; to spawn it anyway, label %s: \"<why>\" and it is flagged "
+                "on the roster." % (
+                    verb, entry["entry"], canonical, entry.get("model"),
+                    (" excluding lineage %s" % ", ".join(entry["exclude_lineages"]))
+                    if entry.get("exclude_lineages") else "",
+                    ", ".join(allowed), entry["entry"], LABEL_OVERRIDE))
+    return None
+
+
+def cmd_spawn_guard(args: argparse.Namespace) -> int:
+    """Fail open on anything unexpected, and never exit 2.
+
+    Claude Code reads a PreToolUse exit 2 as a blocking refusal, and `main`
+    maps OrchError to 2 -- so an unreadable tracker would otherwise refuse
+    every spawn. Refusal is only ever the explicit `deny` below.
+    """
+    try:
+        return _spawn_guard(args)
+    except Exception as exc:  # the guard's own failure is not the lane's
+        print("orch spawn-guard: skipped (%s)" % exc, file=sys.stderr)
+        return 0
+
+
+def _spawn_guard(args: argparse.Namespace) -> int:
+    payload = hook_payload()
+    name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if name not in SPAWN_TOOLS or not isinstance(tool_input, dict):
+        return 0
+    cwd = payload.get("cwd")
+    try:
+        repo_key, _, _ = repo_identity(cwd if isinstance(cwd, str) else args.repo)
+    except OrchError:
+        return 0
+    if not list_programs(repo_key):
+        return 0
+
+    if name == "mcp__paseo__create_agent":
+        labels = tool_input.get("labels") or {}
+        ref = str(labels.get(LABEL_ENTRY) or "").strip()
+        if ref.lower() == "none":
+            return 0
+        if not ref:
+            pending = []
+            for prog in [p["program"] for p in list_programs(repo_key)]:
+                for _, tdata in _read_all_trackers(repo_key, prog, True, "root"):
+                    pending += [e["entry"] for e in tdata["entries"]
+                                if e["status"] == "pending" and not e.get("agent_id")]
+            if not pending:
+                return 0
+            return _deny(
+                "entries %s are recorded and not yet spawned, and this spawn "
+                "names none of them. Label it with the entry `orch open` printed "
+                "(labels {\"%s\": \"eN\"}), or %s: \"none\" for an agent "
+                "that is not a lane." % (", ".join(pending), LABEL_ENTRY, LABEL_ENTRY))
+        # A label naming no entry is the orchestrator's mistake and is refused;
+        # a tracker that cannot be read is the guard's, and fails open above.
+        program = resolve_program(repo_key, labels.get(LABEL_PROGRAM))
+        path = tracker_path(repo_key, program, labels.get(LABEL_TRACKER) or "root")
+        data = load_tracker(path)
+        try:
+            entry = find_entry(data, ref)
+        except OrchError as exc:
+            return _deny("spawn labelled %s=%s, but %s" % (LABEL_ENTRY, ref, exc))
+        settings = tool_input.get("settings") or {}
+        mode = settings.get("modeId")
+        if not mode or mode != entry.get("mode"):
+            return _deny(
+                "%s was recorded with mode %r and this spawn sets %r. An omitted "
+                "mode comes up as Always Ask and halts the worker on its first "
+                "tool call; pass settings {\"modeId\": %s}."
+                % (entry["entry"], entry.get("mode"), mode, json.dumps(entry.get("mode"))))
+        override = str(labels.get(LABEL_OVERRIDE) or "").strip()
+        refusal = _check_spawn_model(entry, tool_input.get("provider"), "spawning")
+        if refusal and not (override and not is_placeholder(override)):
+            return _deny(refusal)
+        canonical, _ = canonical_spawn_model(tool_input.get("provider"))
+        entry["spawned_model"] = canonical or str(tool_input.get("provider"))
+        entry["spawned_thinking"] = settings.get("thinkingOptionId")
+        if refusal:
+            entry["spawn_override"] = override
+            entry["notes"].append({"at": _now(), "note": "spawn override: %s" % override})
+        entry["updated_at"] = _now()
+        save_tracker(path, data)
+        return 0
+
+    agent_id = str(tool_input.get("agentId") or "")
+    found = _entry_by_agent(repo_key, agent_id) if agent_id else None
+    if not found:
+        return 0
+    path, data, entry = found
+
+    if name == "mcp__paseo__update_agent":
+        settings = tool_input.get("settings") or {}
+        if "model" not in settings:
+            if settings.get("thinkingOptionId"):
+                entry["spawned_thinking"] = settings["thinkingOptionId"]
+                save_tracker(path, data)
+            return 0
+        if settings["model"] is None:
+            return _deny(
+                "clearing %s's model puts the lane on the provider default, which "
+                "is whatever the provider currently selects -- the most expensive "
+                "rung anyone reaches by accident. Set one of: %s."
+                % (entry["entry"], ", ".join(entry.get("resolved_models") or [])))
+        refusal = _check_spawn_model(entry, settings["model"], "retuning")
+        if refusal:
+            return _deny(refusal)
+        canonical, _ = canonical_spawn_model(settings["model"])
+        entry["spawned_model"] = canonical or str(settings["model"])
+        if settings.get("thinkingOptionId"):
+            entry["spawned_thinking"] = settings["thinkingOptionId"]
+        entry["updated_at"] = _now()
+        save_tracker(path, data)
+        return 0
+
+    # send_agent_prompt: a follow-up round to a running lane.
+    entry["prompts_sent"] = int(entry.get("prompts_sent") or 0) + 1
+    save_tracker(path, data)
+    if entry["prompts_sent"] <= LANE_ROUNDS_MAX:
+        return 0
+    return _advise(
+        "LANE ROUNDS -- this is follow-up %d to %s, and every follow-up re-reads "
+        "the lane's whole history, so each round costs more than the last. A "
+        "fresh agent from the brief plus its progress artifact pays one ramp-up "
+        "and then runs cheap: `orch open` the same brief again, spawn from it, "
+        "and `orch close` this entry. A task-scope escalation carries to the "
+        "fresh lane; an attempt-scope one does not. "
+        "If this round is genuinely small, carry on."
+        % (entry["prompts_sent"], entry["entry"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -4392,13 +4944,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="dispatch past the %d-lane ceiling (ORCH_FANOUT_MAX)"
                          % FANOUT_MAX)
     sp.add_argument("--model", help="model RUNG, not a name: one of %s "
-                                    "(default: %s; brief front matter `model` "
-                                    "overrides that)"
-                                    % (", ".join(MODEL_RUNGS), WORKER_MODEL_DEFAULT))
+                                    "(default: the archetype's start; brief "
+                                    "front matter `model` overrides that)"
+                                    % ", ".join(MODEL_RUNGS))
+    sp.add_argument("--effort", help="relative effort, one of %s (default: the "
+                                     "archetype's)" % ", ".join(EFFORT_LEVELS))
+    sp.add_argument("--long-context", action="store_true",
+                    help="spawn a long-context variant; an escalation like any")
     sp.add_argument("--model-reason",
-                    help="why this dispatch needs a rung above %s; required for "
-                         "%s" % (MODEL_FLAG_ABOVE,
-                                 ", ".join(sorted(MODEL_REFUSE_WITHOUT_REASON))))
+                    help="the signal that justifies starting above the "
+                         "archetype's rung or effort")
+    sp.add_argument("--evidence",
+                    help="where that signal is: field:<brief field>, "
+                         "entry:<id>, or a path")
+    sp.add_argument("--author-family",
+                    help="for a reviewer: the family of what it reviews, whose "
+                         "whole lineage is excluded")
+    sp.add_argument("--same-family-ok", metavar="REASON",
+                    help="let a reviewer share the author's lineage, on record")
     common(sp)
     sp.set_defaults(func=cmd_open)
 
@@ -4413,6 +4976,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model",
                     help="correct a mis-recorded rung, one of %s; to RAISE one, "
                          "use `orch escalate`" % ", ".join(MODEL_RUNGS))
+    sp.add_argument("--spawned-model",
+                    help="record the model actually spawned, where no spawn "
+                         "guard hook ran")
     sp.add_argument("--status", choices=STATUSES)
     sp.add_argument("--pending-message",
                     help="message to deliver when the worker next goes idle")
@@ -4560,6 +5126,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--format", default="hook", choices=("hook",))
     sp.set_defaults(func=cmd_guard)
 
+    sp = sub.add_parser("spawn-guard",
+                        help="PreToolUse hook: a spawn or RETUNE must honour "
+                             "its entry's recorded rung and mode")
+    sp.add_argument("--format", default="hook", choices=("hook",))
+    sp.set_defaults(func=cmd_spawn_guard)
+
     sp = sub.add_parser(
         "statusline",
         help="one line of program status for a harness status bar")
@@ -4694,7 +5266,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("entry", nargs="?", help="entry id or agent id")
     sp.add_argument("--to", help="the rung to raise to, one of %s"
                                  % ", ".join(MODEL_RUNGS))
+    sp.add_argument("--effort", help="the effort to raise to, one of %s"
+                                     % ", ".join(EFFORT_LEVELS))
+    sp.add_argument("--long-context", action="store_true",
+                    help="allow the long-context variant of the lane's model")
     sp.add_argument("--reason", help="the observed signal; required, and kept")
+    sp.add_argument("--evidence",
+                    help="where the signal is: field:<brief field>, entry:<id>, "
+                         "or a path; required")
+    sp.add_argument("--scope", choices=ESCALATION_SCOPES,
+                    help="task: carries to a fresh lane from this brief; "
+                         "attempt: answers one weak pass and does not; required")
     sp.add_argument("--log", action="store_true",
                     help="read the record back, grouped by archetype")
     sp.add_argument("--json", action="store_true")

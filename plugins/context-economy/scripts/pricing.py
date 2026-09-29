@@ -816,10 +816,57 @@ def _load_options(args: argparse.Namespace) -> Dict[str, Any]:
     return load_json(Path(args.options).expanduser() if args.options else default_options_path())
 
 
+def rung_order_warnings(options: Dict[str, Any], snapshot: Dict[str, Any]) -> List[str]:
+    """Where a lineage's cheaper rung is not cheaper, field by field.
+
+    The economy anchor rests on one rung down costing less for the same
+    tokens. Headline input/output ordering is not enough -- cache reads are the
+    majority of a real bill and their ordering differs -- so every rate field
+    both rows share is compared, per route. `frontier` is skipped: it is a
+    designation, and may deliberately name an `advanced` model.
+    """
+    ladder = ("minimal", "economy", "advanced")
+    preferences = options.get("preferences") or {}
+
+    def pick(rung: str, lineage: str) -> Optional[str]:
+        tagged = [row for row in options.get("models", []) if rung in row.get("rungs", [])]
+        ordered = sorted(tagged, key=lambda row: (
+            preferences.get(rung, []).index(row["id"])
+            if row["id"] in preferences.get(rung, []) else len(tagged)))
+        for row in ordered:
+            if (row.get("lineage") or row.get("family")) == lineage:
+                return row["id"]
+        return None
+
+    rates: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (row["route"], row["model"]): row["rates"] for row in snapshot.get("rates", [])}
+    lineages = sorted({row.get("lineage") or row.get("family")
+                       for row in options.get("models", [])} - {None})
+    warnings = []
+    for lineage in lineages:
+        for lower, higher in zip(ladder, ladder[1:]):
+            cheap, dear = pick(lower, lineage), pick(higher, lineage)
+            if not cheap or not dear:
+                continue
+            for (route, model), cheap_rates in sorted(rates.items()):
+                if model != cheap or (route, dear) not in rates:
+                    continue
+                for field, value in sorted(cheap_rates.items()):
+                    other = rates[(route, dear)].get(field)
+                    if value is None or other is None:
+                        continue
+                    if Decimal(str(value)) > Decimal(str(other)):
+                        warnings.append(
+                            "%s %s costs more than %s %s for %s on %s (%s > %s)"
+                            % (lower, cheap, higher, dear, field, route, value, other))
+    return warnings
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     path, snapshot, warnings = load_snapshot(args.snapshot)
     options = _load_options(args)
     validate_options(options, Registry(snapshot))
+    warnings = list(warnings) + rung_order_warnings(options, snapshot)
     print(json.dumps({"snapshot": str(path), "snapshot_id": snapshot["snapshot_id"],
                       "options_schema_version": options["schema_version"],
                       "valid": True, "warnings": warnings}, indent=2))

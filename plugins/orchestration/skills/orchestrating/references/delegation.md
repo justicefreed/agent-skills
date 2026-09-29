@@ -139,18 +139,48 @@ there; it is a hang.
 `plan` and `ask` unless you pass `--ask-mode-ok`, because those stop and wait. `ORCH_WORKER_MODE`
 changes the default it fills in. `orch roster` flags a recorded blocking mode as `ASK-MODE`.
 
-**The model rung is decided in the same place, for the same reason.** A dial left to the spawn call
-is a dial that gets forgotten, and neither of these fails safe when forgotten: omitting the mode
-selects Always Ask, and omitting the model selects whatever the provider currently calls its default
-— the most expensive rung anyone reaches by accident. So `orch open` fills in the rung too
-(`--model`, or `model:` in the brief's front matter, default `economy` via `ORCH_WORKER_MODEL`),
-names it in the same printed fragment, and **refuses `frontier` without `--model-reason`**, since no
-archetype starts there. `roster` prints `TIER:<rung>` on anything above `economy`, with
-a `:NO-REASON` suffix when nobody justified it — spend, unlike a stall, never announces itself, and a
-lane on the top rung looks exactly like a lane on the cheapest one until the invoice arrives.
+**The model rung is decided in the same place, for the same reason — and the archetype decides it.**
+A dial left to the spawn call gets forgotten, and a dial left to the brief gets copied from the last
+brief; neither fails safe. Omitting the mode selects Always Ask, and omitting the model selects the
+provider default — which in one program happened to be the advanced rung, so every lane ran a rung
+high and nothing looked wrong. So `orch open`:
 
-Pass the rung as a **name resolved against the provider's live model list at spawn time**. Never
-write a model name into a brief: it is wrong the next time the provider ships, and `orch` rejects it.
+- **requires `archetype:`** and takes the lane's rung and effort from it. A brief's `model:` or
+  `effort:` may only restate or lower that start;
+- **treats anything above the start as an escalation made before dispatch**, and refuses it without
+  `--model-reason "<the signal>"` *and* `--evidence` — `field:<brief field>` (the brief itself names
+  the subsystems or dependent steps, and the field must be non-empty), `entry:<id>`, or a path to the
+  report that shows the signal. It is logged like any escalation, so `escalate --log` shows which
+  archetypes start high;
+- **resolves the rung to exact models** from the catalogue and prints them, with the settings and
+  labels to spawn with. For a `reviewer` it first excludes the author's whole lineage — from
+  `author_family:`, or from what the `reviews:` entry actually spawned — unless `--same-family-ok
+  "<why>"` puts the exception on record;
+- **prints the roster's flags for the new entry at once**, rather than waiting for someone to run
+  `roster`.
+
+The **long-context variant** (`[1m]` and the like) is its own dial with its own price: `--long-context`
+at open, or `escalate --long-context`, under the same reason-and-evidence rule.
+
+**The spawn guard checks the spawn against the decision.** A PreToolUse hook on Paseo's
+`create_agent`, `update_agent` and `send_agent_prompt` refuses a spawn labelled with an entry whose
+model is not one the entry resolved to, whose mode differs from the recorded one, or that asks for a
+long-context variant nobody escalated; refuses an unlabelled spawn while entries are pending (label
+`orch_entry: none` for an agent that is not a lane); refuses a RETUNE above the recorded rung or one
+that clears the model onto the provider default; and records what was spawned. A mismatch that is
+genuinely right goes through with label `orch_override: "<why>"` and shows on the roster. Where no
+hook runs, record the spawn with `orch update <e> --spawned-model <id>`; `roster` flags
+`TIER-MISMATCH` either way.
+
+**A lane is not free to reuse.** Every follow-up prompt re-reads the lane's whole history, so the
+guard counts them and, past `ORCH_LANE_ROUNDS_MAX` (default 3), advises a fresh agent from the brief
+and its progress artifact — `orch open` the same brief again, spawn from it, and `orch close` the old
+entry; `roster` shows `ROUNDS:<n>`. (Replacing the *orchestrator* is a different procedure:
+`rotation.md`.) One ramp-up is cheaper than a
+sixth round that is mostly the first five.
+
+Never write a model name into a brief: it is wrong the next time the provider ships, and `orch`
+rejects it. The names live in the catalogue, dated, and `open` reads them there.
 
 **Mode alone is not enough.** A brief lives outside the worker's worktree, and so does the skill's
 own `references/` corpus; in Claude Code a read outside the working directory prompts under *every*
@@ -175,8 +205,14 @@ Then:
   this task feels hard. Then run it through the tracker, which demands the signal in writing:
 
   ```bash
-  orch escalate e1 --to advanced --reason "first pass came back with the scope wrong"
+  orch escalate e1 --to advanced --scope attempt \
+    --reason "first pass came back with the scope wrong" --evidence entry:e1
   ```
+
+  **Say what the signal is about.** `--scope task` means the work itself needs the rung — it spans
+  subsystems — and a fresh lane opened from the same brief keeps it without re-arguing. `--scope
+  attempt` answers one weak pass; a fresh lane restarts at the archetype's rung, which is usually
+  what a rotation wants. `--effort` and `--long-context` escalate the other two dials the same way.
 
   `escalate` only ever raises; to fix a *mis-recorded* rung use `orch update e1 --model <rung>`. The
   reason is mandatory and the record outlives the entry, because the reasons are the only thing that

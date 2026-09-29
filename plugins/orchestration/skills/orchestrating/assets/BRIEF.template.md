@@ -7,9 +7,14 @@ expected_artifacts:
 advances: [<plan item ids>]        # or the literal: none
 consumption: <what the orchestrator will do with the result — this is the delete condition>
 progress_artifact: <path the worker appends progress to — REQUIRED for long tasks>
-archetype: <implementer|analyst|reviewer|verifier|verifier-low-risk|doc-writer|inventory|integrator>   # sets rung and family: `spend models --archetype <name>`
-# model: <minimal|economy|advanced|frontier>  # optional RUNG, never a name; falls back to economy
-# model_reason: <the observed signal>         # required for frontier
+archetype: <implementer|analyst|reviewer|verifier|verifier-low-risk|doc-writer|inventory|integrator>   # REQUIRED: sets the start rung, effort and independence
+# model: <minimal|economy|advanced|frontier>  # optional RUNG, never a name; defaults to the archetype's
+# effort: <lowest|one-below-default|default|above-default>   # optional; defaults to the archetype's
+# model_reason: <the observed signal>         # required for any rung or effort above the archetype's
+# escalation_evidence: <field:NAME|entry:eN|path>   # required with model_reason; field: must be non-empty
+# subsystems: [<a>, <b>]                      # e.g. what escalation_evidence: field:subsystems points at
+# author_family: <family of what is reviewed> # reviewer only; or reviews: <entry id>
+# same_family_ok: <why no other lineage>      # reviewer only; waives the lineage rule, on record
 review: <integrator|in-brief|none>  # who reads the diff before it lands; default integrator
 # review_waiver: <why no second reader is needed>   # required only with review: none
 # tracker_id: <root.N>             # only when this worker is itself an orchestrator

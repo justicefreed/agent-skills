@@ -27,16 +27,16 @@ expected_artifacts:                              # required, non-empty
 advances: [3.1, 3.4, 3.7]                        # required; or the literal `none`
 consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
-archetype: integrator                            # sets rung/family via `spend models --archetype`
+archetype: integrator                            # required; sets the start rung, effort, independence
 mode: auto                                       # optional; session mode to spawn with
-model: economy                                   # optional; RUNG, not a name; default economy
+model: economy                                   # optional; RUNG, not a name; default the archetype's
 review: integrator                               # optional; integrator | in-brief | none
 tracker_id: root.1                                # only for a sub-orchestrator
 plan_doc: docs/migration-2026-09/PLAN.md          # optional
 ---
 ```
 
-Why these five are required and nothing else is:
+Why these six are required and nothing else is:
 
 - **`worktree`** — isolation checks, and knowing whose uncommitted files are whose.
 - **`expected_artifacts`** — the field that lets a fresh orchestrator tell a legitimate dirty file
@@ -46,6 +46,9 @@ Why these five are required and nothing else is:
 - **`consumption`** — the **delete condition**. Without it nobody can tell when the entry is done,
   which is why `orch close` demands a matching statement.
 - **`title`** — free, and it is what the roster prints.
+- **`archetype`** — the field that decides what the lane costs: `open` takes the starting rung and
+  effort from it and refuses anything higher without an escalation. As provenance it was ignored,
+  and rungs were copied from the previous brief instead (`delegation.md` §4).
 
 `orch` rejects placeholders (`unknown`, `tbd`, `n/a`, …). A required field answered with a
 placeholder is an omission wearing a costume, and accepting one turns validation into ritual.

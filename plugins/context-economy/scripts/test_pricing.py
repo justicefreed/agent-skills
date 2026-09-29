@@ -247,6 +247,19 @@ _, shipped, _ = pricing.load_snapshot()
 shipped_options = pricing.load_json(pricing.default_options_path())
 pricing.validate_options(shipped_options, pricing.Registry(shipped))
 check("shipped options validate against the shipped registry", True, True)
+check("shipped map has no rung whose cheaper model costs more",
+      pricing.rung_order_warnings(shipped_options, shipped), [])
+_order_options = {"preferences": {"economy": ["cheap"], "advanced": ["dear"]},
+                  "models": [{"id": "cheap", "lineage": "x", "rungs": ["economy"]},
+                             {"id": "dear", "lineage": "x", "rungs": ["advanced"]},
+                             {"id": "other", "lineage": "y", "rungs": ["advanced"]}]}
+_order_snapshot = {"rates": [
+    {"route": "r", "model": "cheap", "rates": {"input": "1.00", "cache_read": "0.50"}},
+    {"route": "r", "model": "dear", "rates": {"input": "4.00", "cache_read": "0.20"}},
+    {"route": "r", "model": "other", "rates": {"input": "0.10", "cache_read": "0.01"}}]}
+check("an economy model dearer on cache reads than its lineage's advanced is warned",
+      pricing.rung_order_warnings(_order_options, _order_snapshot),
+      ["economy cheap costs more than advanced dear for cache_read on r (0.50 > 0.20)"])
 haiku = pricing.eligibility(shipped, shipped_options, "claude-haiku-4-5-20251001",
                             "claude-opus-5-5", 2, NOW, "claude-code")
 check("claude-code prices haiku on the anthropic route", haiku["target_route"], "anthropic")
