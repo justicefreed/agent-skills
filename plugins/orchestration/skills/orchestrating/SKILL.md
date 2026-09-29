@@ -108,21 +108,11 @@ has a standing home in `references/integration.md`.
 justify a long turn, are in `references/availability.md`.
 
 Workers may themselves orchestrate; a decomposing task says so in its brief and gets a recommended
-fan-out shape.
+fan-out shape. Work that can outlive a turn gets a `progress_artifact` before its first dispatch —
+the checkpoint contract is in `references/briefs.md`.
 
-### Durable checkpoints for long work
-
-For work that can outlive a turn, create the brief's `progress_artifact` before the first
-dispatch. Keep it small and append only facts a fresh agent cannot re-derive: completed
-milestones, the next bounded action, verification evidence, and any external side effect whose
-outcome is uncertain. Update it after each milestone and immediately before a context-heavy read,
-rotation, compaction, or external mutation. A checkpoint is complete when it names the last
-durable state and one safe next action; do not use chat history as the checkpoint.
-
-See `references/delegation.md` for substrate choice, isolation choice, and how an archetype sets a
-lane's rung and independence — resolve it with `spend models --archetype <name>` rather than copying a
-rung from an earlier brief. Rungs are relative to the provider and resolved at spawn time, never
-written as model names — and `default` is not the anchor, `economy` is.
+Substrate, isolation and archetype are chosen in `references/delegation.md`. Choose the archetype
+and let `orch open` set the rung from it; never copy a `model:` from an earlier brief.
 
 **Done when:** each unit of work is marked *delegate* or *do inline*, with a reason.
 
@@ -156,12 +146,12 @@ this worktree's inbox is claimed.
    finished diff in hand (`references/integration.md`).
 2. **Record it**, passing the brief so its front matter supplies the required fields rather than you
    restating them. A dispatch the tracker does not know about is undispatched work.
-3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree, and with the session
-   mode `orch open` prints. Omitting the mode is not a neutral default: it selects *Always Ask*, and
-   a worker nobody is watching then halts on its first tool call. `references/delegation.md`.
+3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree, using exactly the
+   model, mode and label `orch open` printed — the spawn guard refuses anything else.
 
-Reference the project's standing-rules file; never restate it — repeated prose costs output tokens
-every dispatch and goes stale on the first correction.
+Reference the project's standing-rules file — generated from `assets/STANDING-RULES.template.md` on
+first use — and never restate it: repeated prose costs output tokens every dispatch and goes stale on
+the first correction.
 
 **Done when:** a brief file exists, a tracker entry exists naming its worker handle, and the worker
 is running — in that order.
@@ -184,25 +174,19 @@ drained between turns. Nobody sends; senders append. `references/availability.md
 **Resources.** Capacity gates are enforced against the operating system, never against a tracker or
 a peer's claim.
 
-**Rotate before you are expensive.** Compaction is the rotation mechanism, set to fire early; a
-session-start hook re-derives your state from disk afterwards. The turn-end hook warns when context,
-fan-out, or a set budget crosses a threshold. Act at a seam: land and close what is finished, patch
-the plan document, then compact. `references/cost.md`.
+**Rotate before you are expensive.** Compaction fires early and a session-start hook re-derives
+your state afterwards; act at a seam when the turn-end hook warns (`references/cost.md`). When a
+summary will not do, `orch rotate begin` — **never spawn a successor and archive yourself**
+(`references/rotation.md`, which also covers `cursor_root_envelope_limit` and
+`cursor_blob_capacity`). When the hook raises `FRONT-DESK`, offer one once (`references/frontdesk.md`).
 
-When a summary will not do, `ROTATE` onto a fresh agent — but **never spawn a successor and then
-archive yourself.** `CLOSE` interrupts the turn that calls it, so you cannot observe that it worked,
-and the inbox does not follow you. Run `orch rotate begin`, spawn what it prints in your own
-worktree, and stop; the successor claims the inbox and closes you. `references/rotation.md`.
+**Tuning.** `RETUNE` is the only safe way to influence work underway, and what makes starting cheap
+safe. Raise a lane only on an observed signal, recorded first — `orch escalate <e> --to <rung>
+--scope task|attempt --reason "<what you saw>" --evidence <pointer>` — then RETUNE to a model it
+prints. Lane tier is the largest cost lever measured here (`references/cost.md`).
 
-**Propose a front desk once execution is routine.** The turn-end hook raises `FRONT-DESK` when the
-human's own turns have become routing traffic. It fires once; the offer is theirs to accept, and they
-can always open you directly. `references/frontdesk.md`.
-
-**Tuning.** `RETUNE` changes a running worker's model or effort without touching its instructions.
-It is the only safe way to influence work already underway, and it is what makes starting cheap
-safe. Escalate on an observed signal, never a hunch, and record the signal:
-`orch escalate <e> --to <rung> --reason "<what you saw>"`. Lane model tier is the largest single
-cost lever measured here — 39% of one four-day bill (`references/cost.md`).
+**Done when:** every lane in `orch roster` has either reported or is insured by a wake in `orch wake
+list`, and no hook advisory from this turn is unanswered.
 
 ## Step 5 — Intake
 
@@ -241,55 +225,15 @@ landing is commissioned or ruled unnecessary, and its provenance lives somewhere
 
 ## Reference map
 
-Load these on demand, not up front.
+Each step names the reference it needs; load them on demand. Not pointed to above:
+`references/state.md` (tracker layout, ids, the full `orch` command surface),
+`references/verification.md` (the checks-that-cannot-fail catalog), `references/closeout.md`
+(commits, hygiene, reclamation), and `references/statusline.md` (the human's status surface).
 
-| File | When |
-|---|---|
-| `references/substrates/_capabilities.md` | Step 0, always — verb vocabulary and detection |
-| `references/substrates/*.md` | the one adapter Step 0 selects |
-| `references/delegation.md` | substrate, isolation, archetype, model and effort |
-| `references/availability.md` | bounded turns, and the inbox for queued input |
-| `references/cost.md` | what a program actually spends, compaction, hygiene |
-| `references/rotation.md` | replacing a live orchestrator without leaving two behind |
-| `references/frontdesk.md` | the cheap router between the human and you |
-| `references/integration.md` | the standing integrator lane, and who reviews before landing |
-| `references/briefs.md` | brief front matter, body, and report contract |
-| `references/state.md` | tracker layout, ids, and the `orch` command surface |
-| `references/liveness.md` | notifications, heartbeats, reconciliation |
-| `references/messaging.md` | what may be sent to a worker, and when |
-| `references/verification.md` | the checks-that-cannot-fail catalog |
-| `references/closeout.md` | commits, hygiene, resource reclamation |
-| `references/statusline.md` | the human's status surface: status line, Paseo pill |
-
-**Tooling.** Tracker and inbox operations go through `scripts/orch.py`; per-harness path resolution
-is in `references/substrates/_capabilities.md`, `ORCH_SKILL_DIR` included. Never edit tracker files by
-hand — the script's field enforcement is the point. The front matter registers hooks that drain,
-advise, re-derive state, check for a compaction loop, catch a wake still firing with nothing to
-insure, and guard large inputs; all silent when there is nothing to say.
+**Tooling.** Tracker and inbox operations go through `scripts/orch.py`; per-harness path resolution,
+`ORCH_SKILL_DIR` included, is in `references/substrates/_capabilities.md`. Never edit tracker files
+by hand — the script's field enforcement is the point. The hooks this skill registers speak only
+when they have something to say, and say what to do.
 
 **Status for the human.** Never narrate the roster into chat — it becomes permanent context re-read
-every later turn. `orch statusline` renders it into harness chrome the model never pays for;
-`references/statusline.md` installs it, once per machine.
-
-## Replay-envelope failures
-
-Two failures that look similar have different remedies. A `cursor_root_envelope_limit` means the
-serialized replay root exceeded the fixed envelope (known to fail at 524,288 serialized bytes);
-it is a local state-size failure. Stop adding transcript to the same root, checkpoint the durable
-artifact, and rotate or compact at a seam. Do not retry the identical prompt indefinitely.
-
-A `cursor_blob_capacity` means shared blob capacity was unavailable; it is transient and
-process-wide. Preserve the checkpoint, wait for the normal retry/backoff mechanism or retry the
-same read-only operation once capacity is expected to recover. Do not recursively rotate agents
-or create more blobs to escape it. If the operation may have mutated an external system, do not
-automatically replay it: reconcile the provider's observed state first and record
-`applied`, `not applied`, or `unknown` in the progress artifact. Recovery is complete only when
-the artifact survives and the next action is safe under the recorded state.
-
-When the error class is missing or ambiguous, treat a possible external mutation as `unknown`,
-preserve the artifact, and escalate rather than guessing. See `references/rotation.md` and
-`references/cost.md` for the procedures and conservative thresholds.
-
-**Project rules.** A repo running a program should carry a standing-rules file holding *its* facts —
-build discipline, formatter exclusions, known traps. Generate it from
-`assets/STANDING-RULES.template.md` on first use; briefs reference it rather than repeating it.
+every later turn. `orch statusline` renders it into harness chrome the model never pays for.

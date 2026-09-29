@@ -61,6 +61,13 @@ a property of the spec — deciding it later, with a finished diff in hand, is d
 wrong incentive. A brief claiming `in-brief` whose report carries no such pass does not land; the
 integrator escalates. See `integration.md`.
 
+**`progress_artifact:` is the checkpoint for work that can outlive a turn**, and exists before the
+first dispatch. Keep it small and append only facts a fresh agent cannot re-derive: completed
+milestones, the next bounded action, verification evidence, and any external side effect whose
+outcome is uncertain. Update it after each milestone and immediately before a context-heavy read,
+rotation, compaction, or external mutation. A checkpoint is complete when it names the last durable
+state and one safe next action; chat history is never the checkpoint.
+
 Everything else — constraints, rationale, history — goes in the body, because the body is what the
 *worker* reads and duplicating it into structured fields creates two copies that drift.
 
