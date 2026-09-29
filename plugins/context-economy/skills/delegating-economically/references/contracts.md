@@ -45,8 +45,9 @@ red.
 
 For an analyst, the falsification is the premise that would collapse the
 argument. For a verifier, it is the mutation that should break the suite. For a
-premise auditor, it is the evidence that would settle the claim either way — and
-naming it up front is what stops the auditor from simply agreeing with you.
+reviewer auditing a premise, it is the evidence that would settle the claim
+either way — and naming it up front is what stops the reviewer from simply
+agreeing with you.
 
 ## Placeholders
 

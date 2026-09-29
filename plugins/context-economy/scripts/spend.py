@@ -397,6 +397,26 @@ def agents_dir_arg(args: argparse.Namespace) -> Optional[str]:
     return os.path.expanduser(value) if value else None
 
 
+def lineage_of(option: Dict[str, Any]) -> str:
+    """The lineage independence is judged on; the family when none is given.
+
+    `family` is too fine for independence: Sonnet and Opus are different
+    families of one lineage and share its blind spots, so a Sonnet reviewer
+    on an Opus author is not a contrasting opinion.
+    """
+    return str(option.get("lineage") or option.get("family") or "").lower()
+
+
+def excluded_lineages(options: Dict[str, Any], name: Optional[str]) -> set:
+    """Every lineage `--exclude-family` rules out: the named family's lineage,
+    or the name itself when it already is a lineage."""
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return set()
+    return {lineage_of(row) for row in options["models"]
+            if wanted in (str(row.get("family", "")).lower(), lineage_of(row))} or {wanted}
+
+
 def select_models(options: Dict[str, Any], catalog: List[Dict[str, Any]],
                   rung: str, effort: str,
                   exclude_family: Optional[str] = None,
@@ -415,11 +435,11 @@ def select_models(options: Dict[str, Any], catalog: List[Dict[str, Any]],
         if resolved:
             reachable.setdefault(resolved[1], model)
     selected = []
-    excluded = (exclude_family or "").strip().lower()
+    excluded = excluded_lineages(options, exclude_family)
     for option in options["models"]:
         if rung not in option.get("rungs", []):
             continue
-        if excluded and option.get("family", "").lower() == excluded:
+        if lineage_of(option) in excluded:
             continue
         model = reachable.get(option.get("id", ""))
         if model is None:
@@ -446,13 +466,15 @@ def cmd_models(args: argparse.Namespace) -> int:
             args.archetype, options["archetypes"])
         rung = policy["rung"]
         effort = policy["effort"]
-        if policy.get("requires_exclude_family") and not args.exclude_family:
+        if (policy.get("requires_exclude_family") and not args.exclude_family
+                and not args.same_family_ok):
             raise SpendError(
-                "%s requires --exclude-family for an independent opinion"
-                % archetype)
+                "%s requires --exclude-family <the author's family> for an "
+                "independent opinion. If no other family is reachable, say so: "
+                "--same-family-ok \"<why>\"" % archetype)
     else:
         rung = args.rung
-        effort = args.effort or "medium"
+        effort = args.effort or "default"
 
     pricing = pricing_module()
     detected = pricing.detect_harness(getattr(args, "harness", None))
@@ -484,6 +506,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         "effort": effort,
         "archetype": archetype,
         "escalate": policy.get("escalate") if policy else None,
+        "same_family_ok": args.same_family_ok,
         "harness": harness,
         "harness_source": detected["detected_by"],
         "models": selected,
@@ -495,6 +518,8 @@ def cmd_models(args: argparse.Namespace) -> int:
     if archetype:
         print("%s: %s / %s effort" % (archetype, rung, effort))
         print("escalate: %s" % policy["escalate"])
+        if args.same_family_ok:
+            print("SAME-FAMILY: %s" % args.same_family_ok)
     else:
         print("%s / %s effort" % (rung, effort))
     for row in selected:
@@ -1799,7 +1824,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="preferred effort for --rung (default: default)")
     models.add_argument(
         "--exclude-family",
-        help="omit an underlying family when an independent opinion is needed")
+        help="omit a family's whole lineage (claude-opus rules out every claude-*) "
+             "when an independent opinion is needed")
+    models.add_argument(
+        "--same-family-ok", metavar="REASON",
+        help="waive an archetype's family requirement, with the reason on record")
     models.add_argument("--catalog", help="live model catalog JSON")
     models.add_argument("--options", help="rung and archetype option map JSON")
     models.add_argument("--harness", help="harness to select and spawn models for")

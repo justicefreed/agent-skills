@@ -185,6 +185,40 @@ check_same("orch cost fails cleanly on the expected, unrelated cause", code, 2)
 check_true("orch cost's failure is 'no transcript found', not a rung crash",
            "no transcript found" in err)
 
+# --------------------------------------------------------------------------- #
+# The archetype catalogue has one machine form, context-economy's
+# model-options.json, found the same way `orch cost` finds spend.py. The two
+# orchestration-only rows in delegation.md, and every archetype the brief
+# template offers, must agree with it -- a second copy of this table drifted
+# before, and the drift is what let every lane start a rung too high.
+# --------------------------------------------------------------------------- #
+
+_spend_path = orch.find_spend()
+if _spend_path is None:
+    print("  skip: context-economy not found; catalogue checks need it")
+else:
+    with open(os.path.join(os.path.dirname(os.path.dirname(_spend_path)), "skills",
+                           "delegating-economically", "references",
+                           "model-options.json"), encoding="utf-8") as fh:
+        _archetypes = json.load(fh)["archetypes"]
+    _refs = os.path.join(os.path.dirname(HERE), "references")
+    _rows = {}
+    with open(os.path.join(_refs, "delegation.md"), encoding="utf-8") as fh:
+        for line in fh:
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) == 6 and cells[0].startswith("**"):
+                _rows[cells[0].strip("*")] = cells[3]
+    check_same("delegation.md orchestration-only rows agree with model-options.json",
+               _rows,
+               {"Integrator": "%(rung)s / %(effort)s" % _archetypes["integrator"],
+                "Front desk": "%(rung)s / %(effort)s" % _archetypes["frontdesk"]})
+    with open(os.path.join(os.path.dirname(HERE), "assets", "BRIEF.template.md"),
+              encoding="utf-8") as fh:
+        _offered = next(line for line in fh if line.startswith("archetype:"))
+    _offered = _offered.split("<", 1)[1].split(">", 1)[0].split("|")
+    check_same("every archetype the brief template offers is in the catalogue",
+               [name for name in _offered if name not in _archetypes], [])
+
 print()
 if FAILURES:
     print("  %d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES)))

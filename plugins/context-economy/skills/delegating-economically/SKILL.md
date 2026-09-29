@@ -55,10 +55,14 @@ ships.
 
 | Rung | Meaning |
 |---|---|
-| **frontier** | the provider's most capable. **Escalation only** — never a starting point |
+| **frontier** | the models the option map designates for frontier work — possibly `advanced` models judged capable enough, never a pricier model it does not tag. **Escalation only** |
 | **advanced** | above the everyday tier for complex, interconnected, or long-running work; below frontier |
 | **economy** | cheaper and faster; "good for everyday tasks". **The anchor** |
 | **minimal** | the cheapest that can do the job at all |
+
+The rung is one axis; **independence** — none, not the author, or a different
+model family — is the other, and every archetype sets both. A different family
+is chosen *at* a rung, never instead of one.
 
 The **provider default is not a rung**. It is an implicit selection made when no
 model is supplied, and it may drift to any rung. At session start, identify the
@@ -129,8 +133,9 @@ dropped. You cannot self-diagnose it either, because the diagnosis runs on the
 same premise.
 
 So don't try. **Delegate the audit to a clean context**: hand a subagent the
-claim and the evidence, and ask whether it holds. Economy rung — you are buying
-independence, not capability. If it comes back refuted you now hold a *known*
+claim and the evidence, and ask whether it holds — a `reviewer` whose object is
+the claim, at economy in a different family. You are buying independence, not
+capability. If it comes back refuted you now hold a *known*
 refutation, which is the first problem, which compaction already handles.
 
 You do not need to replace your session to get an unpoisoned opinion. You need

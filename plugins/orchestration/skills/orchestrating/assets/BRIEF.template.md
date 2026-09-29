@@ -7,7 +7,7 @@ expected_artifacts:
 advances: [<plan item ids>]        # or the literal: none
 consumption: <what the orchestrator will do with the result — this is the delete condition>
 progress_artifact: <path the worker appends progress to — REQUIRED for long tasks>
-archetype: <integrator|implementer|analyst|verifier|doc|inventory>   # optional, provenance
+archetype: <implementer|analyst|reviewer|verifier|verifier-low-risk|doc-writer|inventory|integrator>   # sets rung and family: `spend models --archetype <name>`
 # model: <minimal|economy|advanced|frontier>  # optional RUNG, never a name; falls back to economy
 # model_reason: <the observed signal>         # required for frontier
 review: <integrator|in-brief|none>  # who reads the diff before it lands; default integrator

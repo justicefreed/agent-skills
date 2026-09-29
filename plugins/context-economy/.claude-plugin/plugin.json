@@ -1,6 +1,6 @@
 {
   "name": "context-economy",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Session cost, context hygiene and compaction safety for any session: measure cost, guard large inputs and reads, resolve live subagent models by rung or archetype, and keep the auto-compact window clear of the session's floor.",
   "author": {
     "name": "Justice Reed"

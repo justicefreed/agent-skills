@@ -34,114 +34,85 @@ that makes `whoami` ambiguous for inherited worktrees, and it is worth the trade
 
 ## 3. Which archetype
 
-The archetype names the *kind* of work, which then drives model and effort. Two archetypes are
-implemented by other skills; for those, route the workflow out and keep only the selection fallback.
+The archetype names the *kind* of work, and the kind of work sets two axes: the **rung** (capability
+and cost) and the **independence** (none, not the author, or a different model family). The catalogue
+— rungs, relative efforts, failure signatures, escalation signals, and the reviewing rule — is owned
+by the `delegating-economically` skill's `references/rungs.md`, and its machine form resolves an
+archetype to live models:
 
-Both columns below are **relative to the provider**, never absolute model names — a table of names
-rots the moment a provider ships a release. Resolve them at dispatch time against the provider's own
-model list.
+```bash
+spend models --archetype implementer
+spend models --archetype reviewer --exclude-family <author's family>
+```
 
-| Rung | Means |
-|---|---|
-| **frontier** | the provider's most capable model. **Escalation only** — never a starting point |
-| **advanced** | a more capable model than `economy`, below `frontier` — the rung above the anchor |
-| **economy** | a cheaper, faster model — the provider's "good for everyday tasks" tier. **The anchor** |
-| **minimal** | the smallest/fastest offered |
-| **contrasting family** | a different *model family*, chosen for independence rather than capability |
+Read the rung vocabulary there, not here. Two points are orchestration's own: `frontier` is whatever
+the option map designates, so an escalation to it never reaches a pricier model the map did not name;
+and `default` is not a rung — it names whatever the provider selects when nothing is specified, which
+is how the rung above `economy` once moved without its name changing. `orch` refuses `default`
+wherever a rung is asked for, on `open`, `escalate --to`, and brief front matter, and suggests
+`advanced` in the error.
 
-`default` is not a rung. It names whatever model the provider selects when nothing is specified — the
-provider's own implicit choice, not a fixed point on this table — and it is why the row above
-`economy` moved without its name ever changing (see below). It survives only as the observed, unset
-state of a worker that loaded in on that implicit choice; `orch` refuses it wherever a rung is asked
-for, on `open`, `escalate --to`, and brief front matter, and suggests `advanced` in the error.
+Two archetypes exist only because orchestration does. Both are in the option map so `spend models`
+resolves them; their prose lives here:
 
-Effort rungs are likewise relative: **default** (what the model reports as its own default),
-**one below default**, **lowest**, and — escalation only — **above default**.
+| Archetype | Work | Failure signature | Rung / effort | Independence | Escalate when |
+|---|---|---|---|---|---|
+| **Integrator** | serial cherry-picks, conflict resolution, keeping a chain green | resolves a conflict by dropping a hunk; declares green from the wrong tree | economy / default | none | a conflict needs semantic reconstruction rather than a mechanical resolution — then advanced |
+| **Front desk** | relays the human's approvals and task adds during execution | helps instead of routing; acts outside its whitelist | economy / lowest | none | never; a router that needs judgment is not a front desk — `frontdesk.md` |
 
-| Archetype | Work | Failure signature | Fallback start | Escalate only when |
-|---|---|---|---|---|
-| **Integrator / lander** | serial cherry-picks, conflict resolution, keeping a chain green | resolves a conflict by dropping a hunk; declares green from the wrong tree | economy model / default effort | a conflict needs semantic reconstruction rather than a mechanical resolution — then **advanced** |
-| **Implementer** | writes the change for one scoped item | scope creep into neighbouring items; edits a generated file instead of its source | economy model / default effort | the change spans subsystems, or the first attempt came back with the scope wrong |
-| **Analyst** | traces behaviour, enumerates cases, builds an argument | confident narrative resting on an unverified premise | economy model / default effort | the argument is many hops deep, a premise is disputed, or a prior pass was refuted |
-| **Verifier / prober** | runs the suite, the build, the assertions; reports numbers | reports a green that could not have gone red | economy model / one below default | the guard cannot be made to go red and nobody knows why |
-| **Verifier, low-risk only** | re-runs a check whose pass/fail is mechanical and whose falsification line is trivially checkable | same, but a wrong answer is caught at intake | minimal model / lowest effort | any doubt at all — then it is the row above, not this one |
-| **Doc / HTML writer** | review docs, structured artifacts, plan patches | narrates the journey instead of the result | minimal model / lowest effort | rarely — prefer a better outline over more thinking |
-| **Inventory / cleanup** | disk audits, resource reclamation, mechanical sweeps | deletes by glob; deletes something still in use | minimal model / lowest effort | never; if it needs thought it is not this archetype |
-| **Adversarial reviewer** | attacks a draft's premises | → route the workflow to a committee-style skill | contrasting family / default effort | the first pass found nothing, *and* you have specific reason to doubt that |
-| **Second opinion** | independent judgment on a decision | → route the workflow to an advisor-style skill | contrasting family / default effort | — |
+**Reviews route by object.** A reviewer of *code* is an ordinary lane dispatched from here, under the
+reviewing rule in `rungs.md`. A reviewer of a *draft's premises* routes to a committee-style skill, and
+a second opinion on a *decision* to an advisor-style skill — same archetype, same rung and family rule,
+different workflow. Whether a lane needs review at all is the brief's `review:` field
+(`integration.md`); who reviews it is the catalogue's.
 
 ### Meta-work has archetypes too
 
 The work a program generates *about itself* — landing branches, patching plan documents, tidying the
-tracker — is where an orchestrator most often skips this table, because the work arrives at intake
-rather than in a plan. It is ordinary delegable work with ordinary tiers:
+tracker — is where an orchestrator most often skips the catalogue, because the work arrives at intake
+rather than in a plan. It is ordinary delegable work with ordinary archetypes:
 
-| Meta-work | Archetype | Fallback start | Notes |
-|---|---|---|---|
-| Landing a lane; conflict resolution | integrator | economy / default | one standing lane, not one worker per merge — `integration.md` |
-| Patching a plan document from a ruling | doc writer | minimal / lowest | give it the ruling verbatim; it is transcription, not judgment |
-| Tracker hygiene, orphan sweeps, reclamation | inventory | minimal / lowest | never by glob |
-| Re-running a check someone else's report claimed | verifier | economy / one below default | must state which tree it ran in; **minimal** only when the check is mechanical |
-| Relaying the human's approvals and task adds during execution | front desk | economy / lowest | a router with a whitelist, never a helper — `frontdesk.md` |
-| Ruling on an escalation; ordering history | **not delegable** | — | you hold the program's context; this is Principle 5's other half |
+| Meta-work | Archetype | Notes |
+|---|---|---|
+| Landing a lane; conflict resolution | integrator | one standing lane, not one worker per merge — `integration.md` |
+| Patching a plan document from a ruling | doc-writer | give it the ruling verbatim; it is transcription, not judgment |
+| Tracker hygiene, orphan sweeps, reclamation | inventory | never by glob |
+| Re-running a check someone else's report claimed | verifier | must state which tree it ran in; `verifier-low-risk` only when the check is mechanical |
+| Reviewing a lane's diff before it lands | reviewer | a different family from the lane that wrote it |
+| Relaying the human's approvals and task adds during execution | frontdesk | a router with a whitelist, never a helper — `frontdesk.md` |
+| Ruling on an escalation; ordering history | **not delegable** | you hold the program's context; this is Principle 5's other half |
 
 The last row is the point of the table. Principle 5 cuts both ways: work that only you can do must
 stay with you, and everything else must not.
 
-**Why the defaults sit where they do, and why nothing starts above `economy`.**
+**Why nothing starts above `economy`, from where an orchestrator sits.** The anchor's measured case —
+the drift that cost $616 where one rung down cost $246, and the 28-of-31 single-round baseline it is
+being tested against — is in `rungs.md` and `cost.md`. What orchestration adds:
 
-- **The provider's implicit choice is a moving target, and it moved. `economy` is the anchor.** In
-  the program this catalog was derived from, *every* worker ran on the provider's **implicit
-  choice** at its **default effort**; neither dial was ever set, and a more capable model was
-  available the whole time. That included the analyses and adversarial passes that produced the
-  best results, and the ones that correctly refuted the orchestrator. So the original conclusion
-  held: the evidence for "the implicit choice is enough" was strong and the evidence for "more is
-  better" was absent.
-
-  What that argument missed is that **the provider's implicit choice is not a fixed point: it names
-  whichever model the provider currently selects, and the referent drifted up a tier.** The rung
-  above `economy` used to be called `default` for exactly this reason, and the name was the bug — it
-  never changed, so nothing looked stale, but the sentence that once meant a Sonnet-class model came
-  to mean an Opus-class one, and it cost real money: measured across four days on one machine, 6,509
-  calls in lane worktrees cost **$616 where the same tokens one rung down cost $246**. That is 39% of
-  the whole bill, spent by a word rather than by a decision (`cost.md`). The original evidence was
-  never evidence *for the frontier tier* — it was evidence that **whatever the everyday tier happens
-  to be is enough**, and today that is `economy`. The rung above it is now named `advanced`, a fixed
-  point instead of a moving one, precisely so this cannot happen again unnoticed.
-
-  The same argument now applies one rung lower and is untested there, which is exactly why
-  escalation is instrumented. The baseline to beat is on record: of 31 lane tasks that finished on
-  the old anchor, **28 needed a single round**. If `economy` holds near that, the saving is free; if
-  it drops sharply, `orch escalate --log` will say so in the reasons, by archetype, and the rows
-  above should move back. Do not adjust them on a feel.
-- **The fallback is the unsupervised path.** It fires precisely when the human has *not* configured a
-  profile for this kind of work. Choosing an expensive setting there spends their budget on the
+- **The catalogue is the unsupervised path.** It fires precisely when the human has *not* configured
+  a profile for this kind of work. Choosing an expensive setting there spends their budget on the
   model's speculation, without their having expressed a preference. Reserve the top of the dial for
   work the human has asked for at that level, or for an escalation you can justify from an observed
   failure.
 - **Escalation is cheap and reversible; over-provisioning is neither.** `RETUNE` raises a running
-  worker's effort without touching its instructions, so the cost of starting at the fallback and
-  being wrong is one adjustment. The cost of starting high on every dispatch is paid on every
-  dispatch, including the majority that did not need it.
-- **The cheap verifier depends on a contract, and is only safe because of it.** A cheaper verifier is
-  more likely to accept a vacuous green — the exact failure that matters most. It is acceptable at
-  all *only* because the report contract requires a falsification line and the orchestrator re-checks
-  it at intake (`../verification.md`). Remove either safeguard and the verifier belongs a rung up.
-  This is why the verifier held at `economy` while the doc writer and the cleanup sweep dropped to
-  `minimal`: a bad doc is visible in the artifact and a bad sweep fails loudly, whereas a bad verdict
-  is *indistinguishable from a good one* until something downstream breaks. The **low-risk verifier**
-  row is the carve-out, and its precondition is narrow — the check's pass/fail must be mechanical and
-  its falsification line checkable at a glance. "The suite is fast" is not low risk; "the assertion
-  is `exit 0` on a command I can re-run myself in a second" is.
+  worker's model or effort without touching its instructions, so the cost of starting at the
+  catalogue's rung and being wrong is one adjustment. The cost of starting high on every dispatch is
+  paid on every dispatch, including the majority that did not need it.
+- **The cheap verifier and reviewer depend on a contract, and are only safe because of it.** A cheaper
+  model is more likely to accept a vacuous green or wave through a plausible diff — the exact failures
+  that matter most. That is acceptable *only* because the report contract requires a falsification
+  line, every review finding carries its evidence, and the orchestrator re-checks both at intake
+  (`verification.md`). Remove either safeguard and the archetype belongs a rung up. This is also why
+  neither drops to `minimal` while the doc writer and the cleanup sweep do: a bad doc is visible in
+  the artifact and a bad sweep fails loudly, whereas a bad verdict is *indistinguishable from a good
+  one* until something downstream breaks.
 - **Model and effort are separate decisions, and the model matters more.** Most of the available
-  saving is in the *model*, not the dial: a mechanical sweep on a minimal model at lowest effort is
-  far cheaper than the same work on the provider's implicit choice at any setting. Reach for the
-  model rung first.
+  saving is in the *model*, not the dial. Reach for the model rung first.
 
-Seven of these nine archetypes start at or below `economy`, and none starts above it. If you find
-yourself wanting `advanced`, the frontier model, or an above-default effort dial as a *starting
-point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and compounds
-across every future dispatch, whereas more capability buys one better guess at the same ambiguity.
+If you find yourself wanting `advanced`, the frontier model, or an above-default effort dial as a
+*starting point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and
+compounds across every future dispatch, whereas more capability buys one better guess at the same
+ambiguity.
 
 ## 4. Model, effort, and mode
 
@@ -174,7 +145,7 @@ selects Always Ask, and omitting the model selects whatever the provider current
 — the most expensive rung anyone reaches by accident. So `orch open` fills in the rung too
 (`--model`, or `model:` in the brief's front matter, default `economy` via `ORCH_WORKER_MODEL`),
 names it in the same printed fragment, and **refuses `frontier` without `--model-reason`**, since no
-row in the table above starts there. `roster` prints `TIER:<rung>` on anything above `economy`, with
+archetype starts there. `roster` prints `TIER:<rung>` on anything above `economy`, with
 a `:NO-REASON` suffix when nobody justified it — spend, unlike a stall, never announces itself, and a
 lane on the top rung looks exactly like a lane on the cheapest one until the invoice arrives.
 
@@ -189,7 +160,7 @@ sends the worker to are things that stall it. Run `orch permissions --install` o
 
 **Profiles first.** If the substrate offers named launch bundles configured by the human, list them,
 read every profile's notes, and pick the one whose notes match the work. Materialise it into the
-spawn call. **If none fits, fall back to the table above and tell the user you fell back** — silent
+spawn call. **If none fits, fall back to the catalogue and tell the user you fell back** — silent
 fallback hides the fact that the human's configuration didn't cover this case.
 
 Then:
@@ -198,7 +169,7 @@ Then:
   expose none, and there the archetype's "model and effort" collapses to model alone. Check before
   planning around effort.
 - **Escalate with `RETUNE`, from an observed signal, and record it.** A running worker's model and
-  effort can be changed without touching its instructions, so starting at the table's rung costs one
+  effort can be changed without touching its instructions, so starting at the catalogue's rung costs one
   adjustment when it turns out to be wrong. Escalate on a *signal* — the failure signature in the
   table, a refuted premise, a worker that says it cannot make its guard go red — not on a hunch that
   this task feels hard. Then run it through the tracker, which demands the signal in writing:
@@ -211,12 +182,13 @@ Then:
   reason is mandatory and the record outlives the entry, because the reasons are the only thing that
   ever corrects a rung's fallback start by measurement instead of by feel. `orch escalate --log`
   reads them back grouped by archetype — and **an archetype that escalates every time has the wrong
-  fallback, not a run of bad luck.** Fix its row in the table above rather than escalating it forever.
+  fallback, not a run of bad luck.** Fix its row in the catalogue (`rungs.md` and
+  `model-options.json`) rather than escalating it forever.
 - **A profile is launch configuration only.** Never treat it as a worker's current state — `RETUNE`
   may have changed it. Record model/effort as provenance if useful, never as truth.
 - **Contrast compares model *family*, not provider id.** A bridged provider hosting the same
-  model family is a billing path, not an independent opinion. Genuine contrast means a different
-  family — and where a harness offers several families, an adversarial reviewer should use one.
+  model family is a billing path, not an independent opinion. The reviewer archetype requires a
+  different family from the author; see the reviewing rule in `rungs.md`.
 
 ## 5. Sub-orchestration
 

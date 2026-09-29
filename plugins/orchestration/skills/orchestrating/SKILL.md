@@ -110,8 +110,9 @@ outcome is uncertain. Update it after each milestone and immediately before a co
 rotation, compaction, or external mutation. A checkpoint is complete when it names the last
 durable state and one safe next action; do not use chat history as the checkpoint.
 
-See `references/delegation.md` for substrate choice, isolation choice, and the archetype catalog
-with model/effort guidance. Rungs are relative to the provider and resolved at spawn time, never
+See `references/delegation.md` for substrate choice, isolation choice, and how an archetype sets a
+lane's rung and independence — resolve it with `spend models --archetype <name>` rather than copying a
+rung from an earlier brief. Rungs are relative to the provider and resolved at spawn time, never
 written as model names — and `default` is not the anchor, `economy` is.
 
 **Done when:** each unit of work is marked *delegate* or *do inline*, with a reason.

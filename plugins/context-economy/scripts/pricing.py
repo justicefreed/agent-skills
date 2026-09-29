@@ -25,6 +25,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = 2
 OPTIONS_SCHEMA_VERSION = 3
+# Policy the option map must obey, not just shape. Archetypes start at or below
+# the economy anchor -- anything higher is an escalation, never a start -- and
+# name effort relative to the model, because an absolute `medium` means a
+# different thing on every model and silently erased the verifier's step down.
+OPTION_RUNGS = ("minimal", "economy", "advanced", "frontier")
+ARCHETYPE_START_RUNGS = ("minimal", "economy")
+ARCHETYPE_EFFORTS = ("lowest", "one-below-default", "default")
 GENERATOR_VERSION = "2"
 ROUTE_SOURCES = {
     "vercel": "https://ai-gateway.vercel.sh/v1/models",
@@ -662,10 +669,27 @@ def validate_options(options: Dict[str, Any], registry: Registry) -> None:
         if model_id in model_ids:
             raise PricingError("duplicate model policy id %r" % model_id)
         model_ids.add(model_id)
+        for rung in row.get("rungs", []):
+            if rung not in OPTION_RUNGS:
+                raise PricingError("model option %r has unknown rung %r" % (model_id, rung))
+    tagged = {row["id"]: set(row.get("rungs", [])) for row in models}
     for rung, preferred in (options.get("preferences") or {}).items():
         for model_id in preferred:
             if model_id not in model_ids:
                 raise PricingError("preference %s -> %r is not a model option" % (rung, model_id))
+            # Preferences only rank; the rung tags decide eligibility. A
+            # preference the tags do not back is a ranking nobody can select.
+            if rung not in tagged[model_id]:
+                raise PricingError("preference %s -> %r is not tagged %s in its model row"
+                                   % (rung, model_id, rung))
+    for name, policy in (options.get("archetypes") or {}).items():
+        if policy.get("rung") not in ARCHETYPE_START_RUNGS:
+            raise PricingError("archetype %r starts at %r; archetypes start at %s and "
+                               "reach higher only by escalation"
+                               % (name, policy.get("rung"), " or ".join(ARCHETYPE_START_RUNGS)))
+        if policy.get("effort") not in ARCHETYPE_EFFORTS:
+            raise PricingError("archetype %r effort %r must be relative: %s"
+                               % (name, policy.get("effort"), ", ".join(ARCHETYPE_EFFORTS)))
 
 
 def _model_policy(options: Dict[str, Any], model: str) -> Dict[str, Any]:

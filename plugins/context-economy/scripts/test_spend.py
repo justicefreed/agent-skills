@@ -490,6 +490,106 @@ check_same("rung hook is silent when model is set explicitly",
            rung_out({"model": "opus"}), "")
 shutil.rmtree(_rung_agents_dir, ignore_errors=True)
 
+# The shipped catalogue. `preferences` only rank; the rung tags decide what a
+# rung can select at all. `frontier` is a designation: the advanced-rung models
+# judged capable enough for frontier work, and never a pricier model the map
+# does not tag -- the owner's explicit cap on what an escalation can cost.
+_shipped = spend.load_model_options()
+_every_model = [{"slug": row["id"], "default_reasoning_level": "medium",
+                 "supported_reasoning_levels": [
+                     {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]}
+                for row in _shipped["models"]]
+check_same("frontier selects only the designated models",
+           sorted(row["model"] for row in spend.select_models(
+               _shipped, _every_model, "frontier", "default")),
+           ["claude-opus-5-5", "gpt-5.6-sol"])
+check_same("no rung selects the off-ladder frontier model",
+           [rung for rung in spend.MODEL_RUNGS
+            if "claude-fable-5-1" in [row["model"] for row in spend.select_models(
+                _shipped, _every_model, rung, "default")]],
+           [])
+
+# Every "second pair of eyes" is one reviewer archetype: the old names resolve
+# to it, so a brief written against any of them gets the same rung and family
+# rule rather than an unanchored "any rung".
+check_same("review-shaped names all resolve to the reviewer archetype",
+           sorted({spend.resolve_archetype(name, _shipped["archetypes"])[0]
+                   for name in ("premise-auditor", "adversarial-reviewer",
+                                "second-opinion", "contrasting-opinion", "review")}),
+           ["reviewer"])
+
+# Effort is relative, so the verifier's step down survives on any model: on a
+# model whose own default is medium, the implementer gets medium and the
+# verifier the level below it. Both were `medium` before, which erased it.
+def _archetype_effort(name):
+    policy = _shipped["archetypes"][name]
+    return spend.select_models(_shipped, [{"slug": "claude-sonnet-5",
+                               "default_reasoning_level": "medium",
+                               "supported_reasoning_levels": [
+                                   {"effort": "low"}, {"effort": "medium"},
+                                   {"effort": "high"}]}],
+                               policy["rung"], policy["effort"])[0]["effort"]
+check_same("implementer effort is the model's own default",
+           _archetype_effort("implementer"), "medium")
+check_same("verifier effort is one below the model's default",
+           _archetype_effort("verifier"), "low")
+
+_review_catalog = transcript([])
+with open(_review_catalog, "w") as fh:
+    json.dump({"models": [{"slug": "claude-sonnet-5"}, {"slug": "gpt-5.6-terra"}]}, fh)
+
+
+def _spend_models(*argv):
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, "spend.py"), "models",
+         "--catalog", _review_catalog, "--harness", "cursor", "--format", "json"]
+        + list(argv), capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+
+
+# spend exits 0 on every error so a hook can never fail a turn; a refusal is
+# no result on stdout and the reason on stderr.
+_no_family = _spend_models("--archetype", "reviewer")
+check_same("reviewer without --exclude-family is refused",
+           (_no_family.stdout, "--same-family-ok" in _no_family.stderr),
+           ("", True))
+check_same("every shipped model row names its lineage",
+           [row["id"] for row in _shipped["models"] if not row.get("lineage")], [])
+# Independence is judged on lineage, not family: excluding the author's
+# claude-opus must also exclude claude-sonnet, or a Claude reviewer lands on
+# Claude builders -- the exact failure the reviewer archetype exists to stop.
+check_same("excluding a family excludes its whole lineage",
+           [row["model"] for row in spend.select_models(
+               _shipped, _every_model, "economy", "default", "claude-opus")
+            if row["model"].startswith("claude-")], [])
+_contrast = _spend_models("--archetype", "reviewer", "--exclude-family", "claude-opus")
+check_same("reviewer resolves to a different family from the author",
+           [row["model"] for row in json.loads(_contrast.stdout)["models"]],
+           ["gpt-5.6-terra"])
+_waived = _spend_models("--archetype", "reviewer", "--same-family-ok", "only claude reachable")
+check_same("--same-family-ok waives the family rule and records why",
+           json.loads(_waived.stdout)["same_family_ok"], "only claude reachable")
+check_same("--rung without --effort asks for the model's own default effort",
+           json.loads(_spend_models("--rung", "economy").stdout)["effort"], "default")
+
+# rungs.md's table is the prose owner of the catalogue and model-options.json
+# its machine form. Two copies of one table drifted before (verifier effort,
+# missing archetypes); this fails the moment they disagree again.
+_ROW_KEYS = {"Implementer": "implementer", "Analyst": "analyst", "Reviewer": "reviewer",
+             "Verifier": "verifier", "Verifier, low-risk": "verifier-low-risk",
+             "Doc writer": "doc-writer", "Inventory / cleanup": "inventory"}
+with open(os.path.join(os.path.dirname(HERE), "skills", "delegating-economically",
+                       "references", "rungs.md"), encoding="utf-8") as fh:
+    _doc_rows = {}
+    for line in fh:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 6 and cells[0].startswith("**"):
+            _doc_rows[_ROW_KEYS.get(cells[0].strip("*"), cells[0])] = cells[3]
+check_same("rungs.md table and model-options.json agree on rung / effort",
+           _doc_rows,
+           {key: "%s / %s" % (_shipped["archetypes"][key]["rung"],
+                              _shipped["archetypes"][key]["effort"])
+            for key in _ROW_KEYS.values()})
+
 for path in _tmp:
     try:
         os.unlink(path)

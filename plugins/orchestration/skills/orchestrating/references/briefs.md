@@ -27,7 +27,7 @@ expected_artifacts:                              # required, non-empty
 advances: [3.1, 3.4, 3.7]                        # required; or the literal `none`
 consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
-archetype: integrator                            # optional, provenance
+archetype: integrator                            # sets rung/family via `spend models --archetype`
 mode: auto                                       # optional; session mode to spawn with
 model: economy                                   # optional; RUNG, not a name; default economy
 review: integrator                               # optional; integrator | in-brief | none

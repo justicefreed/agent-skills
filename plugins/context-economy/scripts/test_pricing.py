@@ -196,6 +196,25 @@ options_rejects("model option keeping a pricing_key is rejected",
 options_rejects("duplicate model option is rejected",
                 lambda o: o["models"].append(dict(o["models"][0])),
                 "duplicate model policy id")
+# Policy, not just shape. Each of these is a way the map drifted or could
+# drift back: a preference ranking a model its rung tags never select (the
+# frontier preference once named a model tagged only advanced), an archetype
+# starting above the anchor, an absolute effort that erased the verifier's
+# one-below-default step.
+options_rejects("preference for a model not tagged with that rung is rejected",
+                lambda o: o.update(preferences={"economy": ["target"]}),
+                "is not tagged economy")
+options_rejects("unknown rung tag is rejected",
+                lambda o: o["models"][0].update(rungs=["premium"]),
+                "unknown rung")
+options_rejects("archetype starting above economy is rejected",
+                lambda o: o.update(archetypes={"reviewer": {"rung": "advanced",
+                                                            "effort": "default"}}),
+                "reach higher only by escalation")
+options_rejects("archetype with an absolute effort is rejected",
+                lambda o: o.update(archetypes={"verifier": {"rung": "economy",
+                                                            "effort": "medium"}}),
+                "must be relative")
 
 # Input translation: canonical ids pass through, names and aliases translate
 # with the table date, anything else is an error rather than a guess.

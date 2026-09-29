@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "updated": "2026-09-23",
+  "updated": "2026-09-28",
   "preferences": {
     "minimal": [
       "gpt-5.6-luna",
@@ -23,32 +23,38 @@
         "implementation"
       ],
       "rung": "economy",
-      "effort": "medium",
-      "escalate": "advanced when the change spans subsystems or an economy pass gets the scope wrong"
+      "effort": "default",
+      "escalate": "advanced when the brief names the subsystems the change spans, or an economy pass came back with the scope wrong"
     },
     "analyst": {
       "aliases": [
         "analysis"
       ],
       "rung": "economy",
-      "effort": "medium",
-      "escalate": "advanced when the argument has many dependent hops or a premise is disputed"
+      "effort": "default",
+      "escalate": "advanced when the argument has many dependent hops, a premise is disputed, or a prior pass was refuted"
     },
-    "premise-auditor": {
+    "reviewer": {
       "aliases": [
+        "review",
+        "adversarial-reviewer",
+        "premise-auditor",
         "premise-audit",
-        "auditor"
+        "auditor",
+        "contrasting-opinion",
+        "second-opinion"
       ],
       "rung": "economy",
-      "effort": "medium",
-      "escalate": "do not escalate; choose an independent model family"
+      "effort": "default",
+      "requires_exclude_family": true,
+      "escalate": "switch family first when a pass found nothing and you have specific reason to doubt it; advanced only when the brief cannot enumerate targets, or a pass missed a many-hop interaction"
     },
     "verifier": {
       "aliases": [
         "verification"
       ],
       "rung": "economy",
-      "effort": "medium",
+      "effort": "one-below-default",
       "escalate": "advanced when the guard cannot be made to fail and the reason is unclear"
     },
     "verifier-low-risk": {
@@ -76,6 +82,22 @@
       "rung": "minimal",
       "effort": "lowest",
       "escalate": "reclassify the task if it requires judgment"
+    },
+    "integrator": {
+      "aliases": [
+        "lander"
+      ],
+      "rung": "economy",
+      "effort": "default",
+      "escalate": "advanced when a conflict needs semantic reconstruction rather than a mechanical resolution"
+    },
+    "frontdesk": {
+      "aliases": [
+        "front-desk"
+      ],
+      "rung": "economy",
+      "effort": "lowest",
+      "escalate": "never; a router that needs judgment is not a front desk"
     }
   },
   "models": [
@@ -83,6 +105,7 @@
       "id": "composer-2.5",
       "provider": "cursor",
       "family": "composer",
+      "lineage": "composer",
       "rungs": [
         "minimal"
       ],
@@ -92,6 +115,7 @@
       "id": "gpt-5.6-luna",
       "provider": "openai",
       "family": "gpt-5.6",
+      "lineage": "gpt",
       "rungs": [
         "minimal"
       ],
@@ -101,6 +125,7 @@
       "id": "claude-haiku-4-5-20251001",
       "provider": "anthropic",
       "family": "claude-haiku",
+      "lineage": "claude",
       "rungs": [
         "minimal"
       ],
@@ -110,6 +135,7 @@
       "id": "gemini-3.8-flash",
       "provider": "google",
       "family": "gemini",
+      "lineage": "gemini",
       "rungs": [
         "economy"
       ],
@@ -119,6 +145,7 @@
       "id": "kimi-k2.7-code",
       "provider": "moonshot",
       "family": "kimi",
+      "lineage": "kimi",
       "rungs": [
         "economy"
       ],
@@ -128,6 +155,7 @@
       "id": "claude-sonnet-4-6",
       "provider": "anthropic",
       "family": "claude-sonnet",
+      "lineage": "claude",
       "rungs": [
         "economy"
       ],
@@ -137,6 +165,7 @@
       "id": "claude-sonnet-5",
       "provider": "anthropic",
       "family": "claude-sonnet",
+      "lineage": "claude",
       "rungs": [
         "economy"
       ],
@@ -146,6 +175,7 @@
       "id": "gpt-5.6-terra",
       "provider": "openai",
       "family": "gpt-5.6",
+      "lineage": "gpt",
       "rungs": [
         "economy"
       ],
@@ -155,6 +185,7 @@
       "id": "gemini-3.1-pro-preview",
       "provider": "google",
       "family": "gemini",
+      "lineage": "gemini",
       "rungs": [
         "advanced"
       ],
@@ -164,6 +195,7 @@
       "id": "kimi-k3",
       "provider": "moonshot",
       "family": "kimi",
+      "lineage": "kimi",
       "rungs": [
         "advanced"
       ],
@@ -173,16 +205,18 @@
       "id": "gpt-5.6-sol",
       "provider": "openai",
       "family": "gpt-5.6",
+      "lineage": "gpt",
       "rungs": [
         "advanced",
         "frontier"
       ],
-      "use": "advanced tier for sustained work; frontier tier after a demonstrated capability limit"
+      "use": "advanced tier for sustained work; designated frontier model after a demonstrated capability limit"
     },
     {
       "id": "claude-opus-4-8",
       "provider": "anthropic",
       "family": "claude-opus",
+      "lineage": "claude",
       "rungs": [
         "advanced"
       ],
@@ -192,6 +226,7 @@
       "id": "claude-opus-5",
       "provider": "anthropic",
       "family": "claude-opus",
+      "lineage": "claude",
       "rungs": [
         "advanced"
       ],
@@ -201,19 +236,20 @@
       "id": "claude-opus-5-5",
       "provider": "anthropic",
       "family": "claude-opus",
+      "lineage": "claude",
       "rungs": [
-        "advanced"
+        "advanced",
+        "frontier"
       ],
-      "use": "advanced tier: complex, interconnected coding or reasoning work"
+      "use": "advanced tier for complex, interconnected work; designated frontier model after a demonstrated capability limit"
     },
     {
       "id": "claude-fable-5-1",
       "provider": "anthropic",
       "family": "claude-fable",
-      "rungs": [
-        "frontier"
-      ],
-      "use": "frontier tier: the hardest work after a demonstrated capability limit"
+      "lineage": "claude",
+      "rungs": [],
+      "use": "off the ladder: no rung selects it, so it is reached only on an explicit human request naming it"
     }
   ]
 }
