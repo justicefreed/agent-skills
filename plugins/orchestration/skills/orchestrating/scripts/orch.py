@@ -1704,6 +1704,41 @@ def cmd_inbox_claim(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_inbox_release(args: argparse.Namespace) -> int:
+    """Release one explicitly identified inbox claim.
+
+    A release must name both the worktree key and the inbox target recorded
+    there. Worktrees may be gone by the time a stale claim is cleaned up, so
+    the path is normalized but intentionally not required to exist.
+    """
+    repo_key, _, _ = repo_identity(args.repo)
+    worktree = os.path.realpath(args.worktree)
+    claims = _load_claims(repo_key)
+    claim = claims.get(worktree)
+    if not claim:
+        raise OrchError(
+            "no inbox claim recorded for worktree %s; refusing to release a "
+            "different claimant" % worktree
+        )
+    if claim.get("target") != args.target:
+        raise OrchError(
+            "worktree %s is claimed by %r (program %r), not %r; refusing "
+            "mismatched release"
+            % (worktree, claim.get("target"), claim.get("program"), args.target)
+        )
+    if args.program and claim.get("program") != args.program:
+        raise OrchError(
+            "worktree %s claim belongs to program %r, not %r; refusing "
+            "mismatched release"
+            % (worktree, claim.get("program"), args.program)
+        )
+    claims.pop(worktree)
+    _write_claims(repo_key, claims)
+    print("released inbox claim for %s from %r (program %s)"
+          % (worktree, args.target, claim.get("program", "default")))
+    return 0
+
+
 def cmd_inbox_send(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     if not args.to:
@@ -5173,6 +5208,16 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--force", action="store_true",
                     help="override an existing claim on this worktree")
     ip.set_defaults(func=cmd_inbox_claim)
+
+    ip = isub.add_parser("release",
+                         help="remove one explicitly identified inbox claim")
+    ip.add_argument("--worktree", required=True,
+                    help="worktree path whose claim is being released")
+    ip.add_argument("--as", dest="target", required=True,
+                    help="inbox target recorded by that worktree claim")
+    ip.add_argument("--program",
+                    help="require the claim to belong to this program")
+    ip.set_defaults(func=cmd_inbox_release)
 
     ip = isub.add_parser("send", help="append one item to a target's inbox")
     ip.add_argument("--to", required=True)

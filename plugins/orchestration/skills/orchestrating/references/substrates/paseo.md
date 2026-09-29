@@ -158,6 +158,14 @@ inside that window can still race it.
 
 Record these rather than guessing, and update with evidence:
 
+- **`SELF_RETUNE` is unsupported for rollout.** `update_agent` proves only
+  worker `RETUNE`; no exposed, trusted lifecycle operation can select a root
+  model or effort before its next inference or restore the previous selection
+  before the following ordinary inference. Root addressability, update timing,
+  atomic model/effort application, state preservation, durable recovery, and
+  usage-category telemetry remain unknown. `ROTATE` is replacement, not
+  self-retuning. Evidence: `docs/self-switching-paseo-feasibility-research.md`
+  and `docs/self-switching-paseo-lifecycle-research.md`.
 - Whether the desktop client's queued messages survive an app restart.
 - Whether a worker can read its own agent id from inside its session (assume **no**; parent-minted
   identifiers are used instead).
