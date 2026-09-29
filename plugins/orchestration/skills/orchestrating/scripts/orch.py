@@ -1082,6 +1082,14 @@ def cmd_open(args: argparse.Namespace) -> int:
              ", ".join(row["model"] for row in resolved),
              " [excluding lineage %s]" % ", ".join(exclude) if exclude else ""),
           file=sys.stderr)
+    if _spend_module().pricing_module().detect_harness(None)["harness"] == "claude-code":
+        hints = agent_spawn_hints(entry["resolved_models"])
+        print("as a Claude Code subagent: %s, with the line `%s: %s` in its prompt%s"
+              % ("; ".join(hints) if hints else
+                 "no agent definition spawns these yet -- run `spend agents --write`",
+                 LABEL_ENTRY, entry_id,
+                 "" if tracker_id == "root" else " and `%s: %s`" % (LABEL_TRACKER, tracker_id)),
+              file=sys.stderr)
     flags = entry_flags(entry)
     if flags:
         print("flags: " + " ".join(flags), file=sys.stderr)
@@ -2996,6 +3004,98 @@ def cmd_guard(args: argparse.Namespace) -> int:
 
 SPAWN_TOOLS = ("mcp__paseo__create_agent", "mcp__paseo__update_agent",
                "mcp__paseo__send_agent_prompt")
+# Claude Code's native subagents. `Task` is the tool's older name.
+AGENT_TOOLS = ("Agent", "Task")
+
+# The Agent tool takes no labels, so the entry rides in the prompt as a line of
+# its own: `orch_entry: e5`. `open` prints it.
+_PROMPT_LABEL_RE = re.compile(
+    r"^[ \t]*(%s|%s|%s|%s)[ \t]*:[ \t]*(.+?)[ \t]*$"
+    % (LABEL_ENTRY, LABEL_TRACKER, LABEL_PROGRAM, LABEL_OVERRIDE), re.MULTILINE)
+
+
+def prompt_labels(*texts: Any) -> Dict[str, str]:
+    found: Dict[str, str] = {}
+    for text in texts:
+        for key, value in _PROMPT_LABEL_RE.findall(str(text or "")):
+            found.setdefault(key, _scalar(value))
+    return found
+
+
+def agent_tool_model(tool_input: Dict[str, Any]) -> Tuple[Optional[str], bool, str]:
+    """(canonical id, long-context?, how it was chosen) for an Agent spawn.
+
+    The `model` parameter wins, and is an alias resolved through the dated
+    Claude Code alias table -- so `opus` resolves to whatever that table says
+    today, which is how a drifted alias gets caught. Otherwise the agent
+    definition `subagent_type` names pins the model. Neither -- or a type that
+    pins nothing -- inherits the session's model, which is this harness's
+    provider default: whatever the orchestrator happens to run on.
+    """
+    spend = _spend_module()
+    pricing = spend.pricing_module()
+    registry = spend.default_rates().registry
+    model = tool_input.get("model")
+    if model:
+        text = str(model).strip()
+        long_context = bool(_CONTEXT_SUFFIX.search(text))
+        try:
+            resolved = registry.resolve_model(_CONTEXT_SUFFIX.sub("", text), "claude-code")
+        except pricing.PricingError:
+            return None, long_context, "model %r, which no alias table resolves" % text
+        return resolved["model"], long_context, "model %r (= %s)" % (text, resolved["model"])
+    kind = str(tool_input.get("subagent_type") or "").strip()
+    if kind:
+        pinned = (pricing.read_agent_definitions().get(kind) or {}).get("model")
+        if pinned and pinned != "inherit":
+            canonical, long_context = canonical_spawn_model(pinned)
+            return canonical, long_context, "agent %s (model %s)" % (kind, pinned)
+        return None, False, ("agent type %r, which pins no model and inherits the "
+                             "session's" % kind)
+    return None, False, "no model and no subagent_type, which inherits the session's model"
+
+
+def agent_spawn_hints(models: List[str]) -> List[str]:
+    """What the Agent tool must be given to spawn each model, per spend."""
+    spend = _spend_module()
+    pricing = spend.pricing_module()
+    registry = spend.default_rates().registry
+    index = pricing.index_agents_by_model(pricing.read_agent_definitions(), registry)
+    families = {row["id"]: row.get("family") for row in catalogue()["models"]}
+    hints = []
+    for model in models:
+        field = pricing.spawn_field(model, families.get(model), "claude-code", registry, index)
+        spawn = field.get("spawn") or {}
+        if spawn.get("kind") in ("agent", "routed-agent"):
+            hints.append("subagent_type %s" % spawn["value"])
+        elif spawn.get("kind") == "alias":
+            hints.append("model %s" % spawn["value"])
+        for via in field.get("via") or []:
+            hints.append("subagent_type %s (%s route)" % (via["value"], via["route"]))
+    return hints
+
+
+def _unspawned(repo_key: str) -> List[str]:
+    pending = []
+    for prog in [p["program"] for p in list_programs(repo_key)]:
+        for _, tdata in _read_all_trackers(repo_key, prog, True, "root"):
+            pending += [e["entry"] for e in tdata["entries"]
+                        if e["status"] == "pending" and not e.get("agent_id")
+                        and not e.get("spawned_model")]
+    return pending
+
+
+def _labelled_entry(repo_key: str, labels: Dict[str, Any]
+                    ) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]], str]:
+    """(tracker path, tracker, entry or None, entry ref) for a spawn's labels."""
+    ref = str(labels.get(LABEL_ENTRY) or "").strip()
+    program = resolve_program(repo_key, labels.get(LABEL_PROGRAM))
+    path = tracker_path(repo_key, program, labels.get(LABEL_TRACKER) or "root")
+    data = load_tracker(path)
+    try:
+        return path, data, find_entry(data, ref), ref
+    except OrchError:
+        return path, data, None, ref
 
 
 def _deny(reason: str) -> int:
@@ -3027,6 +3127,11 @@ def _entry_by_agent(repo_key: str, agent_id: str
 def _check_spawn_model(entry: Dict[str, Any], value: Any, verb: str) -> Optional[str]:
     """A refusal reason, or None when the model honours the entry's decision."""
     canonical, long_context = canonical_spawn_model(value)
+    return _check_resolved(entry, canonical, long_context, value, verb)
+
+
+def _check_resolved(entry: Dict[str, Any], canonical: Optional[str],
+                    long_context: bool, value: Any, verb: str) -> Optional[str]:
     allowed = entry.get("resolved_models")
     if long_context and not entry.get("long_context"):
         return ("%s %s asks for a long-context variant (%s), which is its own "
@@ -3036,9 +3141,11 @@ def _check_spawn_model(entry: Dict[str, Any], value: Any, verb: str) -> Optional
     if not allowed:
         return None
     if canonical is None:
-        return ("%s %s names model %r, which does not resolve to a canonical id. "
-                "An alias is refused because what it names drifts. Use one of: %s."
-                % (verb, entry["entry"], value, ", ".join(allowed)))
+        return ("%s %s names model %s, which does not resolve to a canonical id. "
+                "An alias is refused because what it names drifts, and an "
+                "inherited model is whatever the session runs on. Use one of: %s."
+                % (verb, entry["entry"], value if isinstance(value, str) and
+                   " " in value else repr(value), ", ".join(allowed)))
     if canonical not in allowed:
         return ("%s %s with %s, but the entry is on the %s rung%s, which resolves "
                 "to: %s. To go higher, `orch escalate %s` on a recorded signal "
@@ -3069,7 +3176,7 @@ def _spawn_guard(args: argparse.Namespace) -> int:
     payload = hook_payload()
     name = payload.get("tool_name")
     tool_input = payload.get("tool_input")
-    if name not in SPAWN_TOOLS or not isinstance(tool_input, dict):
+    if name not in SPAWN_TOOLS + AGENT_TOOLS or not isinstance(tool_input, dict):
         return 0
     cwd = payload.get("cwd")
     try:
@@ -3079,17 +3186,48 @@ def _spawn_guard(args: argparse.Namespace) -> int:
     if not list_programs(repo_key):
         return 0
 
+    if name in AGENT_TOOLS:
+        labels = prompt_labels(tool_input.get("prompt"), tool_input.get("description"))
+        ref = str(labels.get(LABEL_ENTRY) or "").strip()
+        if ref.lower() == "none":
+            return 0
+        if not ref:
+            pending = _unspawned(repo_key)
+            if not pending:
+                return 0
+            return _deny(
+                "entries %s are recorded and not yet spawned, and this subagent "
+                "names none of them. Put the line `%s: eN` that `orch open` "
+                "printed in its prompt, or `%s: none` for a subagent that is not "
+                "a lane." % (", ".join(pending), LABEL_ENTRY, LABEL_ENTRY))
+        path, data, entry, ref = _labelled_entry(repo_key, labels)
+        if entry is None:
+            return _deny("subagent prompt names %s: %s, which is not an open entry."
+                         % (LABEL_ENTRY, ref))
+        canonical, long_context, how = agent_tool_model(tool_input)
+        refusal = _check_resolved(entry, canonical, long_context, how, "spawning")
+        override = str(labels.get(LABEL_OVERRIDE) or "").strip()
+        if refusal and not (override and not is_placeholder(override)):
+            hints = agent_spawn_hints(entry.get("resolved_models") or [])
+            return _deny(refusal + (" Spawn with: %s." % "; ".join(hints) if hints else
+                                    " No agent definition spawns those models yet: "
+                                    "`spend agents --write`."))
+        entry["spawned_model"] = canonical or how
+        entry["spawned_via"] = "agent-tool"
+        if refusal:
+            entry["spawn_override"] = override
+            entry["notes"].append({"at": _now(), "note": "spawn override: %s" % override})
+        entry["updated_at"] = _now()
+        save_tracker(path, data)
+        return 0
+
     if name == "mcp__paseo__create_agent":
         labels = tool_input.get("labels") or {}
         ref = str(labels.get(LABEL_ENTRY) or "").strip()
         if ref.lower() == "none":
             return 0
         if not ref:
-            pending = []
-            for prog in [p["program"] for p in list_programs(repo_key)]:
-                for _, tdata in _read_all_trackers(repo_key, prog, True, "root"):
-                    pending += [e["entry"] for e in tdata["entries"]
-                                if e["status"] == "pending" and not e.get("agent_id")]
+            pending = _unspawned(repo_key)
             if not pending:
                 return 0
             return _deny(

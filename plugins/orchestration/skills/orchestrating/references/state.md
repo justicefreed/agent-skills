@@ -140,7 +140,7 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch resume` | orchestration state re-derived from disk; the session-start hook after compaction |
 | `orch frontdesk [--set T --agent-id A \| --clear]` | record which inbox target relays the human |
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
-| `orch spawn-guard` | the PreToolUse hook on Paseo spawn, RETUNE and prompt; refuses a spawn that does not match its entry, counts lane rounds |
+| `orch spawn-guard` | the PreToolUse hook on Paseo spawn, RETUNE and prompt, and on Claude Code's `Agent`; refuses a spawn that does not match its entry, counts lane rounds |
 | `orch compaction measure\|check\|window` | context floor and safe auto-compact window; `check` is the session-start loop detector; `window` is what a launcher asks |
 | `orch rotate begin\|claim\|complete\|status\|abort` | replace a live agent; see `../rotation.md` for the order and who runs which |
 

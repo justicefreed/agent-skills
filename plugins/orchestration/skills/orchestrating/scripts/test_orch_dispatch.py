@@ -326,6 +326,69 @@ run(root3, "update", e5, "--spawned-model", "claude-opus-5-5")
 check_true("--spawned-model records a spawn no hook saw, and the roster compares it",
            "TIER-MISMATCH:claude-opus-5-5" in orch.entry_summary(entry(root3, e5)))
 
+# --------------------------------------------------------------------------- #
+# 5. Claude Code's native subagents: no labels, so the entry rides in the prompt.
+# --------------------------------------------------------------------------- #
+
+_agents = tempfile.mkdtemp(prefix="orch-agents-")
+for _name, _model in (("claude-sonnet-5", "claude-sonnet-5"),
+                      ("claude-opus-5-5", "claude-opus-5-5"),
+                      ("inherits", "inherit")):
+    with open(os.path.join(_agents, _name + ".md"), "w") as fh:
+        fh.write('---\nname: "%s"\ndescription: "t"\nmodel: "%s"\n---\n' % (_name, _model))
+_env_saved = {k: os.environ.get(k) for k in ("ORCH_AGENTS_DIR", "CLAUDECODE")}
+os.environ["ORCH_AGENTS_DIR"] = _agents
+os.environ["CLAUDECODE"] = "1"
+try:
+    root4 = make_repo()
+    code, out, err = run(root4, "open", "--brief",
+                         write_brief(root4, "a.md", archetype="implementer"))
+    e6 = out.strip()
+    check_true("under Claude Code, open prints the subagent_type and prompt marker",
+               "subagent_type claude-sonnet-5" in err and "`orch_entry: %s`" % e6 in err)
+
+    def agent(**tool_input):
+        tool_input.setdefault("description", "lane")
+        return hook(root4, "Agent", tool_input)
+
+    marked = "orch_entry: %s\nDo the work in the brief." % e6
+    check_true("a subagent naming no entry is refused while one is pending",
+               denied(agent(prompt="do the work", subagent_type="claude-sonnet-5")))
+    check_same("a subagent marked `orch_entry: none` is allowed",
+               agent(prompt="orch_entry: none\nlook something up"), None)
+    _inherit = agent(prompt=marked)
+    check_true("a lane subagent with no model inherits the session's, and is refused",
+               denied(_inherit) and "inherits" in _inherit["permissionDecisionReason"])
+    check_true("the refusal names what to spawn with instead",
+               "subagent_type claude-sonnet-5" in _inherit["permissionDecisionReason"])
+    check_true("an agent type that pins no model is refused the same way",
+               denied(agent(prompt=marked, subagent_type="inherits")))
+    check_true("an agent definition on the wrong rung is refused",
+               denied(agent(prompt=marked, subagent_type="claude-opus-5-5")))
+    check_true("the `opus` alias is refused for an economy lane",
+               denied(agent(prompt=marked, model="opus")))
+    check_same("the agent definition for the resolved model is allowed",
+               agent(prompt=marked, subagent_type="claude-sonnet-5"), None)
+    check_same("and the spawn is recorded, via the Agent tool",
+               (entry(root4, e6)["spawned_model"], entry(root4, e6)["spawned_via"]),
+               ("claude-sonnet-5", "agent-tool"))
+    check_same("a spawned lane no longer counts as pending for the next subagent",
+               hook(root4, "Agent", {"description": "x", "prompt": "unrelated"}), None)
+
+    e7 = run(root4, "open", "--brief",
+             write_brief(root4, "b.md", archetype="implementer"))[1].strip()
+    check_same("an override line in the prompt lets a mismatch through",
+               agent(prompt="orch_entry: %s\norch_override: sonnet quota is out\ngo" % e7,
+                     subagent_type="claude-opus-5-5"), None)
+    check_true("and the roster shows it",
+               "SPAWN-OVERRIDE" in orch.entry_summary(entry(root4, e7)))
+finally:
+    for _k, _v in _env_saved.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
 # A broken tracker must not turn the guard into a wall: exit 2 is a refusal to
 # Claude Code, so the guard's own failure has to let the call through.
 repo_key3, _, _ = orch.repo_identity(root3)

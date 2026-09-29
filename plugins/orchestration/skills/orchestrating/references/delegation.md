@@ -163,12 +163,19 @@ The **long-context variant** (`[1m]` and the like) is its own dial with its own 
 at open, or `escalate --long-context`, under the same reason-and-evidence rule.
 
 **The spawn guard checks the spawn against the decision.** A PreToolUse hook on Paseo's
-`create_agent`, `update_agent` and `send_agent_prompt` refuses a spawn labelled with an entry whose
+`create_agent`, `update_agent` and `send_agent_prompt`, and on Claude Code's `Agent` tool, refuses a spawn labelled with an entry whose
 model is not one the entry resolved to, whose mode differs from the recorded one, or that asks for a
 long-context variant nobody escalated; refuses an unlabelled spawn while entries are pending (label
 `orch_entry: none` for an agent that is not a lane); refuses a RETUNE above the recorded rung or one
 that clears the model onto the provider default; and records what was spawned. A mismatch that is
-genuinely right goes through with label `orch_override: "<why>"` and shows on the roster. Where no
+genuinely right goes through with label `orch_override: "<why>"` and shows on the roster.
+
+A Claude Code subagent takes no labels, so the entry rides in its prompt as a line of its own —
+`orch_entry: e5`, and `orch_override: <why>` the same way — and its model is whatever the `model`
+alias resolves to in the dated alias table, else whatever the `subagent_type`'s agent definition
+pins. A subagent with neither inherits the session's model, which is refused for a lane for the same
+reason an omitted Paseo model is. `open` prints the `subagent_type` to use; `spend agents --write`
+creates the definitions, one per canonical id. Where no
 hook runs, record the spawn with `orch update <e> --spawned-model <id>`; `roster` flags
 `TIER-MISMATCH` either way.
 

@@ -7,7 +7,7 @@ not the process — and for short-lived work where a fresh restart is cheap.
 
 | Verb | Call | Semantics | Evidence |
 |---|---|---|---|
-| `SPAWN` | the subagent-launch tool, with a named agent type; `run_in_background` for long work | **does not survive this session ending**; there is no mode parameter — a subagent runs under *your* session's permission mode, so `paseo.md`'s Always Ask trap cannot occur here | documented |
+| `SPAWN` | the subagent-launch tool, with the `subagent_type` `orch open` printed and the line `orch_entry: <e>` in the prompt; `run_in_background` for long work | **does not survive this session ending**; there is no mode parameter — a subagent runs under *your* session's permission mode, so `paseo.md`'s Always Ask trap cannot occur here. With neither `model` nor a model-pinning `subagent_type` it **inherits your session's model** — the spawn guard refuses that for a lane (`delegation.md` §4) | documented |
 | `ISOLATE` | that tool's `isolation: "worktree"` option | **temporary and auto-cleaned** — enough for isolation, not for human review | documented |
 | `POLL` | the peer/agent listing tool; the background-task output tool | listing rows observed to show only `interactive · started Nm ago` — **no busy/idle field**, despite the docs describing one | observed |
 | `HARVEST` | the subagent's final report, or its background-task output | the final message is not shown to the user — relay what matters | documented |

@@ -35,11 +35,12 @@ hooks:
       hooks:
         - type: command
           command: '[ -t 0 ] && exit 0; p=$(cat); f=${ORCH_GUARD_HEREDOC_BYTES:-1200}; b=${ORCH_GUARD_BYTES:-6000}; { [ "$b" -lt "$f" ] && f=$b; } 2>/dev/null; { [ ${#p} -lt "$f" ] && exit 0; } 2>/dev/null; PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] || continue; printf %s "$p" | "$PY" "$d/scripts/orch.py" guard; exit $?; done; exit 0'
-    # The spawn guard: a spawn or RETUNE must honour its entry's recorded rung
-    # and mode, and follow-up rounds to one lane are counted. Rare calls, so no
-    # shell prefilter. It can refuse (permissionDecision: deny); every other
-    # path, including an internal error, lets the call through.
-    - matcher: "mcp__paseo__create_agent|mcp__paseo__update_agent|mcp__paseo__send_agent_prompt"
+    # The spawn guard: a spawn or RETUNE -- Paseo, or a Claude Code subagent --
+    # must honour its entry's recorded rung and mode, and follow-up rounds to one
+    # lane are counted. Rare calls, so no shell prefilter. It can refuse
+    # (permissionDecision: deny); every other path, including an internal error,
+    # lets the call through.
+    - matcher: "^(Agent|Task|mcp__paseo__create_agent|mcp__paseo__update_agent|mcp__paseo__send_agent_prompt)$"
       hooks:
         - type: command
           command: '[ -t 0 ] && exit 0; PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" spawn-guard; done; exit 0'
