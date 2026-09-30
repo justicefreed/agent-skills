@@ -6,3 +6,4 @@ __pycache__/
 node_modules/
 # Serena (LSP-backed coding assistant) per-checkout state
 .serena/
+in-progress/
