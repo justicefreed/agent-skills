@@ -66,6 +66,13 @@ OPTIONAL_BRIEF_FIELDS = (
     "plan_doc",
     "review",
     "review_waiver",
+    "slice_id",
+    "read_set",
+    "write_set",
+    "max_model_calls",
+    "max_context_tokens",
+    "max_cost_usd",
+    "checkpoint_every_calls",
 )
 
 # Who reads this lane's diff before it lands. Declared at dispatch, because it
@@ -82,6 +89,19 @@ PLACEHOLDERS = {
 }
 
 STATUSES = ("pending", "running", "harvested")
+
+# Limits are intentionally resolved at admission, then stored on the entry.
+# A policy change must never silently change the budget of a running lane.
+LANE_LIMIT_DEFAULTS = {
+    "implementer": (40, 150_000, 8.00, 20),
+    "reviewer": (25, 120_000, 4.00, 12),
+    "verifier": (20, 100_000, 2.00, 10),
+    "verifier-low-risk": (12, 80_000, 1.00, 8),
+    "doc-writer": (16, 80_000, 1.00, 8),
+    "inventory": (12, 80_000, 1.00, 8),
+    "integrator": (25, 120_000, 4.00, 12),
+    "analyst": (25, 120_000, 4.00, 12),
+}
 
 # Session modes that stop a worker to ask a human. `default` deserves naming
 # precisely, because everything about it misleads: the id reads like "whatever
@@ -637,6 +657,31 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
                 "must be able to find later." % path
             )
 
+    for field in ("read_set", "write_set"):
+        if field in fields:
+            value = fields[field]
+            if not isinstance(value, list) or (field == "read_set" and not value):
+                raise OrchError("brief %s: %s must be a%s path list."
+                                % (path, field,
+                                   " non-empty" if field == "read_set" else ""))
+            if any(is_placeholder(item) for item in value):
+                raise OrchError("brief %s: %s contains a placeholder." % (path, field))
+    for field in ("max_model_calls", "max_context_tokens",
+                  "checkpoint_every_calls"):
+        if field in fields:
+            try:
+                if int(str(fields[field])) <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise OrchError("brief %s: %s must be a positive integer."
+                                % (path, field))
+    if "max_cost_usd" in fields:
+        try:
+            if float(str(fields["max_cost_usd"])) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise OrchError("brief %s: max_cost_usd must be a positive number." % path)
+
     if "model" in fields:
         reject_default_rung(fields["model"], "brief %s: model" % path)
         if rung_index(fields["model"]) < 0:
@@ -725,12 +770,19 @@ def entry_flags(entry: Dict[str, Any]) -> List[str]:
 
 def entry_summary(entry: Dict[str, Any]) -> str:
     flags = entry_flags(entry)
+    limits = entry.get("limits") or {}
+    envelope = ("≤%sc/%sK/$%.2f" % (
+        limits.get("max_model_calls", "?"),
+        int(limits.get("max_context_tokens", 0) or 0) // 1000 or "?",
+        float(limits.get("max_cost_usd", 0.0) or 0.0))
+                if limits else "LEGACY-UNBOUNDED")
     return "  ".join(filter(None, [
         entry["entry"],
         entry["status"],
         (entry.get("agent_id") or "-")[:8],
         entry.get("session_name") or "-",
         entry["title"],
+        envelope,
         ("[" + " ".join(flags) + "]") if flags else "",
     ]))
 
@@ -846,6 +898,32 @@ def live_lane_count(repo_key: str, program: str) -> int:
     return sum(1 for _, data in trackers
                for entry in data.get("entries", [])
                if (entry.get("status") or "pending") != "harvested")
+
+def resolved_lane_limits(fields: Dict[str, Any], archetype: str) -> Dict[str, Any]:
+    """Resolve a bounded lane contract once, at admission."""
+    calls, context, cost, checkpoint = LANE_LIMIT_DEFAULTS.get(
+        archetype, (25, 120_000, 4.00, 12))
+    return {
+        "max_model_calls": int(fields.get("max_model_calls") or calls),
+        "max_context_tokens": int(fields.get("max_context_tokens") or context),
+        "max_cost_usd": float(fields.get("max_cost_usd") or cost),
+        "checkpoint_every_calls": int(fields.get("checkpoint_every_calls") or checkpoint),
+        "slice_id": str(fields.get("slice_id") or "unsliced"),
+        "read_set": list(fields.get("read_set") or []),
+        "write_set": list(fields.get("write_set") or []),
+    }
+
+
+def program_budget_state(repo_key: str, program: str) -> Dict[str, float]:
+    """Measured snapshots plus reservations for all still-open lanes."""
+    measured = sum(float(s.get("cost", 0.0) or 0.0)
+                   for s in load_cost_snapshots(repo_key, program).values())
+    reserved = 0.0
+    for _, tracker in _read_all_trackers(repo_key, program, True, "root"):
+        for entry in tracker.get("entries", []):
+            if (entry.get("status") or "pending") != "harvested":
+                reserved += float((entry.get("limits") or {}).get("max_cost_usd", 0.0))
+    return {"measured": measured, "reserved": reserved}
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -998,6 +1076,19 @@ def cmd_open(args: argparse.Namespace) -> int:
                 "one dispatch if it genuinely cannot wait."
                 % (live, program, FANOUT_MAX))
 
+    limits = resolved_lane_limits(fields, archetype)
+    budget = load_budget(repo_key, program)
+    limit = float(budget.get("limit") or 0.0)
+    if limit and not getattr(args, "over_budget", False):
+        state = program_budget_state(repo_key, program)
+        committed = state["measured"] + state["reserved"] + limits["max_cost_usd"]
+        if committed > limit:
+            raise OrchError(
+                "budget admission refused: $%.2f measured + $%.2f reserved + "
+                "$%.2f for this lane exceeds the $%.2f program limit. Harvest "
+                "or close lanes, lower max_cost_usd, or pass --over-budget."
+                % (state["measured"], state["reserved"], limits["max_cost_usd"], limit))
+
     tracker_id = args.tracker or fields.get("tracker_id") or "root"
     path = tracker_path(repo_key, program, tracker_id)
 
@@ -1047,6 +1138,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         "mode": mode,
         "child_tracker": None,
         "pending_message": None,
+        "limits": limits,
         "opened_at": _now(),
         "updated_at": _now(),
         "notes": [],
@@ -1999,7 +2091,9 @@ FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
 # traffic, none of which appear in any number this program prints.
 # Derived from the warn threshold so that lowering one lowers both, and set
 # above it so the advisory still has room to be an advisory first.
-FANOUT_MAX = int(os.environ.get("ORCH_FANOUT_MAX", FANOUT_WARN + 4))
+# Four build lanes are enough to keep an integrator busy.  More is an explicit
+# exception, not an accidental default inherited from the warning threshold.
+FANOUT_MAX = int(os.environ.get("ORCH_FANOUT_MAX", 4))
 # Conditions for PROPOSING a front desk. Calibrated against seven recorded
 # programs: the largest relay cluster was 8 in the one program where the human
 # had visibly become the router, and <=5 in every other, so 6 separates them

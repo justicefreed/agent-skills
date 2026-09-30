@@ -30,6 +30,9 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+# This test intentionally opens many unrelated entries to exercise the model
+# matrix; admission-limit behavior is tested independently.
+os.environ.setdefault("ORCH_FANOUT_MAX", "100")
 _spec = importlib.util.spec_from_file_location("orch", os.path.join(HERE, "orch.py"))
 orch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(orch)
@@ -120,6 +123,11 @@ check_same("and at the archetype's relative effort",
            entry(root, e_impl)["effort"], "default")
 check_true("open resolves the rung to exact models",
            "claude-sonnet-5" in entry(root, e_impl)["resolved_models"])
+check_same("an unannotated lane receives a persisted bounded contract",
+           entry(root, e_impl)["limits"],
+           {"max_model_calls": 40, "max_context_tokens": 150000,
+            "max_cost_usd": 8.0, "checkpoint_every_calls": 20,
+            "slice_id": "unsliced", "read_set": [], "write_set": []})
 check_true("open prints the models and the label to spawn with",
            "claude-sonnet-5" in err and '"orch_entry": "%s"' % e_impl in err)
 check_true("the resolution never offers a model above the rung",
@@ -388,6 +396,18 @@ finally:
             os.environ.pop(_k, None)
         else:
             os.environ[_k] = _v
+
+# --------------------------------------------------------------------------- #
+# 6. Program budget admission reserves an open lane before it spends.
+# --------------------------------------------------------------------------- #
+
+root5 = make_repo()
+run(root5, "open", "--brief", write_brief(root5, "first.md", archetype="implementer"))
+run(root5, "budget", "--set", "10")
+code, out, err = run(root5, "open", "--brief",
+                     write_brief(root5, "second.md", archetype="implementer"))
+check_true("a second lane is refused when reservations exceed the budget",
+           code != 0 and "budget admission refused" in err)
 
 # A broken tracker must not turn the guard into a wall: exit 2 is a refusal to
 # Claude Code, so the guard's own failure has to let the call through.

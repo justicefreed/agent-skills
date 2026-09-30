@@ -144,6 +144,9 @@ this worktree's inbox is claimed.
    `assets/BRIEF.template.md`; the contract is in `references/briefs.md`. Set `review:` here — who
    reads this lane's diff before it lands is a property of the spec, not a call made later with the
    finished diff in hand (`references/integration.md`).
+   For build work, make the brief one acceptance-criterion-sized **slice**. Declare its read and
+   write sets; parallel lanes may not overlap a write set, and a shared discovery map must replace
+   repeated whole-repository reading. Let the resolved lane limits reserve budget before spawning.
 2. **Record it**, passing the brief so its front matter supplies the required fields rather than you
    restating them. A dispatch the tracker does not know about is undispatched work.
 3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree, using exactly the
@@ -173,6 +176,12 @@ drained between turns. Nobody sends; senders append. `references/availability.md
 
 **Resources.** Capacity gates are enforced against the operating system, never against a tracker or
 a peer's claim.
+
+**Lane budgets.** `orch open` resolves and records limits for model calls, retained context, cost
+and checkpoint cadence. `orch budget` shows measured program spend plus live reservations; it is
+an admission gate, not a warning after the money is gone. At a lane boundary, checkpoint and replace
+from the artifact rather than continue a bloated history. If recovery is necessary, preserve the
+worktree and patch first; a successor inspects and verifies uncommitted work before committing it.
 
 **Rotate before you are expensive.** Compaction fires early and a session-start hook re-derives
 your state afterwards; act at a seam when the turn-end hook warns (`references/cost.md`). When a

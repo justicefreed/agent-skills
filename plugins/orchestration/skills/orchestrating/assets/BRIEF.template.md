@@ -8,6 +8,15 @@ advances: [<plan item ids>]        # or the literal: none
 consumption: <what the orchestrator will do with the result — this is the delete condition>
 progress_artifact: <path the worker appends progress to — REQUIRED for long tasks>
 archetype: <implementer|analyst|reviewer|verifier|verifier-low-risk|doc-writer|inventory|integrator>   # REQUIRED: sets the start rung, effort and independence
+slice_id: <one acceptance-criterion-sized slice; use a shared slice map id>
+read_set:
+  - <paths or named sections this lane may inspect; never “the whole repo”>
+write_set:
+  - <paths this lane may change; empty only for analysis work>
+# max_model_calls: <positive integer; defaults are resolved and recorded at open>
+# max_context_tokens: <positive integer; checkpoint/replace before this retained context>
+# max_cost_usd: <positive number; this is the lane's reservation against program budget>
+# checkpoint_every_calls: <positive integer; persist progress before continuing>
 # model: <minimal|economy|advanced|frontier>  # optional RUNG, never a name; defaults to the archetype's
 # effort: <lowest|one-below-default|default|above-default>   # optional; defaults to the archetype's
 # model_reason: <the observed signal>         # required for any rung or effort above the archetype's
@@ -61,6 +70,10 @@ means implement; refactor means refactor, not rewrite.>
 ## Constraints
 
 - <Must-not / must-preserve, specific to this task only.>
+- Stay inside `read_set` and `write_set`. A new file range is an escalation to the
+  orchestrator, not a reason to widen the task.
+- At each `checkpoint_every_calls` boundary, update `progress_artifact` with the
+  completed acceptance criterion, changed files, test state, and one safe next step.
 - Do **not** commit. The orchestrator commits, with explicit paths.
 - <For analysis-only work, include verbatim:>
   This is analysis only. Do NOT edit, create, or delete any files. Do NOT write code.
