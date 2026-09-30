@@ -21,6 +21,8 @@ hooks:
           command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" resume --format hook; done; exit 0'
         - type: command
           command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" compaction check --format hook; done; exit 0'
+        - type: command
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" model check --format hook; done; exit 0'
   PreToolUse:
     # Prefiltered in shell, like the `spend.py` guard: this fires on every Write,
     # Edit and Bash and almost always has nothing to say, so the payload is sized

@@ -117,7 +117,8 @@
       "family": "gpt-5.6",
       "lineage": "gpt",
       "rungs": [
-        "minimal"
+        "minimal",
+        "economy"
       ],
       "use": "minimal and economy tiers: bounded coding, prototyping, and high-volume workers"
     },
@@ -166,10 +167,16 @@
       "provider": "anthropic",
       "family": "claude-sonnet",
       "lineage": "claude",
+      "effort_options": {
+        "lowest": "off",
+        "one-below-default": "low",
+        "default": "medium",
+        "above-default": "high"
+      },
       "rungs": [
         "economy"
       ],
-      "use": "economy tier: everyday analysis and implementation with a bounded scope"
+      "use": "economy tier: everyday analysis and implementation with a bounded scope; economy policy explicitly selects medium thinking rather than the provider's high default"
     },
     {
       "id": "gpt-5.6-terra",

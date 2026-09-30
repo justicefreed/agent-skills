@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "claude-mem@thedotmack": false,
+    "explanatory-output-style@claude-plugins-official": false
+  }
+}

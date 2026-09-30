@@ -18,7 +18,7 @@ write_set:
 # max_cost_usd: <positive number; this is the lane's reservation against program budget>
 # checkpoint_every_calls: <positive integer; persist progress before continuing>
 # model: <minimal|economy|advanced|frontier>  # optional RUNG, never a name; defaults to the archetype's
-# effort: <lowest|one-below-default|default|above-default>   # optional; defaults to the archetype's
+# effort: <lowest|one-below-default|default|above-default>   # optional policy level; `open` resolves a declared model-specific provider option
 # model_reason: <the observed signal>         # required for any rung or effort above the archetype's
 # escalation_evidence: <field:NAME|entry:eN|path>   # required with model_reason; field: must be non-empty
 # subsystems: [<a>, <b>]                      # e.g. what escalation_evidence: field:subsystems points at
@@ -49,6 +49,7 @@ means implement; refactor means refactor, not rewrite.>
 
 - `<path>` — <what it is, why it matters>
 - <Reference by path. Do not paste contents; the worker can read.>
+- <Large file? Name the sections, headings or line ranges needed, with a one-line reason each — never "read X in full".>
 
 ## Current state
 

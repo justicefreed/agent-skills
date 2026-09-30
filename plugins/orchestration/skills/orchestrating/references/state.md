@@ -96,7 +96,10 @@ write down the bad state before anyone can report it.
 **The model rung rides the same rails**, because it has the same failure mode — forgotten at spawn,
 and expensive rather than neutral when forgotten. `open` takes the rung and effort from the brief's
 `archetype`, refuses anything above that start without `--model-reason` and `--evidence`, resolves
-the rung to exact models, and prints them with the settings and labels to spawn with. `roster` flags
+the rung to exact models, and prints them with the settings and labels to spawn with. A catalogue
+model that declares effort options also resolves the policy effort to a required concrete
+`thinkingOptionId`; omission is refused because it can select a more expensive provider default.
+`roster` flags
 `TIER:<rung>` above the archetype's start (above `economy` for older entries), suffixed `:NO-REASON`
 when unjustified; `TIER-MISMATCH:<id>` when the recorded spawn is not one of the resolved models;
 `EFFORT:`, `LONG-CTX`, `SAME-FAMILY`, `SPAWN-OVERRIDE` and `ROUNDS:<n>` for the other dials; and
@@ -142,6 +145,7 @@ Required brief front matter — `title`, `worktree`, `expected_artifacts`, `adva
 | `orch guard` | the PreToolUse hook; notes a large tool input once per cooldown |
 | `orch spawn-guard` | the PreToolUse hook on Paseo spawn, RETUNE and prompt, and on Claude Code's `Agent`; refuses a spawn that does not match its entry, counts lane rounds |
 | `orch compaction measure\|check\|window` | context floor and safe auto-compact window; `check` is the session-start loop detector; `window` is what a launcher asks |
+| `orch model check [--transcript P] [--format text\|hook]` | is the resumed session's model current; the session-start hook on resume |
 | `orch rotate begin\|claim\|complete\|status\|abort` | replace a live agent; see `../rotation.md` for the order and who runs which |
 
 `roster` prints **recorded intent, not liveness**, and says so. It never contacts a substrate — that

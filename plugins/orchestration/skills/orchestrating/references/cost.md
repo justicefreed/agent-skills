@@ -114,9 +114,26 @@ expensive was almost entirely self-inflicted, not imposed by the workers.
    become an outage on the machine, at which point every lane is lost, not just the marginal one.
    So `orch open` refuses past `ORCH_FANOUT_MAX`; `--over-fanout` is the one-dispatch override.
 
-Worth knowing about the other side: a **worker** carries a small context and dies at the end of its
-task, so its cache-read tax never accumulates. Cheap workers and an expensive orchestrator are the
-same fact seen twice — which is why moving work out is a bigger saving than making the work cheaper.
+Worth knowing about the other side: a **worker** starts at a ~50K floor before it has done any
+work, and a long lane grows past 300K — measured, two w-020 sessions grew from a 53K floor to 310K
+and 324K with no compaction, and cache reads re-bill that floor on every call. The worker's context
+still dies with its task, which is the saving; the lane just has to end. Size a lane to finish well
+before ~120 model calls, or split it; a lane expected to run long writes its progress artifact at a
+milestone (`orch checkpoint`) so it can be compacted or replaced cheaply. The lean lane profile in
+`substrates/paseo.md` keeps the floor itself small.
+
+## Bounded lanes, not retrospective warnings
+
+Every dispatch resolves a lane contract at `orch open`: maximum model calls, retained context,
+cost reservation and checkpoint cadence. The program budget is an **admission** calculation:
+measured snapshots plus reservations for open lanes plus the proposed lane must fit. A warning after
+the spend has occurred is telemetry, not a budget control.
+
+Model calls are the unit, not tool calls. One tool can create many model requests, while several
+small tools can be one inexpensive step. At a checkpoint boundary, end a lane that is approaching
+its cap and start a successor from the brief and progress artifact. Preserve the old worktree and
+inspect its diff before any successor commits it; an interrupted tree is candidate evidence, not a
+completed result.
 
 ## Measuring, and being told
 
@@ -135,9 +152,16 @@ The skill's turn-end hook runs `orch cost --format hook` and speaks **only** whe
 |---|---|---|
 | Context, plan a rotation | 250K | `ORCH_CONTEXT_WARN` |
 | Context, rotate now | 400K | `ORCH_CONTEXT_URGENT` |
+| Too many model calls in one turn | 12 calls since the last human turn | `ORCH_TURN_CALLS_WARN` |
 | Fan-out too wide to consume | 8 open dispatches | `ORCH_FANOUT_WARN` |
 | Budget | 75% and 100% of the limit | `orch budget --set` |
 | Offer the human a front desk | 6 repeated routing turns, 20 turns, 6 dispatches | `ORCH_FRONTDESK_RELAY` |
+
+The session-start hook also runs `orch model check --format hook` on a resume. A session whose
+model the catalogue has superseded — or does not know at all — is told to start a fresh agent on
+the preferred sibling with a handoff note (`rotation.md`) instead of continuing; a session idle
+past an hour is told its cache is cold, so every call until it rewarms re-writes the whole context
+at the 1h-write rate (~2x input price).
 
 Fan-out is the only one of these with a hard stop behind it. `orch open` **refuses** a dispatch once
 the program holds `ORCH_FANOUT_MAX` lanes that have not been harvested — four past the warn
@@ -197,12 +221,13 @@ Three safeguards sit behind that, because a bad window breaks agents silently:
 
 - **Only long-lived roles get one.** `orch compaction window` answers for a worktree whose inbox
   claim is `root`, `frontdesk` or an integrator (`ORCH_AUTOCOMPACT_ROLES`; `--any-role` overrides),
-  and exits 3 otherwise. A worker carries a small context and dies with its task, so an early window
-  saves it nothing and costs it a half-finished task.
+  and exits 3 otherwise. A worker's context dies with its task, so an early window saves it nothing
+  and costs it a half-finished task.
 - **Nothing unmeasured gets a tight number.** With no measurement the answer is **300K**, which
-  clears the worst floor observed. `orch compaction measure` records the real floor, and the
-  recommendation is then `max(3 × floor, 200K)`, clamped to the harness's range and rounded to 50K.
-  A recorded floor only ever grows.
+  clears the worst floor observed. `orch compaction measure` records the real floor and the window
+  it justifies; `orch compaction window` then answers with that recorded window (clamped to the
+  200K floor this tool will not go below) rather than the blind default. A recorded floor only ever
+  grows.
 - **The loop is detected, not just avoided.** The session-start hook runs `orch compaction check`,
   which scans the transcript for compactions less than 15 model calls apart and for a window with
   less headroom than the floor warrants. It says nothing on a healthy session. It cannot fix one from

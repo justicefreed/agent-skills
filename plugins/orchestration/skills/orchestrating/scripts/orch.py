@@ -159,8 +159,10 @@ WORKER_MODEL_DEFAULT = os.environ.get("ORCH_WORKER_MODEL") or "economy"
 MODEL_FLAG_ABOVE = "economy"
 MODEL_REFUSE_WITHOUT_REASON = {"frontier"}
 
-# Effort, relative to the model's own default, cheapest first. The archetype
-# names its start; above it is an escalation like any rung.
+# Effort, relative to the catalogue policy baseline, cheapest first. A model
+# may map these policy levels to concrete provider thinking-option ids; when it
+# does, omitting the provider setting is not neutral because its default may be
+# more expensive than the policy baseline.
 EFFORT_LEVELS = ("lowest", "one-below-default", "default", "above-default")
 
 # What an escalation is about. A `task` escalation is a property of the work
@@ -962,8 +964,8 @@ def cmd_open(args: argparse.Namespace) -> int:
                         % (", ".join(MODEL_RUNGS), model))
     effort = str(args.effort or fields.get("effort") or start_effort).strip().lower()
     if effort_index(effort) < 0:
-        raise OrchError("effort must be one of %s, relative to the model's own "
-                        "default. Got %r." % (", ".join(EFFORT_LEVELS), effort))
+        raise OrchError("effort must be one of %s, relative to the catalogue "
+                        "policy baseline. Got %r." % (", ".join(EFFORT_LEVELS), effort))
     long_context = bool(args.long_context or str(fields.get("long_context", "")).strip().lower()
                         in ("true", "yes", "1"))
     model_reason = str(args.model_reason or fields.get("model_reason") or "").strip()
@@ -1046,6 +1048,7 @@ def cmd_open(args: argparse.Namespace) -> int:
             "the catalogue has no %s models outside lineage %s. Pass "
             "--same-family-ok \"<why>\" to review within it, on the record."
             % (model, ", ".join(exclude)))
+    thinking_options = resolved_thinking_options(resolved, effort)
 
     if args.program:
         program = args.program
@@ -1133,6 +1136,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         "exclude_lineages": exclude,
         "same_family_ok": same_family_ok or None,
         "resolved_models": [row["model"] for row in resolved],
+        "resolved_thinking_options": thinking_options,
         "spawned_model": None,
         "prompts_sent": 0,
         "mode": mode,
@@ -1174,6 +1178,10 @@ def cmd_open(args: argparse.Namespace) -> int:
              ", ".join(row["model"] for row in resolved),
              " [excluding lineage %s]" % ", ".join(exclude) if exclude else ""),
           file=sys.stderr)
+    if thinking_options:
+        print("required thinkingOptionId by model: %s"
+              % ", ".join("%s=%s" % pair for pair in sorted(thinking_options.items())),
+              file=sys.stderr)
     if _spend_module().pricing_module().detect_harness(None)["harness"] == "claude-code":
         hints = agent_spawn_hints(entry["resolved_models"])
         print("as a Claude Code subagent: %s, with the line `%s: %s` in its prompt%s"
@@ -1186,13 +1194,16 @@ def cmd_open(args: argparse.Namespace) -> int:
     if flags:
         print("flags: " + " ".join(flags), file=sys.stderr)
     if not args.agent_id:
+        settings_hint = {"modeId": mode}
+        if len(set(thinking_options.values())) == 1:
+            settings_hint["thinkingOptionId"] = next(iter(thinking_options.values()))
         print("recorded before spawn. Spawn with provider <provider>/<one of the "
               "models above>, settings %s and labels %s -- the spawn guard "
               "refuses any other model, a missing mode (Always Ask halts the "
               "worker on its first tool call), and an unlabelled spawn while "
               "entries are pending. Then run:\n"
               "  orch update %s --agent-id <id> --session-name <name>%s"
-              % (json.dumps({"modeId": mode}), json.dumps(labels), entry_id,
+              % (json.dumps(settings_hint), json.dumps(labels), entry_id,
                  "" if entry["workspace_id"] or not lane_has_own_tree(entry, args.repo)
                  else " --workspace-id <id>"),
               file=sys.stderr)
@@ -1252,6 +1263,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         if entry.get("resolved_models") is not None:
             entry["resolved_models"] = [
                 row["model"] for row in rung_models(rung, entry.get("exclude_lineages"))]
+            entry["resolved_thinking_options"] = resolved_thinking_options(
+                [{"model": model_id} for model_id in entry["resolved_models"]],
+                str(entry.get("effort") or "default"))
         changed.append("model")
     if getattr(args, "spawned_model", None):
         # The record the spawn guard writes itself under Claude Code. On a
@@ -2078,6 +2092,11 @@ def _spend_module():
 # dominate; the second is where rotating is almost always cheaper than continuing.
 CONTEXT_WARN = int(os.environ.get("ORCH_CONTEXT_WARN", 250_000))
 CONTEXT_URGENT = int(os.environ.get("ORCH_CONTEXT_URGENT", 400_000))
+# Model calls since the most recent human turn, past which the turn is doing
+# too many steps. Each step re-reads the whole context, so a long turn is the
+# same tax as a large context, paid in a hurry -- measured at a median of 8 and
+# a max of 23 calls per human turn on one orchestrator.
+TURN_CALLS_WARN = int(os.environ.get("ORCH_TURN_CALLS_WARN", 12))
 # Fan-out width past which a program is usually generating more intake than it
 # can consume. Advisory only -- there is no safe universal cap.
 FANOUT_WARN = int(os.environ.get("ORCH_FANOUT_WARN", 8))
@@ -2157,6 +2176,48 @@ def rung_models(rung: str, exclude: Optional[List[str]] = None) -> List[Dict[str
              "lineage": spend.lineage_of(row)} for row in rows]
 
 
+def model_effort_option(model_id: str, effort: str) -> Optional[str]:
+    """Concrete provider thinking option for a policy effort, if declared.
+
+    Models without an `effort_options` map either expose no dial or deliberately
+    leave it to their provider. A declared map must be complete: silently
+    falling back to a provider default is exactly the drift this guards.
+    """
+    for row in catalogue()["models"]:
+        if row.get("id") != model_id:
+            continue
+        options = row.get("effort_options")
+        if not options:
+            return None
+        option = options.get(effort)
+        if not isinstance(option, str) or not option.strip():
+            raise OrchError(
+                "catalogue model %s declares effort_options but has no option for %s"
+                % (model_id, effort))
+        return option
+    return None
+
+
+def resolved_thinking_options(models: List[Dict[str, Any]], effort: str) -> Dict[str, str]:
+    """Concrete required thinking options, keyed by canonical candidate model."""
+    return {row["model"]: option for row in models
+            for option in [model_effort_option(row["model"], effort)]
+            if option is not None}
+
+
+def expected_thinking_option(entry: Dict[str, Any],
+                             model_id: Optional[str]) -> Optional[str]:
+    """Expected concrete option for this entry and selected canonical model."""
+    if not model_id:
+        return None
+    persisted = entry.get("resolved_thinking_options") or {}
+    if model_id in persisted:
+        return persisted[model_id]
+    # Entries created before the field existed remain enforceable when their
+    # catalogue row declares a concrete option.
+    return model_effort_option(model_id, str(entry.get("effort") or "default"))
+
+
 def lineages_for(name: str) -> List[str]:
     return sorted(_spend_module().excluded_lineages(catalogue(), name))
 
@@ -2192,6 +2253,14 @@ def canonical_spawn_model(value: Any) -> Tuple[Optional[str], bool]:
     return None, long_context
 
 
+# The escalation's own fields. Evidence pointing at one of these is the claim
+# citing itself: the reason, the evidence, the rung, the effort and the
+# long-context flag are all set BY the escalation, so none of them can be the
+# signal that justified it.
+ESCALATION_SELF_FIELDS = frozenset(
+    ("model_reason", "escalation_evidence", "model", "effort", "long_context"))
+
+
 def check_evidence(value: Any, fields: Dict[str, Any], label: str) -> str:
     """An escalation's evidence, which must be checkable rather than prose.
 
@@ -2208,6 +2277,13 @@ def check_evidence(value: Any, fields: Dict[str, Any], label: str) -> str:
             "report or log that shows the signal." % label)
     if text.startswith("field:"):
         name = text[len("field:"):].strip()
+        if name.lower() in ESCALATION_SELF_FIELDS:
+            raise OrchError(
+                "%s points at brief field %r, which is the escalation's own "
+                "claim. The evidence must point at something other than the "
+                "claim itself: a brief field that names subsystems, dependent "
+                "steps or targets, an entry:<id>, or a report or log path."
+                % (label, name))
         got = fields.get(name)
         empty = (not got) or (isinstance(got, str) and is_placeholder(got))
         if empty:
@@ -2373,23 +2449,49 @@ def read_usage(path: str, rates: Any) -> Dict[str, Any]:
     spend.py was fixed. Anything true of a transcript in general belongs there;
     only the relay analysis below is orchestration's.
     """
-    counts = {"human_turns": 0}
+    counts = {"human_turns": 0, "turn_calls": 0}
     turn_shapes: Dict[str, int] = {}
+    seen_requests: Set[str] = set()
+    not_model_calls = _spend_module().pricing_module().NOT_MODEL_CALLS
 
     def observe(line: str) -> None:
         turn = _human_turn_text(line)
-        if turn is None:
+        if turn is not None:
+            counts["human_turns"] += 1
+            counts["turn_calls"] = 0
+            if len(turn) <= RELAY_MAX_CHARS:
+                shape = _relay_template(turn)
+                turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
+        # A model call is an assistant line with a new requestId, counted the
+        # same way spend.py counts steps -- one response spans several lines.
+        # The pricing itself stays in spend.py; only the per-turn tally is
+        # orchestration's.
+        if '"usage"' not in line:
             return
-        counts["human_turns"] += 1
-        if len(turn) <= RELAY_MAX_CHARS:
-            shape = _relay_template(turn)
-            turn_shapes[shape] = turn_shapes.get(shape, 0) + 1
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return
+        if row.get("type") != "assistant":
+            return
+        message = row.get("message") or {}
+        if not (message.get("usage") or {}):
+            return
+        if (message.get("model") or "") in not_model_calls:
+            return
+        request_id = row.get("requestId") or message.get("id")
+        if request_id:
+            if request_id in seen_requests:
+                return
+            seen_requests.add(request_id)
+        counts["turn_calls"] += 1
 
     usage = _spend_module().read_usage(path, rates, on_line=observe)
     if not usage:
         return {}
     usage["human_turns"] = counts["human_turns"]
     usage["relay_turns"] = max(turn_shapes.values()) if turn_shapes else 0
+    usage["turn_calls"] = counts["turn_calls"]
     return usage
 
 
@@ -2427,6 +2529,15 @@ def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
             "reading anything large into this session; delegate reads and keep "
             "only conclusions. Plan a rotation."
             % (context // 1000, per_step)
+        )
+    turn_calls = usage.get("turn_calls", 0)
+    if turn_calls >= TURN_CALLS_WARN:
+        out.append(
+            "STEPS %d model calls this turn at %dK context, ≈$%.2f per call. "
+            "Batch independent tool calls into one step; hand reads and "
+            "searches to a worker or subagent and keep only the conclusion; "
+            "stop polling."
+            % (turn_calls, context // 1000, per_step)
         )
     limit = budget.get("limit")
     if isinstance(limit, (int, float)) and limit > 0:
@@ -2648,9 +2759,11 @@ def cmd_budget(args: argparse.Namespace) -> int:
     path = budget_path(repo_key, program)
     if args.limit is None:
         data = load_budget(repo_key, program)
-        print("budget for %s: %s" % (program,
-                                     ("$%s" % data["limit"]) if data.get("limit")
-                                     else "none set"))
+        state = program_budget_state(repo_key, program)
+        print("budget for %s: %s · measured $%.2f · live reservations $%.2f"
+              % (program,
+                 ("$%s" % data["limit"]) if data.get("limit") else "none set",
+                 state["measured"], state["reserved"]))
         return 0
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -2789,6 +2902,10 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     if effort is not None:
         entry["effort"] = effort
         changes.append("effort %s -> %s" % (current_effort, effort))
+    if entry.get("resolved_models") is not None:
+        entry["resolved_thinking_options"] = resolved_thinking_options(
+            [{"model": model_id} for model_id in entry["resolved_models"]],
+            str(entry.get("effort") or "default"))
     if args.long_context:
         entry["long_context"] = True
         changes.append("long context")
@@ -2815,11 +2932,14 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     })
 
     print("%s escalated %s (%s)" % (entry["entry"], ", ".join(changes), args.scope))
-    print("Recorded. Now RETUNE the running agent to one of: %s -- this wrote "
+    thinking = entry.get("resolved_thinking_options") or {}
+    print("Recorded. Now RETUNE the running agent to one of: %s%s -- this wrote "
           "down the decision, it did not reach the worker, and the spawn guard "
           "refuses any other model. A tracker that says %s while the agent still "
           "runs on %s is worse than one that said nothing."
           % (", ".join(entry.get("resolved_models") or ["the %s rung" % entry["model"]]),
+             (" with thinkingOptionId " + ", ".join(
+                 "%s=%s" % pair for pair in sorted(thinking.items()))) if thinking else "",
              entry["model"], current), file=sys.stderr)
     return 0
 
@@ -2929,6 +3049,165 @@ def cmd_resume(args: argparse.Namespace) -> int:
             "hookEventName": "SessionStart", "additionalContext": text}}))
     else:
         print(text, end="")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# model check: is a resumed session still on a current model?
+# --------------------------------------------------------------------------- #
+#
+# A session resumed days later re-reads its whole context cold, and a model
+# the catalogue has superseded is a call at the old tier's price for the rest
+# of the program. Both are cheaper to fix at the seam -- before the first call
+# of the resumed session -- than after.
+
+def last_assistant_model(path: str) -> Optional[Tuple[str, str, int]]:
+    """(model, timestamp, context) of the transcript's most recent assistant
+    message, or None when it has none. `<synthetic>` lines are not model calls
+    and are skipped, as in spend.py."""
+    last = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                message = row.get("message") or {}
+                model = message.get("model") or ""
+                if not model or model in _spend_module().pricing_module().NOT_MODEL_CALLS:
+                    continue
+                usage = message.get("usage") or {}
+                if not usage:
+                    continue
+                context = ((usage.get("input_tokens") or 0)
+                           + (usage.get("cache_creation_input_tokens") or 0)
+                           + (usage.get("cache_read_input_tokens") or 0))
+                last = (model, row.get("timestamp") or "", context)
+    except OSError:
+        return None
+    return last
+
+
+def superseded_by(canonical: str) -> Optional[str]:
+    """The preferred same-family sibling for a model the catalogue superseded.
+
+    For any rung the model holds, if the rung's preferences name a model of
+    the same family and this model is not itself preferred, the catalogue has
+    moved on -- the preferred sibling is the first same-family entry.
+    """
+    options = catalogue()
+    row = next((r for r in options["models"] if r.get("id") == canonical), None)
+    if row is None:
+        return None
+    family = str(row.get("family") or "").lower()
+    for rung in row.get("rungs", []):
+        preferred = options.get("preferences", {}).get(rung, [])
+        if canonical in preferred:
+            continue
+        for sibling in preferred:
+            srow = next((r for r in options["models"]
+                         if r.get("id") == sibling), None)
+            if srow and str(srow.get("family") or "").lower() == family:
+                return sibling
+    return None
+
+
+def _age_text(seconds: float) -> str:
+    if seconds >= 86400:
+        return "%.0f days" % (seconds / 86400)
+    return "%.1f hours" % (seconds / 3600)
+
+
+def model_check_advisory(found: Tuple[str, str, int]) -> Optional[str]:
+    """Why a resumed session should not continue on its current model, or None.
+
+    A model the catalogue has superseded, or one it does not know at all, is a
+    reason to start fresh; a cache that went cold while the session was idle
+    is a reason on top of either -- every call until it rewarms re-writes the
+    whole context at the 1h-write rate.
+    """
+    model, timestamp, context = found
+    canonical, _ = canonical_spawn_model(model)
+    options = catalogue()
+    known = bool(canonical) and any(
+        r.get("id") == canonical for r in options["models"])
+    if known:
+        sibling = superseded_by(canonical)
+        if not sibling:
+            return None
+        text = (
+            "MODEL — this session is on %s, which the catalogue has "
+            "superseded: the same family is preferred as %s. Start a fresh "
+            "agent on %s with a handoff note instead of continuing this one "
+            "(references/rotation.md)." % (model, sibling, sibling)
+        )
+    else:
+        text = (
+            "MODEL — this session is on %s, which is not in the model "
+            "catalogue, so it cannot be checked for supersession. Confirm the "
+            "model is current before continuing a long program; if it is not, "
+            "start a fresh agent on the current model with a handoff note "
+            "(references/rotation.md)." % model
+        )
+    if timestamp:
+        try:
+            last_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            last_at = None
+        if last_at is not None:
+            if last_at.tzinfo is None:
+                last_at = last_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - last_at
+            if age.total_seconds() > 3600:
+                text += (
+                    " The cache is cold: the last call was %s ago, so every "
+                    "call until it rewarms re-writes the whole context at the "
+                    "1h-write rate (~2x input price); the last context was "
+                    "%dK." % (_age_text(age.total_seconds()), context // 1000)
+                )
+    return text
+
+
+def cmd_model_check(args: argparse.Namespace) -> int:
+    quiet = args.format == "hook"
+    if quiet and args.repo == ".":
+        args.repo = _hook_cwd() or args.repo
+    if quiet:
+        source = hook_payload().get("source")
+        if source is not None and source != "resume":
+            return 0
+    try:
+        path = find_transcript(args)
+        if not path:
+            if quiet:
+                return 0
+            raise OrchError("no transcript found; pass --transcript")
+        found = last_assistant_model(path)
+        if not found:
+            if quiet:
+                return 0
+            raise OrchError("no assistant model found in %s" % path)
+        advisory = model_check_advisory(found)
+    except OrchError:
+        if quiet:
+            return 0
+        raise
+    if quiet:
+        if not advisory:
+            return 0
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": advisory + "\n"}}))
+        return 0
+    if advisory:
+        print(advisory)
+    else:
+        print("model        %s is current in the catalogue" % found[0])
     return 0
 
 
@@ -3259,6 +3538,20 @@ def _check_spawn_model(entry: Dict[str, Any], value: Any, verb: str) -> Optional
     return _check_resolved(entry, canonical, long_context, value, verb)
 
 
+def _check_spawn_thinking(entry: Dict[str, Any], canonical: Optional[str],
+                          supplied: Any, verb: str) -> Optional[str]:
+    """Refuse an omitted or mismatched concrete option the catalogue declared."""
+    expected = expected_thinking_option(entry, canonical)
+    if expected is None:
+        return None
+    if supplied != expected:
+        return ("%s %s on %s requires settings.thinkingOptionId=%r for its %s "
+                "policy effort; got %r. Omitting it selects the provider default."
+                % (verb, entry["entry"], canonical, expected,
+                   entry.get("effort") or "default", supplied))
+    return None
+
+
 def _check_resolved(entry: Dict[str, Any], canonical: Optional[str],
                     long_context: bool, value: Any, verb: str) -> Optional[str]:
     allowed = entry.get("resolved_models")
@@ -3383,9 +3676,12 @@ def _spawn_guard(args: argparse.Namespace) -> int:
                 % (entry["entry"], entry.get("mode"), mode, json.dumps(entry.get("mode"))))
         override = str(labels.get(LABEL_OVERRIDE) or "").strip()
         refusal = _check_spawn_model(entry, tool_input.get("provider"), "spawning")
+        canonical, _ = canonical_spawn_model(tool_input.get("provider"))
+        if not refusal:
+            refusal = _check_spawn_thinking(
+                entry, canonical, settings.get("thinkingOptionId"), "spawning")
         if refusal and not (override and not is_placeholder(override)):
             return _deny(refusal)
-        canonical, _ = canonical_spawn_model(tool_input.get("provider"))
         entry["spawned_model"] = canonical or str(tool_input.get("provider"))
         entry["spawned_thinking"] = settings.get("thinkingOptionId")
         if refusal:
@@ -3404,8 +3700,14 @@ def _spawn_guard(args: argparse.Namespace) -> int:
     if name == "mcp__paseo__update_agent":
         settings = tool_input.get("settings") or {}
         if "model" not in settings:
-            if settings.get("thinkingOptionId"):
+            canonical, _ = canonical_spawn_model(entry.get("spawned_model"))
+            refusal = _check_spawn_thinking(
+                entry, canonical, settings.get("thinkingOptionId"), "retuning")
+            if refusal:
+                return _deny(refusal)
+            if "thinkingOptionId" in settings:
                 entry["spawned_thinking"] = settings["thinkingOptionId"]
+                entry["updated_at"] = _now()
                 save_tracker(path, data)
             return 0
         if settings["model"] is None:
@@ -3415,11 +3717,14 @@ def _spawn_guard(args: argparse.Namespace) -> int:
                 "rung anyone reaches by accident. Set one of: %s."
                 % (entry["entry"], ", ".join(entry.get("resolved_models") or [])))
         refusal = _check_spawn_model(entry, settings["model"], "retuning")
+        canonical, _ = canonical_spawn_model(settings["model"])
+        if not refusal:
+            refusal = _check_spawn_thinking(
+                entry, canonical, settings.get("thinkingOptionId"), "retuning")
         if refusal:
             return _deny(refusal)
-        canonical, _ = canonical_spawn_model(settings["model"])
         entry["spawned_model"] = canonical or str(settings["model"])
-        if settings.get("thinkingOptionId"):
+        if "thinkingOptionId" in settings:
             entry["spawned_thinking"] = settings["thinkingOptionId"]
         entry["updated_at"] = _now()
         save_tracker(path, data)
@@ -3990,9 +4295,10 @@ LOOP_CALL_GAP = int(os.environ.get("ORCH_LOOP_CALL_GAP", 15))
 
 # The roles whose context ACCUMULATES, and therefore the only ones an early
 # compaction window helps. An orchestrator or a front desk lives for the whole
-# program; a worker carries a small context and dies at the end of its task, so
-# it has nothing to gain from an early window and a half-finished task to lose
-# to one. Membership is read from the worktree's inbox claim rather than from
+# program; a worker's context dies with its task -- a long lane grows past 300K
+# before that, but the growth is not carried into the next lane -- so it has
+# nothing to gain from an early window and a half-finished task to lose to one.
+# Membership is read from the worktree's inbox claim rather than from
 # anything passed at spawn: `agent.session_open` exposes no labels, and the
 # claim is a role name the skill already maintains (`root`, `frontdesk`).
 LONG_LIVED_ROLES = tuple(
@@ -4182,13 +4488,24 @@ def cmd_compaction(args: argparse.Namespace) -> int:
                       % (role, ", ".join(LONG_LIVED_ROLES)), file=sys.stderr)
             return 3
         recorded = _load_json(compaction_path(repo_key, program))
-        window = max(int(recorded.get("window") or 0), WINDOW_BLIND_DEFAULT)
+        recorded_window = int(recorded.get("window") or 0)
+        floor = int(recorded.get("floor") or 0)
+        if floor and recorded_window:
+            # A measured floor and the window `measure` recorded for it. The
+            # recorded window is already >= WINDOW_SAFE_MIN by construction;
+            # the clamp keeps a hand-edited record honest.
+            window = max(recorded_window, WINDOW_SAFE_MIN)
+        else:
+            window = WINDOW_BLIND_DEFAULT
         if not window:
             return 3
         print(window)
         if args.explain:
-            print("role %r · floor %sK measured · window %dK"
-                  % (role, (int(recorded.get("floor") or 0)) // 1000, window // 1000),
+            print("role %r · floor %sK%s · window %dK (%s)"
+                  % (role, floor // 1000,
+                     " measured" if floor else " (none)",
+                     window // 1000,
+                     "measured" if floor and recorded_window else "blind"),
                   file=sys.stderr)
         return 0
 
@@ -5210,6 +5527,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--over-fanout", action="store_true",
                     help="dispatch past the %d-lane ceiling (ORCH_FANOUT_MAX)"
                          % FANOUT_MAX)
+    sp.add_argument("--over-budget", action="store_true",
+                    help="dispatch past the program budget reservation gate")
     sp.add_argument("--model", help="model RUNG, not a name: one of %s "
                                     "(default: the archetype's start; brief "
                                     "front matter `model` overrides that)"
@@ -5449,6 +5768,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--explain", action="store_true",
                     help="`window`: say on stderr why, for a plugin log")
     sp.set_defaults(func=cmd_compaction)
+
+    sp = sub.add_parser(
+        "model", help="check the session's model against the catalogue")
+    msub = sp.add_subparsers(dest="model_action", required=True)
+    mp = msub.add_parser("check",
+                         help="is the resumed session's model current?")
+    mp.add_argument("--transcript",
+                    help="a harness transcript; defaults to this session's")
+    mp.add_argument("--format", default="text", choices=("text", "hook"))
+    mp.set_defaults(func=cmd_model_check)
 
     sp = sub.add_parser(
         "rotate",

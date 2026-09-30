@@ -76,7 +76,7 @@ Everything else — constraints, rationale, history — goes in the body, becaus
 Use `../assets/BRIEF.template.md`. Sections: Task · Context · Relevant files (by path, don't paste)
 · Current state · What was tried · Decisions · Acceptance criteria · Constraints.
 
-Two rules that matter more than the structure:
+Three rules that matter more than the structure:
 
 - **Reference the project's standing-rules file; never restate it.** Restated prose costs your output
   tokens on every dispatch, and goes stale the first time a rule is corrected — the corrected
@@ -85,6 +85,10 @@ Two rules that matter more than the structure:
 - **Preserve task semantics.** Investigate-only means *"do not edit, create, or delete any files; do
   not write code."* Fix means implement it. Refactor means refactor, not rewrite. Carry the human's
   exact intent; a widened scope is not a favour.
+- **Point the worker at the sections, headings or line ranges it needs, with a one-line reason
+  each — never "read X in full".** A large reference read in full becomes the lane's floor for
+  every call that follows; a worker or subagent that reads it and returns the conclusion keeps the
+  floor small.
 
 Include the **if-interrupted clause** (see `messaging.md`) and, for a sub-orchestrator, the
 instruction to load this skill plus a recommended fan-out shape.

@@ -123,6 +123,9 @@ check_same("and at the archetype's relative effort",
            entry(root, e_impl)["effort"], "default")
 check_true("open resolves the rung to exact models",
            "claude-sonnet-5" in entry(root, e_impl)["resolved_models"])
+check_same("Sonnet 5's economy policy resolves to medium thinking",
+           entry(root, e_impl)["resolved_thinking_options"].get("claude-sonnet-5"),
+           "medium")
 check_same("an unannotated lane receives a persisted bounded contract",
            entry(root, e_impl)["limits"],
            {"max_model_calls": 40, "max_context_tokens": 150000,
@@ -212,7 +215,8 @@ check_true("and still resolves at economy", "gpt-5.6-terra" in rev["resolved_mod
 
 hook(root, "mcp__paseo__create_agent",
      {"title": "w", "initialPrompt": "go", "provider": "claude/claude-sonnet-5",
-      "labels": {"orch_entry": e_impl}, "settings": {"modeId": "auto"}})
+      "labels": {"orch_entry": e_impl},
+      "settings": {"modeId": "auto", "thinkingOptionId": "medium"}})
 code, out, err = run(root, "open", "--brief",
                      write_brief(root, "rev2.md", archetype="reviewer", reviews=e_impl))
 check_same("`reviews: <entry>` takes the author from what that lane spawned",
@@ -237,6 +241,13 @@ check_true("escalate without --scope is refused", code != 0 and "--scope" in err
 code, out, err = run(root2, "escalate", e1, "--to", "advanced", "--scope", "attempt",
                      "--reason", "first pass came back with the scope wrong")
 check_true("escalate without --evidence is refused", code != 0 and "--evidence" in err)
+for _self_field in ("model_reason", "escalation_evidence", "model", "effort",
+                    "long_context", "MODEL"):
+    code, out, err = run(root2, "escalate", e1, "--to", "advanced", "--scope",
+                         "attempt", "--reason", "checking circular evidence",
+                         "--evidence", "field:%s" % _self_field)
+    check_true("evidence pointing at the escalation's own field %s is refused"
+               % _self_field, code != 0 and "own claim" in err)
 code, out, err = run(root2, "escalate", e1, "--to", "advanced", "--scope", "attempt",
                      "--reason", "first pass came back with the scope wrong",
                      "--evidence", "entry:%s" % e1)
@@ -284,6 +295,15 @@ check_true("a spawn with no mode is refused",
                        {"title": "w", "initialPrompt": "go",
                         "provider": "claude/claude-sonnet-5",
                         "labels": {"orch_entry": e3}})))
+check_true("Sonnet 5 without its resolved medium effort is refused",
+           denied(hook(root3, "mcp__paseo__create_agent",
+                       dict(spawn, provider="claude/claude-sonnet-5",
+                            labels={"orch_entry": e3}))))
+check_true("Sonnet 5 at provider-default high is refused for economy work",
+           denied(hook(root3, "mcp__paseo__create_agent",
+                       dict(spawn, provider="claude/claude-sonnet-5",
+                            labels={"orch_entry": e3},
+                            settings={"modeId": "auto", "thinkingOptionId": "high"}))))
 check_true("a long-context variant is refused without its escalation",
            denied(hook(root3, "mcp__paseo__create_agent",
                        dict(spawn, provider="claude/claude-sonnet-5[1m]",
@@ -291,11 +311,26 @@ check_true("a long-context variant is refused without its escalation",
 check_same("the resolved model, labelled, in the recorded mode, is allowed",
            hook(root3, "mcp__paseo__create_agent",
                 dict(spawn, provider="claude/claude-sonnet-5",
-                     labels={"orch_entry": e3})), None)
+                    labels={"orch_entry": e3},
+                    settings={"modeId": "auto", "thinkingOptionId": "medium"})), None)
 check_same("and what was spawned is recorded on the entry",
            entry(root3, e3)["spawned_model"], "claude-sonnet-5")
 
 run(root3, "update", e3, "--agent-id", "agent-3")
+run(root3, "escalate", e3, "--effort", "above-default", "--scope", "attempt",
+    "--reason", "the first pass cannot establish the required invariant",
+    "--evidence", "entry:%s" % e3)
+check_same("a justified Sonnet effort escalation resolves to high",
+           entry(root3, e3)["resolved_thinking_options"].get("claude-sonnet-5"),
+           "high")
+check_true("a RETUNE cannot leave Sonnet at medium after its high escalation",
+           denied(hook(root3, "mcp__paseo__update_agent",
+                       {"agentId": "agent-3",
+                        "settings": {"thinkingOptionId": "medium"}})))
+check_same("a justified Sonnet high RETUNE is allowed",
+           hook(root3, "mcp__paseo__update_agent",
+                {"agentId": "agent-3",
+                 "settings": {"thinkingOptionId": "high"}}), None)
 _cleared = hook(root3, "mcp__paseo__update_agent",
                 {"agentId": "agent-3", "settings": {"model": None}})
 check_true("a RETUNE that clears the model onto the provider default is refused",

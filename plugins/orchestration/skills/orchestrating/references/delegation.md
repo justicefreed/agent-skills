@@ -107,7 +107,11 @@ being tested against — is in `rungs.md` and `cost.md`. What orchestration adds
   the artifact and a bad sweep fails loudly, whereas a bad verdict is *indistinguishable from a good
   one* until something downstream breaks.
 - **Model and effort are separate decisions, and the model matters more.** Most of the available
-  saving is in the *model*, not the dial. Reach for the model rung first.
+  saving is in the *model*, not the dial. Reach for the model rung first. `effort` is a catalogue
+  policy level, not permission to omit a provider setting: where the selected model declares an
+  option map, `open` resolves and the spawn guard requires its concrete `thinkingOptionId`. For
+  example, Sonnet 5 economy work explicitly uses `medium` rather than its provider's `high` default;
+  a justified above-default escalation resolves to `high`.
 
 If you find yourself wanting `advanced`, the frontier model, or an above-default effort dial as a
 *starting point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and
@@ -259,5 +263,5 @@ counts — whatever it leaves in your context is re-read on **every remaining mo
 program**. Measured, that residue is the single largest line in an orchestration bill. "Cheaper than
 a dispatch" is a claim about three numbers, and orchestrators routinely evaluate one.
 
-A worker, by contrast, carries a small context and then dies, so its own re-read tax never
-accumulates. See `cost.md` for the measurements.
+A worker, by contrast, starts at a ~50K floor and its context dies with the task, so its re-read
+tax never accumulates across lanes. See `cost.md` for the measurements.

@@ -138,6 +138,36 @@ plugin API, so an agent that never takes another turn never drains — the orche
 its behalf. And its pre-delivery settle delay is a mitigation, not a lock: a human message arriving
 inside that window can still race it.
 
+## Lean lane profile for Claude workers
+
+A Paseo Claude worker's context floor is mostly plugins, not work: measured, a lane opened at a
+53K floor that included the claude-mem context injection (~18K chars), the skills listing (~30K
+chars), Serena's session-start text (~8K chars) and the `explanatory-output-style` plugin. The
+`claude` provider launches Claude Code through a command you can replace, so the bundled launcher
+strips the two plugins that only inflate a lane:
+
+```json
+{
+  "agents": {
+    "providers": {
+      "claude": {
+        "command": ["<installed skill dir>/assets/lane-profile/claude-lane"],
+        "env": {"ENABLE_STOP_REVIEW": "0"}
+      }
+    }
+  }
+}
+```
+
+in `~/.paseo/config.json`. The built-in `claude` provider accepts a `command` array, which replaces
+the launched binary, and an `env` map. The launcher only affects agents whose cwd is under a lane
+root (Paseo worktrees, `CLAUDE_LANE_ROOTS`); it locates the real `claude` binary and injects
+`assets/lane-profile/lane-settings.json`, which disables the `claude-mem` observer and injection and
+the `explanatory-output-style` plugin. Serena and the skills listing are deliberately left on:
+Serena's tools can reduce reads, and the skills listing has no per-session off switch.
+`ENABLE_STOP_REVIEW=0` disables the security-guidance plugin's per-stop LLM review for Paseo agents
+while its commit/push reviews stay on. `scripts/link-skills.sh` keeps the installed copy current.
+
 ## Policy
 
 - **Profiles first.** Call `list_profiles` and read every profile's `notes` before choosing how to
@@ -146,7 +176,10 @@ inside that window can still race it.
   back**. A profile is launch configuration only — never record it as a worker's current state,
   because `RETUNE` can have changed it since.
 - **Effort dials are provider-dependent.** Anthropic-family models expose thinking options; Cursor-
-  hosted models report none. An archetype's "model and effort" collapses to model alone there.
+  hosted models report none. An archetype's effort is a policy level: when its selected catalogue
+  model maps that level to an option, pass the exact `thinkingOptionId` `orch open` prints. The
+  spawn guard rejects omission or mismatch, because provider defaults can be higher than policy.
+  An archetype's "model and effort" collapses to model alone where no option is declared.
 - **Session-name mapping is undocumented.** A worker's agent id does not reveal its harness session
   name, and the mapping is needed for native messaging. Have each worker report its own session name
   in its first message and record it at dispatch.
