@@ -177,7 +177,7 @@ code, out, err = run(None, "model", "check", "--transcript", _unknown)
 check_true("a model outside the catalogue reports it cannot be checked",
            "not in the model catalogue" in out)
 
-_current = transcript([model_row("claude-sonnet-5", _recent)])
+_current = transcript([model_row("claude-sonnet-5-5", _recent)])
 code, out, err = hook_model_check(_current)
 check_same("a current model is silent in hook format", (code, out.strip()), (0, ""))
 code, out, err = run(None, "model", "check", "--transcript", _current)

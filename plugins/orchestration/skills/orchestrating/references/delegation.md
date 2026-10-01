@@ -110,8 +110,10 @@ being tested against — is in `rungs.md` and `cost.md`. What orchestration adds
   saving is in the *model*, not the dial. Reach for the model rung first. `effort` is a catalogue
   policy level, not permission to omit a provider setting: where the selected model declares an
   option map, `open` resolves and the spawn guard requires its concrete `thinkingOptionId`. For
-  example, Sonnet 5 economy work explicitly uses `medium` rather than its provider's `high` default;
-  a justified above-default escalation resolves to `high`.
+  example, Sonnet 5.5 economy work resolves to `medium` (`default`), a verifier or front desk to
+  `low`, and `high` only through a justified above-default escalation — multi-file changes,
+  analytical documents, reports. Sonnet 5 keeps the same policy by mapping `default` to `medium`
+  rather than its provider's `high` default.
 
 If you find yourself wanting `advanced`, the frontier model, or an above-default effort dial as a
 *starting point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and
@@ -178,8 +180,9 @@ A Claude Code subagent takes no labels, so the entry rides in its prompt as a li
 `orch_entry: e5`, and `orch_override: <why>` the same way — and its model is whatever the `model`
 alias resolves to in the dated alias table, else whatever the `subagent_type`'s agent definition
 pins. A subagent with neither inherits the session's model, which is refused for a lane for the same
-reason an omitted Paseo model is. `open` prints the `subagent_type` to use; `spend agents --write`
-creates the definitions, one per canonical id. Where no
+reason an omitted Paseo model is. `open` prints what to pass: normally a `model` alias, which keeps
+the built-in general-purpose prompt; a `subagent_type` only when no current alias reaches the id
+(`spend agents --write` creates those). Where no
 hook runs, record the spawn with `orch update <e> --spawned-model <id>`; `roster` flags
 `TIER-MISMATCH` either way.
 

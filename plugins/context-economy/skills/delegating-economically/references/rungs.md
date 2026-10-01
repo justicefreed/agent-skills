@@ -64,17 +64,21 @@ or `opus`. Aliases are accepted as *input* (`--source-model opus`) and
 translated, with the translation and its table date reported; they never come
 back out as a recommendation. Under Claude Code, each row also carries a `spawn` field — the exact value
 the Agent tool accepts, kept on the route the recommendation was priced on:
-an agent definition named for the canonical id, or an alias, and only the
-latter when the harness's dated alias table still maps it to this exact id.
+an alias, when the harness's dated alias table still maps it to this exact
+id, else an agent definition named for the canonical id. The alias comes
+first because it spawns the built-in general-purpose agent; a definition's
+markdown body *replaces* that system prompt, so a bare one leaves the worker
+with almost none.
 A drifted alias — the table's `opus` pointing at last generation's Opus
 while the recommendation is this generation's — is refused rather than
 spawning the wrong model, and refusal still surfaces `via` alternatives. A
 routed (`ocx-*`) definition on a *different* route never appears as `spawn`;
 it is listed separately in `via` with its own route and price, because a
 different route bills differently for the same model. `spend agents --write`
-fills the first gap by writing one agent file per Claude model a rung
-preference currently recommends (`--all` for every anthropic-route option),
-on request only.
+writes id-named definitions, needed only for a model no current alias
+reaches, such as a previous generation (`--all` for every anthropic-route
+option), on request only; `--prune` also removes the files it stamped whose model no
+longer is.
 
 Codex catalogs are discovered at `$CODEX_HOME/models_cache.json` or
 `~/.codex/models_cache.json`. Other harnesses can pass their equivalent JSON
@@ -99,8 +103,8 @@ them, and their prose lives in the orchestrating skill.
 
 | Archetype | What it does | How it fails | Rung / effort | Independence | Escalate when |
 |---|---|---|---|---|---|
-| **Implementer** | writes the change for one scoped item | scope creep into neighbouring items; edits a generated file instead of its source | economy / default | none | the brief names the subsystems the change spans, or a first attempt came back with the scope wrong — then advanced |
-| **Analyst** | traces behaviour, enumerates cases, builds an argument | confident narrative resting on an unverified premise | economy / default | none | the argument is many hops deep, a premise is disputed, or a prior pass was refuted — then advanced |
+| **Implementer** | writes the change for one scoped item | scope creep into neighbouring items; edits a generated file instead of its source | economy / default | none | the change spans several files — then above-default effort; the brief names the subsystems the change spans, or a first attempt came back with the scope wrong — then advanced |
+| **Analyst** | traces behaviour, enumerates cases, builds an argument | confident narrative resting on an unverified premise | economy / default | none | the deliverable is an analytical document or report — then above-default effort; the argument is many hops deep, a premise is disputed, or a prior pass was refuted — then advanced |
 | **Reviewer** | judges an artifact someone else produced — code, a claim, a decision, a plan | agrees for the author's reason; or returns speculative nits with no evidence | economy / default | different family | see *Reviewing* below — family first, then rung |
 | **Verifier** | runs the suite, the build, the assertions; reports numbers | reports a green that could not have gone red | economy / one-below-default | not the author | the guard cannot be made to go red and nobody knows why — then advanced |
 | **Verifier, low-risk** | re-runs a check whose pass/fail is mechanical and trivially re-checkable at intake | same, but it is caught at intake | minimal / lowest | not the author | any doubt at all — then it is the row above |

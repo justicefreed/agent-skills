@@ -1186,7 +1186,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         hints = agent_spawn_hints(entry["resolved_models"])
         print("as a Claude Code subagent: %s, with the line `%s: %s` in its prompt%s"
               % ("; ".join(hints) if hints else
-                 "no agent definition spawns these yet -- run `spend agents --write`",
+                 "no current alias or agent definition spawns these -- `spend agents --write` pins one",
                  LABEL_ENTRY, entry_id,
                  "" if tracker_id == "root" else " and `%s: %s`" % (LABEL_TRACKER, tracker_id)),
               file=sys.stderr)
@@ -3632,8 +3632,8 @@ def _spawn_guard(args: argparse.Namespace) -> int:
         if refusal and not (override and not is_placeholder(override)):
             hints = agent_spawn_hints(entry.get("resolved_models") or [])
             return _deny(refusal + (" Spawn with: %s." % "; ".join(hints) if hints else
-                                    " No agent definition spawns those models yet: "
-                                    "`spend agents --write`."))
+                                    " No current alias or agent definition spawns those "
+                                    "models: `spend agents --write` pins one."))
         entry["spawned_model"] = canonical or how
         entry["spawned_via"] = "agent-tool"
         if refusal:

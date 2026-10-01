@@ -605,28 +605,31 @@ def spawn_field(model: str, family: Optional[str], harness: str,
     if priced_route is None:
         spawn = {"kind": "error", "error": "no reviewed price for %r under harness %r" % (model, harness)}
     else:
+        # An alias comes first: it spawns the built-in general-purpose agent,
+        # whose system prompt a bare agent definition would replace with an
+        # empty one. An id-named definition is the fallback for a drifted or
+        # missing alias.
         spawn = None
+        alias_name = family[len("claude-"):] if family and family.startswith("claude-") else None
+        if alias_name:
+            for table_id, table in registry.aliases.items():
+                applies = (table.get("route") == priced_route or
+                          (table.get("route") is None and table_id == harness and
+                           registry.native_route(model) == priced_route))
+                if not applies or alias_name not in table["map"]:
+                    continue
+                mapped = table["map"][alias_name]
+                if mapped == model:
+                    spawn = {"kind": "alias", "value": alias_name,
+                            "alias_table": table["retrieved_at"], "route": priced_route}
+                else:
+                    spawn = {"kind": "error", "route": priced_route,
+                            "error": "alias %r drifted to %r, not %r"
+                                    % (alias_name, mapped, model)}
+                break
         named = next((e for e in on_route if e["name"] == model), None)
-        if named:
+        if named and (spawn is None or spawn["kind"] == "error"):
             spawn = {"kind": "agent", "value": model, "route": priced_route}
-        if spawn is None:
-            alias_name = family[len("claude-"):] if family and family.startswith("claude-") else None
-            if alias_name:
-                for table_id, table in registry.aliases.items():
-                    applies = (table.get("route") == priced_route or
-                              (table.get("route") is None and table_id == harness and
-                               registry.native_route(model) == priced_route))
-                    if not applies or alias_name not in table["map"]:
-                        continue
-                    mapped = table["map"][alias_name]
-                    if mapped == model:
-                        spawn = {"kind": "alias", "value": alias_name,
-                                "alias_table": table["retrieved_at"], "route": priced_route}
-                    else:
-                        spawn = {"kind": "error", "route": priced_route,
-                                "error": "alias %r drifted to %r, not %r"
-                                        % (alias_name, mapped, model)}
-                    break
         if spawn is None and on_route:
             entry = on_route[0]
             spawn = {"kind": "routed-agent", "value": entry["name"], "route": priced_route}

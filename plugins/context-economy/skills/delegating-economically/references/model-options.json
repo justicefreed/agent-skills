@@ -1,14 +1,14 @@
 {
   "schema_version": 3,
-  "updated": "2026-09-28",
+  "updated": "2026-09-30",
   "preferences": {
     "minimal": [
-      "gpt-5.6-luna",
-      "claude-haiku-4-5-20251001"
+      "claude-haiku-4-5-20251001",
+      "gpt-5.6-luna"
     ],
     "economy": [
-      "gpt-5.6-terra",
-      "claude-sonnet-5"
+      "claude-sonnet-5-5",
+      "gpt-5.6-terra"
     ],
     "advanced": [
       "claude-opus-5-5"
@@ -24,7 +24,7 @@
       ],
       "rung": "economy",
       "effort": "default",
-      "escalate": "advanced when the brief names the subsystems the change spans, or an economy pass came back with the scope wrong"
+      "escalate": "effort above-default when the change spans several files; advanced when the brief names the subsystems the change spans, or an economy pass came back with the scope wrong"
     },
     "analyst": {
       "aliases": [
@@ -32,7 +32,7 @@
       ],
       "rung": "economy",
       "effort": "default",
-      "escalate": "advanced when the argument has many dependent hops, a premise is disputed, or a prior pass was refuted"
+      "escalate": "effort above-default when the deliverable is an analytical document or report; advanced when the argument has many dependent hops, a premise is disputed, or a prior pass was refuted"
     },
     "reviewer": {
       "aliases": [
@@ -177,6 +177,22 @@
         "economy"
       ],
       "use": "economy tier: everyday analysis and implementation with a bounded scope; economy policy explicitly selects medium thinking rather than the provider's high default"
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "provider": "anthropic",
+      "family": "claude-sonnet",
+      "lineage": "claude",
+      "effort_options": {
+        "lowest": "low",
+        "one-below-default": "low",
+        "default": "medium",
+        "above-default": "high"
+      },
+      "rungs": [
+        "economy"
+      ],
+      "use": "economy tier: the preferred Claude anchor for everyday analysis and implementation; medium by default, high only as an above-default escalation"
     },
     {
       "id": "gpt-5.6-terra",

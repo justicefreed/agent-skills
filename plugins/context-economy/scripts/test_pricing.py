@@ -346,10 +346,10 @@ check("claude-code models has a derived catalog with no --catalog flag",
       _cc_models is not None and bool(_cc_models["models"]), True)
 check("claude-code models all carry a spawn field",
       all("spawn" in row for row in (_cc_models or {}).get("models", [])), True)
-check("claude-code haiku spawns via its own agent definition",
+check("claude-code haiku spawns via its alias even beside its own agent definition",
       next((row["spawn"] for row in _cc_models["models"]
             if row["model"] == "claude-haiku-4-5-20251001"), None),
-      {"kind": "agent", "value": "claude-haiku-4-5-20251001", "route": "anthropic"})
+      {"kind": "alias", "value": "haiku", "alias_table": "2026-09-30", "route": "anthropic"})
 
 codex_fd, codex_catalog_path = tempfile.mkstemp(suffix=".json")
 with os.fdopen(codex_fd, "w") as fh:
@@ -443,10 +443,13 @@ check("an ocx-cursor model with NO agent definition is not reachable",
 # undrifted alias -- both restricted to that route. A routed `ocx-*` agent on
 # a *different* route is never the primary spawn; it is a `via` alternative
 # with its own route and price.
-check("case 1: an agent definition named for the canonical id, on its priced route",
+# An undrifted alias outranks an id-named agent definition: the alias spawns
+# the built-in general-purpose agent, whose system prompt a bare definition
+# would replace.
+check("case 1: an undrifted alias wins over an agent definition named for the id",
            pricing.spawn_field("claude-opus-5-5", "claude-opus", "claude-code",
                                _shipped_registry, _agent_index)["spawn"],
-           {"kind": "agent", "value": "claude-opus-5-5", "route": "anthropic"})
+           {"kind": "alias", "value": "opus", "alias_table": "2026-09-30", "route": "anthropic"})
 
 # Ruling (a)'s falsification: `claude-sonnet-5` prices on `anthropic`. Its
 # only agent definition here (`ocx-claude-sonnet-5`) is on `ocx-cursor` -- a
@@ -465,7 +468,8 @@ _sonnet = pricing.spawn_field("claude-sonnet-5", "claude-sonnet", "claude-code",
                               _shipped_registry, _agent_index)
 check("ruling (a): spawn stays on the priced route (alias, not the ocx-cursor bridge)",
            _sonnet["spawn"],
-           {"kind": "alias", "value": "sonnet", "alias_table": "2026-09-23", "route": "anthropic"})
+           {"kind": "error", "route": "anthropic",
+            "error": "alias 'sonnet' drifted to 'claude-sonnet-5-5', not 'claude-sonnet-5'"})
 check("ruling (a): the ocx-cursor bridge is demoted to a `via` alternative",
            [(entry["route"], entry["value"]) for entry in _sonnet["via"]],
            [("ocx-cursor", "ocx-claude-sonnet-5")])
@@ -475,14 +479,20 @@ check("ruling (a): the `via` alternative carries its own route's price",
 check("case 3: an undrifted alias, on the model's native route",
            pricing.spawn_field("claude-haiku-4-5-20251001", "claude-haiku", "claude-code",
                                _shipped_registry, {})["spawn"],
-           {"kind": "alias", "value": "haiku", "alias_table": "2026-09-23", "route": "anthropic"})
-# The falsification this brief asks to observe: the shipped alias table's
-# `opus` still points at last generation's `claude-opus-5`, not the current
-# `claude-opus-5-5`. A spawn field must refuse that alias, not guess it.
-_drifted = pricing.spawn_field("claude-opus-5-5", "claude-opus", "claude-code",
+           {"kind": "alias", "value": "haiku", "alias_table": "2026-09-30", "route": "anthropic"})
+# The shipped alias table's `opus` points at the current `claude-opus-5-5`,
+# so for last generation's `claude-opus-4-8` the alias has drifted. A spawn
+# field must refuse that alias, not guess it -- unless an agent definition
+# named for the id can pin it instead.
+_drifted = pricing.spawn_field("claude-opus-4-8", "claude-opus", "claude-code",
                                _shipped_registry, {})["spawn"]
 check("a drifted alias is refused, not silently spawned", _drifted["kind"], "error")
 check("the refusal names the drift", "drifted" in _drifted["error"], True)
+check("a drifted alias falls back to an agent definition named for the id",
+           pricing.spawn_field("claude-opus-4-8", "claude-opus", "claude-code", _shipped_registry,
+                               {"claude-opus-4-8": [{"name": "claude-opus-4-8",
+                                                     "route": "anthropic"}]})["spawn"],
+           {"kind": "agent", "value": "claude-opus-4-8", "route": "anthropic"})
 
 # If the priced route has no spawn path at all, `spawn` refuses while `via`
 # still lists whatever agent definitions exist on other routes.

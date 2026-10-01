@@ -539,8 +539,8 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
-# `spend agents --write` is the only path that ever creates or overwrites a
-# file under an agents directory. It is never wired to a hook or to `install`:
+# `spend agents --write` is the only path that ever creates, overwrites or
+# (with `--prune`) removes a file under an agents directory. It is never wired to a hook or to `install`:
 # a subagent spawn is not the moment to be writing files on this session's
 # behalf, and running it against the real `~/.claude/agents` is a decision for
 # a human to make explicitly, every time.
@@ -575,12 +575,14 @@ def cmd_agents(args: argparse.Namespace) -> int:
     existing = pricing.read_agent_definitions(agents_dir)
     preferred = None if args.all else _preferred_model_ids(options)
     rows = []
+    in_scope = set()
     for policy in options.get("models", []):
         model_id = policy.get("id")
         if policy.get("provider") != "anthropic":
             continue
         if preferred is not None and model_id not in preferred:
             continue
+        in_scope.add(model_id)
         path = os.path.join(agents_dir, "%s.md" % model_id)
         current = existing.get(model_id)
         # Never overwrite a file this tool did not generate itself -- most
@@ -595,8 +597,20 @@ def cmd_agents(args: argparse.Namespace) -> int:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(AGENT_TEMPLATE % (model_id, model_id))
 
+    # Prune only what this tool stamped: the marker is the ownership proof, so
+    # opencodex's `ocx-*` files and anything hand-written are never candidates.
+    pruned = []
+    if args.prune:
+        for name, current in sorted(existing.items()):
+            if current.get("generated_by") != "context-economy" or name in in_scope:
+                continue
+            pruned.append({"id": name, "path": current["path"]})
+            if args.write:
+                os.remove(current["path"])
+
     if args.format == "json":
-        print(json.dumps({"agents_dir": agents_dir, "wrote": args.write, "models": rows}, indent=2))
+        print(json.dumps({"agents_dir": agents_dir, "wrote": args.write, "models": rows,
+                          "pruned": pruned}, indent=2))
         return 0
     verb = "wrote" if args.write else "would write"
     for row in rows:
@@ -604,6 +618,8 @@ def cmd_agents(args: argparse.Namespace) -> int:
             print("skip  %s (%s)" % (row["path"], row["skipped"]))
         else:
             print("%s %s" % (verb, row["path"]))
+    for row in pruned:
+        print("%s %s" % ("removed" if args.write else "would remove", row["path"]))
     return 0
 
 
@@ -1843,6 +1859,9 @@ def build_parser() -> argparse.ArgumentParser:
     agents.add_argument("--all", action="store_true",
                         help="every anthropic-route model option, not just currently "
                              "recommended ones (default: models a rung preference recommends)")
+    agents.add_argument("--prune", action="store_true",
+                        help="also remove context-economy-generated files whose model is no "
+                             "longer in scope (applied only with --write)")
     agents.add_argument("--agents-dir", help="target directory (default: ~/.claude/agents)")
     agents.add_argument("--options", help="rung and archetype option map JSON")
     agents.add_argument("--format", choices=("text", "json"), default="text")
