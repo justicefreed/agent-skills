@@ -57,6 +57,7 @@ installed plugin root, never through `..` from the skill directory.
 
 ```bash
 claude plugin validate . --strict          # after touching either manifest
+scripts/test.sh                            # every suite, in parallel; prints failures only
 ```
 
 Keep `plugin.json`'s `version` meaningful — Claude Code uses it to decide when installed users see

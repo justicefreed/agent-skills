@@ -45,7 +45,9 @@ def make_fake_claude():
     root = tempfile.mkdtemp(prefix="claude-lane-")
     path = os.path.join(root, "claude")
     with open(path, "w") as fh:
-        fh.write("#!/usr/bin/env python3\n"
+        # The running interpreter, not `env python3`: a pyenv shim costs
+        # seconds per launch, and this script runs once per case.
+        fh.write("#!%s\n" % sys.executable +
                  "import json, sys\n"
                  "print(json.dumps(sys.argv))\n")
     os.chmod(path, 0o755)
@@ -55,7 +57,7 @@ def make_fake_claude():
 def run_lane(cwd, argv, env_extra=None, lane_script=LANE):
     env = dict(os.environ)
     env.update(env_extra or {})
-    proc = subprocess.run([lane_script] + argv, cwd=cwd, env=env,
+    proc = subprocess.run([sys.executable, lane_script] + argv, cwd=cwd, env=env,
                           capture_output=True, text=True, timeout=120)
     return proc
 

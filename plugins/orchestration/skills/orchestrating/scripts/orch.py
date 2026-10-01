@@ -22,6 +22,7 @@ Python 3.9+, standard library only.
 """
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -286,6 +287,61 @@ def _git(args: List[str], cwd: str) -> str:
     return out.stdout.decode("utf-8", "replace").strip()
 
 
+# Any of these changes what git would answer, so the filesystem fast path
+# steps aside for git itself whenever one is set.
+_GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE",
+                      "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM")
+
+
+def _read_first_line(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return None
+
+
+def _fs_common_dir(start: str) -> Optional[str]:
+    """`git rev-parse --git-common-dir`, answered from the filesystem.
+
+    `statusline` runs this after every assistant message, and a git process
+    costs ~60ms where these few reads cost well under one. Handles a plain
+    checkout and a linked worktree (`.git` file -> gitdir -> `commondir`);
+    returns None for anything else -- a start inside a git dir, an override
+    in the environment, a layout that does not check out -- so the caller
+    asks git, which stays the authority.
+    """
+    if any(os.environ.get(name) for name in _GIT_ENV_OVERRIDES):
+        return None
+    here = os.path.realpath(start)
+    if not os.path.isdir(here):
+        here = os.path.dirname(here)
+    if ".git" in here.split(os.sep):
+        return None
+    while True:
+        dot_git = os.path.join(here, ".git")
+        if os.path.isdir(dot_git):
+            git_dir = dot_git
+            break
+        if os.path.isfile(dot_git):
+            line = _read_first_line(dot_git) or ""
+            if not line.startswith("gitdir:"):
+                return None
+            git_dir = os.path.join(here, line[len("gitdir:"):].strip())
+            break
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+    if not os.path.isfile(os.path.join(git_dir, "HEAD")):
+        return None
+    common = git_dir
+    pointer = _read_first_line(os.path.join(git_dir, "commondir"))
+    if pointer:
+        common = os.path.join(git_dir, pointer)
+    return os.path.realpath(common) if os.path.isdir(common) else None
+
+
 def repo_identity(start: str) -> Tuple[str, str, str]:
     """Return (repo_key, repo_root, git_common_dir).
 
@@ -294,8 +350,17 @@ def repo_identity(start: str) -> Tuple[str, str, str]:
     lane worktree, and what keeps an orchestrator that moves between worktrees
     pointed at the same state.
     """
-    common = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], start)
-    common = os.path.realpath(common)
+    return _repo_identity(os.path.realpath(start))
+
+
+@functools.lru_cache(maxsize=64)
+def _repo_identity(start: str) -> Tuple[str, str, str]:
+    # Cached per process: a directory does not change repository mid-run, and
+    # one command can ask several times (`open` asks three).
+    common = _fs_common_dir(start)
+    if common is None:
+        common = os.path.realpath(
+            _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], start))
     root = os.path.realpath(os.path.dirname(common)) if common.endswith(".git") \
         else os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
     digest = hashlib.sha256(common.encode("utf-8")).hexdigest()[:8]
