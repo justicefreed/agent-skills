@@ -23,6 +23,7 @@ Python 3.9+, standard library only.
 
 import argparse
 import functools
+import glob
 import hashlib
 import json
 import os
@@ -781,6 +782,24 @@ def find_entry(data: Dict[str, Any], ref: str) -> Dict[str, Any]:
                     % (ref, data["tracker_id"], known))
 
 
+def paseo_runtime_model(agent_id: Optional[str]) -> Optional[str]:
+    """The model a Paseo agent is actually running, as its record reports it.
+
+    `config.model` is what was asked for; `runtimeInfo.model` is what the
+    harness started. They differ when Claude Code swaps a blocked model for
+    the account default without telling anyone -- in stream-json mode the
+    warning reaches no one. None when there is no record or it says nothing.
+    """
+    if not agent_id:
+        return None
+    home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
+    for path in glob.glob(os.path.join(home, "agents", "*", "%s.json" % agent_id)):
+        model = ((_load_json(path).get("runtimeInfo") or {}).get("model"))
+        if model:
+            return canonical_spawn_model(model)[0] or model
+    return None
+
+
 def entry_flags(entry: Dict[str, Any]) -> List[str]:
     flags = []
     if entry["status"] == "pending" and not entry.get("agent_id"):
@@ -821,6 +840,11 @@ def entry_flags(entry: Dict[str, Any]) -> List[str]:
     spawned = entry.get("spawned_model")
     if spawned and entry.get("resolved_models") and spawned not in entry["resolved_models"]:
         flags.append("TIER-MISMATCH:" + spawned)
+    # The spawn record holds what was requested; only the harness knows what
+    # it started. A Sonnet lane silently running Opus passes the check above.
+    running = paseo_runtime_model(entry.get("agent_id")) if entry.get("resolved_models") else None
+    if running and running not in entry["resolved_models"]:
+        flags.append("RUNTIME-MISMATCH:" + running)
     if (entry.get("start_effort") and
             effort_index(entry.get("effort")) > effort_index(entry["start_effort"])):
         flags.append("EFFORT:" + str(entry["effort"]))

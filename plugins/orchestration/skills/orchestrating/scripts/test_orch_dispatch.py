@@ -387,8 +387,8 @@ try:
     code, out, err = run(root4, "open", "--brief",
                          write_brief(root4, "a.md", archetype="implementer"))
     e6 = out.strip()
-    check_true("under Claude Code, open prints the subagent_type and prompt marker",
-               "subagent_type claude-sonnet-5" in err and "`orch_entry: %s`" % e6 in err)
+    check_true("under Claude Code, open prints the model alias and prompt marker",
+               "model sonnet" in err and "`orch_entry: %s`" % e6 in err)
 
     def agent(**tool_input):
         tool_input.setdefault("description", "lane")
@@ -403,7 +403,7 @@ try:
     check_true("a lane subagent with no model inherits the session's, and is refused",
                denied(_inherit) and "inherits" in _inherit["permissionDecisionReason"])
     check_true("the refusal names what to spawn with instead",
-               "subagent_type claude-sonnet-5" in _inherit["permissionDecisionReason"])
+               "model sonnet" in _inherit["permissionDecisionReason"])
     check_true("an agent type that pins no model is refused the same way",
                denied(agent(prompt=marked, subagent_type="inherits")))
     check_true("an agent definition on the wrong rung is refused",
@@ -465,4 +465,23 @@ print()
 if FAILURES:
     print("  %d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES)))
     sys.exit(1)
+# RUNTIME-MISMATCH: what Paseo says the harness started, against the plan.
+_paseo = tempfile.mkdtemp(prefix="paseo-home-")
+os.makedirs(os.path.join(_paseo, "agents", "ws"))
+with open(os.path.join(_paseo, "agents", "ws", "agent-rt.json"), "w") as fh:
+    json.dump({"config": {"model": "claude-sonnet-5"},
+               "runtimeInfo": {"model": "claude-opus-5-5"}}, fh)
+os.environ["PASEO_HOME"] = _paseo
+_rt = {"status": "pending", "agent_id": "agent-rt", "mode": "auto",
+       "resolved_models": ["claude-sonnet-5"]}
+check_true("a lane running another model than planned is flagged",
+           "RUNTIME-MISMATCH:claude-opus-5-5" in orch.entry_flags(_rt))
+check_true("a lane running the planned model is not",
+           not any(f.startswith("RUNTIME-MISMATCH") for f in
+                   orch.entry_flags(dict(_rt, resolved_models=["claude-opus-5-5"]))))
+check_true("no Paseo record, no flag",
+           not any(f.startswith("RUNTIME-MISMATCH") for f in
+                   orch.entry_flags(dict(_rt, agent_id="missing"))))
+del os.environ["PASEO_HOME"]
+
 print("  all pass")

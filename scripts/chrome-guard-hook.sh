@@ -25,7 +25,11 @@ fi
 case "$ACTION" in enable|disable|status) ;; *) echo "usage: $0 enable|disable|status [--project DIR]" >&2; exit 64 ;; esac
 [ -x "$HOOK" ] || { echo "hook script missing or not executable: $HOOK" >&2; exit 66; }
 
-python3 - "$ACTION" "$TARGET" "$HOOK" <<'PY'
+# Same interpreter chain as link-skills.sh: one answer to "which interpreter".
+PY="${CHROME_GUARD_PYTHON:-}"
+[ -x "$PY" ] || PY=/usr/bin/python3
+[ -x "$PY" ] || PY=python3
+"$PY" - "$ACTION" "$TARGET" "$HOOK" <<'PY'
 import json, os, sys
 action, target, hook = sys.argv[1:4]
 MARK = "no-google-chrome.sh"

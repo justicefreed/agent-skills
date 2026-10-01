@@ -468,8 +468,7 @@ _sonnet = pricing.spawn_field("claude-sonnet-5", "claude-sonnet", "claude-code",
                               _shipped_registry, _agent_index)
 check("ruling (a): spawn stays on the priced route (alias, not the ocx-cursor bridge)",
            _sonnet["spawn"],
-           {"kind": "error", "route": "anthropic",
-            "error": "alias 'sonnet' drifted to 'claude-sonnet-5-5', not 'claude-sonnet-5'"})
+           {"kind": "alias", "value": "sonnet", "alias_table": "2026-09-30", "route": "anthropic"})
 check("ruling (a): the ocx-cursor bridge is demoted to a `via` alternative",
            [(entry["route"], entry["value"]) for entry in _sonnet["via"]],
            [("ocx-cursor", "ocx-claude-sonnet-5")])

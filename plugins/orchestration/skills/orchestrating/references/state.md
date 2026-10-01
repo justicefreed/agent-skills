@@ -102,6 +102,8 @@ model that declares effort options also resolves the policy effort to a required
 `roster` flags
 `TIER:<rung>` above the archetype's start (above `economy` for older entries), suffixed `:NO-REASON`
 when unjustified; `TIER-MISMATCH:<id>` when the recorded spawn is not one of the resolved models;
+`RUNTIME-MISMATCH:<id>` when Paseo's `runtimeInfo.model` -- what the harness actually started -- is not
+one of them (Claude Code swaps a blocked model for the account default silently in stream-json);
 `EFFORT:`, `LONG-CTX`, `SAME-FAMILY`, `SPAWN-OVERRIDE` and `ROUNDS:<n>` for the other dials; and
 `NO-MODEL` on an entry recorded before the rung was tracked. `orch update <e> --model <rung>` is the correction path; raising a rung goes
 through `orch escalate`, which demands the signal and keeps it. Rungs only — a model *name* in a

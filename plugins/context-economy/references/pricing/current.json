@@ -207,9 +207,9 @@
     "claude-code": {
       "retrieved_at": "2026-09-30",
       "source_url": "https://code.claude.com/docs/en/model-config",
-      "scope": "Anthropic API; other providers resolve these aliases differently",
+      "scope": "Anthropic API, as this account resolves them: the org allowlist blocks claude-sonnet-5-5, so `sonnet` lands on claude-sonnet-5 (verified with `claude -p --model sonnet`, 2026-09-30) though the docs name Sonnet 5.5",
       "map": {
-        "sonnet": "claude-sonnet-5-5",
+        "sonnet": "claude-sonnet-5",
         "opus": "claude-opus-5-5",
         "haiku": "claude-haiku-4-5-20251001",
         "fable": "claude-fable-5-1"

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Run every plugin test suite in parallel; print only failing suites' output.
 #
-# The interpreter is resolved once, to a real binary: naming `python3` through
-# a pyenv shim costs 0.5-2.7s per launch. Suites are independent -- each makes
-# its own temp repos and agent dirs -- so they run concurrently.
+# The interpreter is the one the hooks run (`spend.py`'s HOOK_PY), so a suite
+# that passes here passes in production -- including on /usr/bin/python3's 3.9.
+# It is resolved to a real binary: naming `python3` through a pyenv shim costs
+# 0.5-2.7s per launch. Suites are independent -- each makes its own temp repos
+# and agent dirs -- so they run concurrently.
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 PY="${TEST_PYTHON:-}"
-[ -x "$PY" ] || PY="$(pyenv which python3 2>/dev/null)"
-[ -x "$PY" ] || PY="$(command -v python3)"
+[ -x "$PY" ] || PY=/usr/bin/python3
+[ -x "$PY" ] || PY=python3
 
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
