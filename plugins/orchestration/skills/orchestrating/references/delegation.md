@@ -58,7 +58,7 @@ resolves them; their prose lives here:
 | Archetype | Work | Failure signature | Rung / effort | Independence | Escalate when |
 |---|---|---|---|---|---|
 | **Integrator** | serial cherry-picks, conflict resolution, keeping a chain green | resolves a conflict by dropping a hunk; declares green from the wrong tree | economy / default | none | a conflict needs semantic reconstruction rather than a mechanical resolution — then advanced |
-| **Front desk** | relays the human's approvals and task adds during execution | helps instead of routing; acts outside its whitelist | economy / lowest | none | never; a router that needs judgment is not a front desk — `frontdesk.md` |
+| **Front desk** | relays the human's approvals and task adds during execution | helps instead of routing; acts outside its whitelist | minimal / lowest | none | never; a router that needs judgment is not a front desk — `frontdesk.md` |
 
 **Reviews route by object.** A reviewer of *code* is an ordinary lane dispatched from here, under the
 reviewing rule in `rungs.md`. A reviewer of a *draft's premises* routes to a committee-style skill, and
@@ -110,8 +110,8 @@ being tested against — is in `rungs.md` and `cost.md`. What orchestration adds
   saving is in the *model*, not the dial. Reach for the model rung first. `effort` is a catalogue
   policy level, not permission to omit a provider setting: where the selected model declares an
   option map, `open` resolves and the spawn guard requires its concrete `thinkingOptionId`. For
-  example, Sonnet 5.5 economy work resolves to `medium` (`default`), a verifier or front desk to
-  `low`, and `high` only through a justified above-default escalation — multi-file changes,
+  example, Sonnet 5.5 economy work resolves to `medium` (`default`), a verifier to `low`, a Haiku 5.5
+  front desk to `low`, and `high` only through a justified above-default escalation — multi-file changes,
   analytical documents, reports. Sonnet 5 keeps the same policy by mapping `default` to `medium`
   rather than its provider's `high` default.
 

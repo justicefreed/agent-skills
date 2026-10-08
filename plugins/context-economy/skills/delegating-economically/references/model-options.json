@@ -1,13 +1,13 @@
 {
   "schema_version": 3,
-  "updated": "2026-09-30",
+  "updated": "2026-10-08",
   "preferences": {
     "minimal": [
-      "claude-haiku-4-5-20251001",
+      "claude-haiku-5-5",
       "gpt-5.6-luna"
     ],
     "economy": [
-      "claude-sonnet-5",
+      "claude-sonnet-5-5",
       "gpt-5.6-terra"
     ],
     "advanced": [
@@ -95,7 +95,7 @@
       "aliases": [
         "front-desk"
       ],
-      "rung": "economy",
+      "rung": "minimal",
       "effort": "lowest",
       "escalate": "never; a router that needs judgment is not a front desk"
     }
@@ -123,6 +123,23 @@
       "use": "minimal and economy tiers: bounded coding, prototyping, and high-volume workers"
     },
     {
+      "id": "claude-haiku-5-5",
+      "provider": "anthropic",
+      "family": "claude-haiku",
+      "lineage": "claude",
+      "effort_options": {
+        "lowest": "low",
+        "one-below-default": "low",
+        "default": "medium",
+        "above-default": "high"
+      },
+      "rungs": [
+        "minimal",
+        "economy"
+      ],
+      "use": "minimal tier: the preferred Claude pick for bounded work, routing and relay; economy-eligible but not preferred there -- Sonnet 5.5 stays the anchor for code generation and verdicts. Prompts over 100K tokens bill at 5x, still a quarter of Sonnet 5.5"
+    },
+    {
       "id": "claude-haiku-4-5-20251001",
       "provider": "anthropic",
       "family": "claude-haiku",
@@ -130,7 +147,7 @@
       "rungs": [
         "minimal"
       ],
-      "use": "minimal tier: quick, bounded work with mechanical acceptance criteria"
+      "use": "minimal tier, superseded: Haiku 5.5 costs less at every prompt length; kept for providers whose `haiku` still resolves here"
     },
     {
       "id": "gemini-3.8-flash",
@@ -176,7 +193,7 @@
       "rungs": [
         "economy"
       ],
-      "use": "economy tier: the preferred Claude anchor for everyday analysis and implementation; economy policy explicitly selects medium thinking rather than the provider's high default"
+      "use": "economy tier: everyday analysis and implementation with a bounded scope; economy policy explicitly selects medium thinking rather than the provider's high default"
     },
     {
       "id": "claude-sonnet-5-5",
@@ -192,7 +209,7 @@
       "rungs": [
         "economy"
       ],
-      "use": "economy tier: everyday analysis and implementation; not yet the preference -- this account's Claude Code silently runs Opus 5.5 when asked for it (org allowlist), so it re-enters preferences once a spawn proves it runs"
+      "use": "economy tier: the preferred Claude anchor for everyday analysis and implementation; medium by default, high only as an above-default escalation"
     },
     {
       "id": "gpt-5.6-terra",

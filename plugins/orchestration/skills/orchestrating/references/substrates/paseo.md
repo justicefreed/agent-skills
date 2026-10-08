@@ -22,13 +22,16 @@ orchestration policy.
 | `RETUNE` | `update_agent` (`settings.model`, `thinkingOptionId`, `modeId`) | changes config on a **running** agent; does not touch instructions | documented |
 | `WAKE` | `create_heartbeat` | prompts *you* on a cadence; no update tool — delete and recreate. Pair every create with `orch wake register --id <heartbeat id>`, and `delete_heartbeat` with `orch wake clear` | documented |
 | `SCHEDULE` | `create_schedule` | spawns a **fresh** agent per firing | documented |
-| `ROTATE` | `create_agent` with `workspaceId` **omitted**, then the successor calls `archive_agent` on you | omitting `workspaceId` places the successor in your own workspace, which is both the same worktree and the same tab strip the human was watching. There is no replace-in-place API | documented |
+| `ROTATE` | `create_workspace` (`isolation: "local"`, predecessor directory), then `create_agent` with that new `workspaceId`; the successor calls `archive_agent` on you | the new local workspace shares the predecessor's checkout, while Paseo opens the child as a visible tab in that workspace | documented |
 
-On `ROTATE`, two Paseo facts do the deciding. `archive_agent` **interrupts if running**, so an agent
+On `ROTATE`, three Paseo facts do the deciding. `archive_agent` **interrupts if running**, so an agent
 that archives itself never reaches its next line and cannot observe the result — the successor must
-be the one to call it. And an agent-scoped `create_agent` already defaults to the caller's workspace,
-so the correct placement is the default one: pass `initialPrompt` verbatim from `orch rotate begin`
-and pass no `workspaceId`. Full order in `../rotation.md`.
+be the one to call it. A same-workspace child lives in the Subagents track; a child placed in another
+workspace opens as a tab in that workspace. Create a **fresh local workspace at the predecessor's
+current directory**, then pass its returned `workspaceId` to `create_agent`. Local workspaces may
+share a directory, so the successor remains in the same checkout and satisfies `orch rotate claim`'s
+same-worktree check. Pass `initialPrompt` verbatim from `orch rotate begin`. Full order in
+`../rotation.md`.
 
 ## The review queue — why `RECLAIM` is the only lever
 

@@ -208,6 +208,28 @@ def rate_fields(rates: Any, label: str) -> Dict[str, Optional[Decimal]]:
                           ", ".join(sorted(keys))))
 
 
+def long_prompt(row: Dict[str, Any], label: str) -> Optional[Tuple[int, Dict[str, Optional[Decimal]]]]:
+    """A row's second rate set for long prompts, as (threshold, rates), or None.
+
+    Some models are priced by prompt length: a call whose prompt -- fresh input
+    plus cache writes plus cache reads -- exceeds the threshold pays every
+    bucket at the second set. The set must have the base set's exact fields, or
+    a long call would fall back to a short-prompt price for the missing one.
+    """
+    tier = row.get("long_prompt")
+    if tier is None:
+        return None
+    if not isinstance(tier, dict):
+        raise PricingError("%s long_prompt must be an object" % label)
+    above = tier.get("above_prompt_tokens")
+    if not isinstance(above, int) or isinstance(above, bool) or above <= 0:
+        raise PricingError("%s long_prompt.above_prompt_tokens must be a positive integer" % label)
+    rates = rate_fields(tier.get("rates"), "%s long_prompt" % label)
+    if set(rates) != set(rate_fields(row.get("rates"), label)):
+        raise PricingError("%s long_prompt rates must use the same fields as its rates" % label)
+    return above, rates
+
+
 def switch_write_field(rates: Dict[str, Any]) -> str:
     """The cache-write price a micro-operation switch pays.
 
@@ -335,6 +357,7 @@ def _validate_registry(snapshot: Dict[str, Any], source_ids: set) -> List[str]:
         if evidence not in ALLOWED_CACHE_EVIDENCE:
             raise PricingError("%s has invalid cache evidence" % label)
         parsed = rate_fields(row.get("rates"), label)
+        long_prompt(row, label)
         missing = [name for name, value in parsed.items() if value is None]
         if missing:
             warnings.append("%s/%s: missing %s" % (route, model, ", ".join(missing)))
@@ -740,6 +763,8 @@ def eligibility(snapshot: Dict[str, Any], options: Dict[str, Any], target_model:
             "cache-only calculation; excludes fresh input, output, replay, tools, and quality costs",
             "each target turn after the first is billed as a cache read",
             "a tiered route bills the switch write at its 5-minute cache-write rate",
+            "a target priced by prompt length is billed at its long-prompt rates, "
+            "since a switch carries the session's prefix",
         ],
     }
     translations = [dict(field=field, **{k: v for k, v in resolved.items() if k != "model"})
@@ -758,7 +783,11 @@ def eligibility(snapshot: Dict[str, Any], options: Dict[str, Any], target_model:
     if result["reasons"]:
         return result
     assert target is not None and source is not None
-    target_rates = rate_fields(target["rates"], "target")
+    # Fail closed on a length-priced target: the dearer set is the one a
+    # long-running session's prefix lands in. The source keeps its base set,
+    # which is the conservative side for a saving.
+    target_long = long_prompt(target, "target")
+    target_rates = target_long[1] if target_long else rate_fields(target["rates"], "target")
     source_rates = rate_fields(source["rates"], "source")
     write = target_rates[switch_write_field(target_rates)]
     target_read = target_rates["cache_read"]
@@ -841,8 +870,19 @@ def rung_order_warnings(options: Dict[str, Any], snapshot: Dict[str, Any]) -> Li
                 return row["id"]
         return None
 
-    rates: Dict[Tuple[str, str], Dict[str, Any]] = {
-        (row["route"], row["model"]): row["rates"] for row in snapshot.get("rates", [])}
+    rows: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (row["route"], row["model"]): row for row in snapshot.get("rates", [])}
+
+    def rate_sets(cheap_row: Dict[str, Any], dear_row: Dict[str, Any]) -> List[Tuple[str, Any, Any]]:
+        # A length-priced row is compared at both of its sets: its long-prompt
+        # set against the dearer row's long set, or that row's only set.
+        sets = [("", cheap_row["rates"], dear_row["rates"])]
+        if cheap_row.get("long_prompt"):
+            dear_long = dear_row.get("long_prompt") or dear_row
+            sets.append((" over %d-token prompts" % cheap_row["long_prompt"]["above_prompt_tokens"],
+                         cheap_row["long_prompt"]["rates"], dear_long["rates"]))
+        return sets
+
     lineages = sorted({row.get("lineage") or row.get("family")
                        for row in options.get("models", [])} - {None})
     warnings = []
@@ -851,17 +891,18 @@ def rung_order_warnings(options: Dict[str, Any], snapshot: Dict[str, Any]) -> Li
             cheap, dear = pick(lower, lineage), pick(higher, lineage)
             if not cheap or not dear:
                 continue
-            for (route, model), cheap_rates in sorted(rates.items()):
-                if model != cheap or (route, dear) not in rates:
+            for (route, model), cheap_row in sorted(rows.items()):
+                if model != cheap or (route, dear) not in rows:
                     continue
-                for field, value in sorted(cheap_rates.items()):
-                    other = rates[(route, dear)].get(field)
-                    if value is None or other is None:
-                        continue
-                    if Decimal(str(value)) > Decimal(str(other)):
-                        warnings.append(
-                            "%s %s costs more than %s %s for %s on %s (%s > %s)"
-                            % (lower, cheap, higher, dear, field, route, value, other))
+                for suffix, cheap_rates, dear_rates in rate_sets(cheap_row, rows[(route, dear)]):
+                    for field, value in sorted(cheap_rates.items()):
+                        other = dear_rates.get(field)
+                        if value is None or other is None:
+                            continue
+                        if Decimal(str(value)) > Decimal(str(other)):
+                            warnings.append(
+                                "%s %s costs more than %s %s for %s on %s%s (%s > %s)"
+                                % (lower, cheap, higher, dear, field, route, suffix, value, other))
     return warnings
 
 

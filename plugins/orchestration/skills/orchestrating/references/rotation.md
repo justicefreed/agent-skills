@@ -32,7 +32,7 @@ script to retype.
 | Step | Who | Command |
 |---|---|---|
 | 1 | predecessor | `orch rotate begin --handoff <path> --agent-id <your own id>` |
-| 2 | predecessor | SPAWN the successor, same worktree, with the printed prompt verbatim |
+| 2 | predecessor | On Paseo, create a fresh local workspace at this directory, then SPAWN the successor in that workspace with the printed prompt verbatim |
 | 3 | successor | `orch rotate claim` |
 | 4 | successor | `CLOSE <predecessor id>` |
 | 5 | successor | `orch rotate complete --alive <live ids>` |
@@ -91,14 +91,14 @@ the dangling-session detector: a rotation nobody finished stops being invisible.
 `orch resume` prints any pending rotation with its outstanding steps, so a successor that compacts
 mid-rotation recovers the obligation from disk rather than from the summary.
 
-## Same tab
+## Visible tab
 
-The human's request is that the replacement appear where the old agent was. There is no
-replace-in-place API on any substrate here, so "same tab" resolves to **same workspace, same
-worktree** — which is also exactly the precondition for the inbox transfer. Conveniently, an
-agent-scoped `create_agent` defaults to the caller's own workspace, so the correct thing is the
-default thing; see `substrates/paseo.md` for the ROTATE verb. The old tab disappears at step 4 and
-the new one is already beside it.
+The human needs the replacement to be a workspace tab, not only a Subagents-track item. On Paseo,
+create a **fresh local workspace** at the predecessor's current directory, then pass its explicit
+`workspaceId` to `create_agent`. Paseo opens a cross-workspace child in that workspace's tab strip.
+The two local workspaces share one checkout, so the successor still satisfies the same-worktree
+precondition for `orch rotate claim`. The old agent disappears at step 4; the successor remains
+available in its own workspace tab. See `substrates/paseo.md` for the exact calls.
 
 Front-desk-driven rotation (the human never talks to the orchestrator directly) is the same protocol
 with the relay in front of it: `frontdesk.md`.

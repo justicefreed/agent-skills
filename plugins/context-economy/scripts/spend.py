@@ -96,22 +96,35 @@ def pricing_module() -> Any:
     return _PRICING
 
 
-def _spend_rate(fields: Dict[str, Any]) -> Dict[str, Optional[float]]:
+def _spend_rate(fields: Dict[str, Any],
+                long_prompt: Optional[Tuple[int, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """A snapshot rate object in the per-bucket shape `read_usage` bills.
 
     A route publishing one untiered cache-write price bills both transcript
     write buckets at it. Null stays null: a dash on a pricing page is unknown,
-    not free.
+    not free. A length-priced row carries its second set under `long_prompt`,
+    and `billed_rate` picks between them per call.
     """
     def num(value: Any) -> Optional[float]:
         return None if value is None else float(value)
-    return {
+    rate: Dict[str, Any] = {
         "in": num(fields["input"]),
         "out": num(fields["output"]),
         "cache_write": num(fields.get("cache_write_5m", fields.get("cache_write"))),
         "cache_write_1h": num(fields.get("cache_write_1h", fields.get("cache_write"))),
         "cache_read": num(fields["cache_read"]),
     }
+    if long_prompt:
+        rate["long_prompt"] = dict(_spend_rate(long_prompt[1]),
+                                   above_prompt_tokens=long_prompt[0])
+    return rate
+
+
+def billed_rate(rate: Optional[Dict[str, Any]], prompt_tokens: int) -> Optional[Dict[str, Any]]:
+    """The rate set one call pays: the long-prompt set once its prompt -- fresh
+    input, cache writes and cache reads together -- exceeds the threshold."""
+    tier = (rate or {}).get("long_prompt")
+    return tier if tier and prompt_tokens > tier["above_prompt_tokens"] else rate
 
 
 def _model_tokens(value: str) -> Tuple[str, ...]:
@@ -128,7 +141,7 @@ class RateTable:
     """Reviewed rates keyed by (route, canonical id), plus the registry that
     turns a transcript's model string into that key."""
 
-    def __init__(self, registry: Any, rows: Dict[Tuple[str, str], Dict[str, Optional[float]]],
+    def __init__(self, registry: Any, rows: Dict[Tuple[str, str], Dict[str, Any]],
                  origins: Dict[Tuple[str, str], str]):
         self.registry = registry
         self.rows = rows
@@ -184,12 +197,16 @@ class RateTable:
                 hint = self._suggest(model or "")
                 raise SpendError("%s: %r is not a canonical id%s" % (
                     origin, model, "; did you mean %s?" % " or ".join(hint) if hint else ""))
-            fields = {k: v for k, v in entry.items() if k not in ("route", "model")}
+            fields = {k: v for k, v in entry.items()
+                      if k not in ("route", "model", "long_prompt")}
+            label = "%s (%s, %s)" % (origin, route, model)
             try:
-                parsed = pricing.rate_fields(fields, "%s (%s, %s)" % (origin, route, model))
+                parsed = pricing.rate_fields(fields, label)
+                tier = pricing.long_prompt(
+                    {"rates": fields, "long_prompt": entry.get("long_prompt")}, label)
             except pricing.PricingError as exc:
                 raise SpendError(str(exc))
-            rows[(route, model)] = _spend_rate(parsed)
+            rows[(route, model)] = _spend_rate(parsed, tier)
             origins[(route, model)] = origin
         return RateTable(self.registry, rows, origins)
 
@@ -230,7 +247,8 @@ def default_rates() -> RateTable:
         except pricing.PricingError as exc:
             raise SpendError("pricing snapshot: %s" % exc)
         registry = pricing.Registry(snapshot)
-        rows = {key: _spend_rate(pricing.rate_fields(row["rates"], "%s/%s" % key))
+        rows = {key: _spend_rate(pricing.rate_fields(row["rates"], "%s/%s" % key),
+                                 pricing.long_prompt(row, "%s/%s" % key))
                 for key, row in registry.rates.items()}
         _DEFAULT_RATES = RateTable(registry, rows,
                                    {key: snapshot["snapshot_id"] for key in rows})
@@ -277,7 +295,7 @@ def load_rates() -> RateTable:
     return table
 
 
-def rate_for(model: str, rates: RateTable) -> Optional[Dict[str, Optional[float]]]:
+def rate_for(model: str, rates: RateTable) -> Optional[Dict[str, Any]]:
     """The reviewed rate for a transcript model string, or None when unpriced.
 
     `cursor/gpt-5.6-sol` prices from the (cursor, gpt-5.6-sol) row,
@@ -864,7 +882,6 @@ def read_usage(path: str, rates: RateTable,
                         continue
                     seen.add(request_id)
                 priced = rates.lookup(model)
-                rate = priced["rate"]
                 models[model] = models.get(model, 0) + 1
                 # Cache writes bill at two tiers. `cache_creation_input_tokens`
                 # is their sum and stayed put when the breakdown was added, so
@@ -886,6 +903,9 @@ def read_usage(path: str, rates: RateTable,
                 for key, value in fields.items():
                     totals[key] += value
                 steps += 1
+                prompt = (fields["in"] + fields["cache_write"] + fields["cache_write_1h"]
+                          + fields["cache_read"])
+                rate = billed_rate(priced["rate"], prompt)
                 gaps = [k for k in fields if fields[k] and (rate is None or rate[k] is None)]
                 if rate is None or gaps:
                     entry = unpriced.setdefault(model, {"calls": 0, "reason": priced["reason"] or (
@@ -898,9 +918,7 @@ def read_usage(path: str, rates: RateTable,
                         component_cost[key] += value * (rate[key] or 0.0) / 1e6
                     cost += step_cost
                     priced_steps += 1
-                recent.append((fields["in"] + fields["cache_write"]
-                               + fields["cache_write_1h"]
-                               + fields["cache_read"], step_cost))
+                recent.append((prompt, step_cost))
                 if len(recent) > 25:
                     recent.pop(0)
     except OSError:

@@ -245,6 +245,55 @@ check_same("unpriced call is reported with count and reason", _mixed["unpriced"]
            {"cursor/claude-opus-5": {"calls": 1, "reason": "no cursor rate for claude-opus-5"}})
 check("synthetic lines are not model calls", float(_mixed["steps"]), 2.0)
 check("unpriced tokens still count", float(_mixed["tokens"]["cache_write"]), float(M))
+# Haiku 5.5 is priced by prompt length: a call whose prompt -- fresh input,
+# cache writes and cache reads -- exceeds 100K pays every bucket at the second
+# set ($0.50/$2.50/read $0.05 against $0.10/$0.50/$0.01). The tier is per call,
+# never per session. Falsification: billing with `priced["rate"]` instead of
+# `billed_rate(...)` prices the long calls below at the short set and goes red.
+def haiku(request_id, **usage):
+    full = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}
+    full.update(usage)
+    return model_call(request_id, "claude-haiku-5-5", **full)
+
+
+check("haiku 5.5 at exactly 100K prompt bills the short set",
+      spend.read_usage(transcript([haiku("h1", input_tokens=100_000, output_tokens=10_000)]),
+                       RATES)["cost"], 0.1 * 0.10 + 0.01 * 0.50)
+check("haiku 5.5 over 100K bills every bucket at the long set",
+      spend.read_usage(transcript([haiku("h2", input_tokens=200_000, output_tokens=10_000)]),
+                       RATES)["cost"], 0.2 * 0.50 + 0.01 * 2.50)
+check("cache reads count toward the prompt length",
+      spend.read_usage(transcript([haiku("h3", input_tokens=1_000,
+                                         cache_read_input_tokens=150_000)]), RATES)["cost"],
+      0.001 * 0.50 + 0.15 * 0.05)
+check("the tier is chosen per call, not per session",
+      spend.read_usage(transcript([haiku("h4", input_tokens=50_000),
+                                   haiku("h5", input_tokens=200_000)]), RATES)["cost"],
+      0.05 * 0.10 + 0.2 * 0.50)
+check("sonnet 5.5 cache hits bill at $0.10/M",
+      spend.read_usage(transcript([model_call("s1", "claude-sonnet-5-5", input_tokens=0,
+                                              output_tokens=0, cache_read_input_tokens=M)]),
+                       RATES)["cost"], 0.10)
+_tiered_override = RATES.with_overrides({"rates": [{
+    "route": "anthropic", "model": "claude-haiku-5-5", "input": 1, "cache_write_5m": 1,
+    "cache_write_1h": 1, "cache_read": 1, "output": 1,
+    "long_prompt": {"above_prompt_tokens": 10, "rates": {
+        "input": 2, "cache_write_5m": 2, "cache_write_1h": 2, "cache_read": 2, "output": 2}}}]},
+    "test")
+check("a rates override may carry its own long-prompt tier",
+      spend.read_usage(transcript([haiku("h6", input_tokens=M)]), _tiered_override)["cost"], 2.0)
+try:
+    RATES.with_overrides({"rates": [{
+        "route": "anthropic", "model": "claude-haiku-5-5", "input": 1, "cache_write_5m": 1,
+        "cache_write_1h": 1, "cache_read": 1, "output": 1,
+        "long_prompt": {"above_prompt_tokens": 10, "rates": {"input": 2}}}]}, "test")
+    _partial_tier = "accepted"
+except spend.SpendError as exc:
+    _partial_tier = str(exc)
+check_same("a long-prompt tier missing a field is refused, not half-applied",
+           "long_prompt rates must be exactly" in _partial_tier, True)
+
 _dash = spend.read_usage(transcript([model_call("e4", "cursor/composer-2.5", **write(M))]), RATES)
 check_same("tokens in a null-priced bucket make the call unpriced",
            _dash["unpriced"]["cursor/composer-2.5"]["reason"],
@@ -413,26 +462,26 @@ _write_out = subprocess.run(
     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
 _written = json.loads(_write_out.stdout)
 check_same("agents --write reports wrote: true", _written["wrote"], True)
-_haiku_path = os.path.join(_write_dir, "claude-haiku-4-5-20251001.md")
+_haiku_path = os.path.join(_write_dir, "claude-haiku-5-5.md")
 check_same("agents --write creates a file named for the canonical id",
            os.path.isfile(_haiku_path), True)
 check_same("the written file's own model: frontmatter is the canonical id",
            spend.pricing_module().read_agent_definitions(_write_dir)
-           ["claude-haiku-4-5-20251001"]["model"], "claude-haiku-4-5-20251001")
+           ["claude-haiku-5-5"]["model"], "claude-haiku-5-5")
 
 # Ruling (b): the default scope is only the Claude models a rung preference
 # currently recommends, not every anthropic-route option. The shipped
-# `model-options.json` has 8 anthropic-provider rows but only 3 appear in any
-# rung's `preferences` list (haiku/minimal, sonnet-5/economy, opus-5-5/
-# advanced+frontier); the other 5 (`claude-sonnet-4-6`, `claude-sonnet-5-5`,
-# `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5-1`) are options the rung/archetype system
+# `model-options.json` has 9 anthropic-provider rows but only 3 appear in any
+# rung's `preferences` list (haiku/minimal, sonnet-5-5/economy, opus-5-5/
+# advanced+frontier); the other 6 (`claude-haiku-4-5-20251001`, `claude-sonnet-4-6`,
+# `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5-1`) are options the rung/archetype system
 # could select in principle but does not currently prefer.
 check_same("agents --write default scope is the 3 currently-preferred Claude models",
            sorted(row["id"] for row in _written["models"]),
-           ["claude-haiku-4-5-20251001", "claude-opus-5-5", "claude-sonnet-5"])
+           ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"])
 shutil.rmtree(_write_dir, ignore_errors=True)
 
-# `--all` restores the full anthropic-option scope (8 models) -- this is the
+# `--all` restores the full anthropic-option scope (9 models) -- this is the
 # behaviour the default used to have unconditionally before ruling (b).
 # Falsification: dropping `--all` from this invocation and re-running against
 # the corrected `cmd_agents` reproduces the narrower 3-model default above,
@@ -445,29 +494,29 @@ _all_out = subprocess.run(
 _all_written = json.loads(_all_out.stdout)
 check_same("agents --write --all covers every anthropic model option",
            sorted(row["id"] for row in _all_written["models"]),
-           sorted(["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5",
+           sorted(["claude-haiku-4-5-20251001", "claude-haiku-5-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5",
                    "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
                    "claude-fable-5-1"]))
 shutil.rmtree(_all_dir, ignore_errors=True)
 
 _rewrite_dir = tempfile.mkdtemp()
-with open(os.path.join(_rewrite_dir, "claude-sonnet-5.md"), "w") as fh:
-    fh.write('---\nname: "claude-sonnet-5"\ndescription: "hand written"\n'
-             'model: "claude-sonnet-5"\n---\n\n<!-- generated-by: opencodex -->\n')
+with open(os.path.join(_rewrite_dir, "claude-sonnet-5-5.md"), "w") as fh:
+    fh.write('---\nname: "claude-sonnet-5-5"\ndescription: "hand written"\n'
+             'model: "claude-sonnet-5-5"\n---\n\n<!-- generated-by: opencodex -->\n')
 _rerun = subprocess.run(
     [sys.executable, os.path.join(HERE, "spend.py"), "agents",
      "--agents-dir", _rewrite_dir, "--write", "--format", "json"],
     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
 _rerun_rows = {row["id"]: row for row in json.loads(_rerun.stdout)["models"]}
 check_same("agents --write never overwrites a file it did not generate",
-           _rerun_rows["claude-sonnet-5"]["skipped"], "generated by opencodex")
+           _rerun_rows["claude-sonnet-5-5"]["skipped"], "generated by opencodex")
 shutil.rmtree(_rewrite_dir, ignore_errors=True)
 
 # `--prune` removes only files this tool stamped whose id fell out of scope.
 # Falsification: dropping the `generated_by` check deletes `ocx-claude-opus-5`
 # and the hand-written file, and the survivors check goes red.
 _prune_dir = tempfile.mkdtemp()
-for _name, _marker in (("claude-sonnet-5-5", "context-economy"),
+for _name, _marker in (("claude-sonnet-5", "context-economy"),
                        ("ocx-claude-opus-5", "opencodex"),
                        ("hand-written", None)):
     with open(os.path.join(_prune_dir, "%s.md" % _name), "w") as fh:
@@ -483,13 +532,13 @@ def _prune(*extra):
 
 _preview = _prune()
 check_same("agents --prune previews the stale generated file",
-           [row["id"] for row in _preview["pruned"]], ["claude-sonnet-5-5"])
+           [row["id"] for row in _preview["pruned"]], ["claude-sonnet-5"])
 check_same("agents --prune without --write deletes nothing",
-           os.path.exists(os.path.join(_prune_dir, "claude-sonnet-5-5.md")), True)
+           os.path.exists(os.path.join(_prune_dir, "claude-sonnet-5.md")), True)
 _prune("--write")
 check_same("agents --prune --write removes only its own stale file",
            sorted(f for f in os.listdir(_prune_dir) if f.endswith(".md")),
-           ["claude-haiku-4-5-20251001.md", "claude-opus-5-5.md", "claude-sonnet-5.md",
+           ["claude-haiku-5-5.md", "claude-opus-5-5.md", "claude-sonnet-5-5.md",
             "hand-written.md", "ocx-claude-opus-5.md"])
 check_same("agents --prune keeps a file the current scope still recommends",
            _prune("--write")["pruned"], [])

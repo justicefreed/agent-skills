@@ -260,7 +260,7 @@ _order_snapshot = {"rates": [
 check("an economy model dearer on cache reads than its lineage's advanced is warned",
       pricing.rung_order_warnings(_order_options, _order_snapshot),
       ["economy cheap costs more than advanced dear for cache_read on r (0.50 > 0.20)"])
-haiku = pricing.eligibility(shipped, shipped_options, "claude-haiku-4-5-20251001",
+haiku = pricing.eligibility(shipped, shipped_options, "claude-haiku-5-5",
                             "claude-opus-5-5", 2, NOW, "claude-code")
 check("claude-code prices haiku on the anthropic route", haiku["target_route"], "anthropic")
 check("claude-code haiku verdict is computed", "per_million" in haiku, True)
@@ -268,7 +268,36 @@ check("claude-code haiku is not rejected for a missing price",
       any("no reviewed price" in r for r in haiku["reasons"]), False)
 check("haiku alias translates under claude-code",
       pricing.eligibility(shipped, shipped_options, "haiku", "claude-opus-5-5", 2, NOW,
-                          "claude-code")["target_model"], "claude-haiku-4-5-20251001")
+                          "claude-code")["target_model"], "claude-haiku-5-5")
+
+# A length-priced target is judged at its long-prompt set: a switch carries
+# the session's prefix, which is where the long set applies. Haiku 5.5's
+# long-prompt write ($0.625) clears the $0.40 bar its short write ($0.125) would
+# not. Falsification: judging at `target["rates"]` drops this reason.
+check("a length-priced target is judged at its long-prompt rates",
+      "target cache_write must be below $0.40/M" in haiku["reasons"], True)
+check("a long-prompt switch prices write plus one read at the long set",
+      haiku["per_million"]["switch"], "0.675")
+_tier_row = {"route": "r", "model": "m", "rates": {"input": "1", "cache_write": "1",
+                                                   "cache_read": "1", "output": "1"}}
+for _bad, _why in (({"above_prompt_tokens": 0, "rates": _tier_row["rates"]}, "positive integer"),
+                   ({"above_prompt_tokens": 10, "rates": {
+                       "input": "1", "cache_write_5m": "1", "cache_write_1h": "1",
+                       "cache_read": "1", "output": "1"}}, "same fields")):
+    try:
+        pricing.long_prompt(dict(_tier_row, long_prompt=_bad), "row")
+        _got = "accepted"
+    except pricing.PricingError as exc:
+        _got = str(exc)
+    check("a malformed long_prompt tier is refused (%s)" % _why, _why in _got, True)
+_long_snapshot = {"rates": [
+    {"route": "r", "model": "cheap", "rates": {"input": "1.00"},
+     "long_prompt": {"above_prompt_tokens": 10, "rates": {"input": "5.00"}}},
+    {"route": "r", "model": "dear", "rates": {"input": "4.00"}}]}
+check("a cheaper rung dearer only on long prompts is warned",
+      pricing.rung_order_warnings(_order_options, _long_snapshot),
+      ["economy cheap costs more than advanced dear for input on r over 10-token prompts "
+       "(5.00 > 4.00)"])
 
 # Guard: no model field in any JSON output of `spend models`, `pricing
 # eligibility` or `pricing eligible-models` may be an alias or route name, even
@@ -336,9 +365,9 @@ for label, output in outputs.items():
 # field the Agent tool accepts. Forcing --harness codex against the same
 # --catalog must reproduce today's Codex output: no spawn field at all.
 _cli_agents_dir = tempfile.mkdtemp()
-with open(os.path.join(_cli_agents_dir, "claude-haiku-4-5-20251001.md"), "w") as fh:
-    fh.write('---\nname: "claude-haiku-4-5-20251001"\ndescription: "Routed worker."\n'
-             'model: "claude-haiku-4-5-20251001"\n---\n')
+with open(os.path.join(_cli_agents_dir, "claude-haiku-5-5.md"), "w") as fh:
+    fh.write('---\nname: "claude-haiku-5-5"\ndescription: "Routed worker."\n'
+             'model: "claude-haiku-5-5"\n---\n')
 
 _cc_models = cli_json("spend.py", "models", "--rung", "minimal", "--harness", "claude-code",
                       "--agents-dir", _cli_agents_dir, "--format", "json")
@@ -348,8 +377,8 @@ check("claude-code models all carry a spawn field",
       all("spawn" in row for row in (_cc_models or {}).get("models", [])), True)
 check("claude-code haiku spawns via its alias even beside its own agent definition",
       next((row["spawn"] for row in _cc_models["models"]
-            if row["model"] == "claude-haiku-4-5-20251001"), None),
-      {"kind": "alias", "value": "haiku", "alias_table": "2026-09-30", "route": "anthropic"})
+            if row["model"] == "claude-haiku-5-5"), None),
+      {"kind": "alias", "value": "haiku", "alias_table": "2026-10-08", "route": "anthropic"})
 
 codex_fd, codex_catalog_path = tempfile.mkstemp(suffix=".json")
 with os.fdopen(codex_fd, "w") as fh:
@@ -449,7 +478,7 @@ check("an ocx-cursor model with NO agent definition is not reachable",
 check("case 1: an undrifted alias wins over an agent definition named for the id",
            pricing.spawn_field("claude-opus-5-5", "claude-opus", "claude-code",
                                _shipped_registry, _agent_index)["spawn"],
-           {"kind": "alias", "value": "opus", "alias_table": "2026-09-30", "route": "anthropic"})
+           {"kind": "alias", "value": "opus", "alias_table": "2026-10-08", "route": "anthropic"})
 
 # Ruling (a)'s falsification: `claude-sonnet-5` prices on `anthropic`. Its
 # only agent definition here (`ocx-claude-sonnet-5`) is on `ocx-cursor` -- a
@@ -468,7 +497,8 @@ _sonnet = pricing.spawn_field("claude-sonnet-5", "claude-sonnet", "claude-code",
                               _shipped_registry, _agent_index)
 check("ruling (a): spawn stays on the priced route (alias, not the ocx-cursor bridge)",
            _sonnet["spawn"],
-           {"kind": "alias", "value": "sonnet", "alias_table": "2026-09-30", "route": "anthropic"})
+           {"kind": "error", "route": "anthropic",
+            "error": "alias 'sonnet' drifted to 'claude-sonnet-5-5', not 'claude-sonnet-5'"})
 check("ruling (a): the ocx-cursor bridge is demoted to a `via` alternative",
            [(entry["route"], entry["value"]) for entry in _sonnet["via"]],
            [("ocx-cursor", "ocx-claude-sonnet-5")])
@@ -476,9 +506,9 @@ check("ruling (a): the `via` alternative carries its own route's price",
            _sonnet["via"][0]["rates"] is not None, True)
 
 check("case 3: an undrifted alias, on the model's native route",
-           pricing.spawn_field("claude-haiku-4-5-20251001", "claude-haiku", "claude-code",
+           pricing.spawn_field("claude-haiku-5-5", "claude-haiku", "claude-code",
                                _shipped_registry, {})["spawn"],
-           {"kind": "alias", "value": "haiku", "alias_table": "2026-09-30", "route": "anthropic"})
+           {"kind": "alias", "value": "haiku", "alias_table": "2026-10-08", "route": "anthropic"})
 # The shipped alias table's `opus` points at the current `claude-opus-5-5`,
 # so for last generation's `claude-opus-4-8` the alias has drifted. A spawn
 # field must refuse that alias, not guess it -- unless an agent definition

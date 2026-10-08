@@ -46,9 +46,11 @@ contract, so the brief fills in names and paths.
 
 1. **Give it its own worktree or workspace.** Inbox claims are per worktree, and it must not share
    yours. It writes nothing to the repo, so the worktree is read-only in practice.
-2. **Write the brief, `orch open` it with `archetype: frontdesk`, spawn at the economy rung and
+2. **Write the brief, `orch open` it with `archetype: frontdesk`, spawn at the minimal rung and
    lowest effort.** It reads a few files and relays text. Nothing about that needs a capable model,
-   and a capable model here is the risk, not the safeguard.
+   and a capable model here is the risk, not the safeguard. Routing and verbatim relay is the
+   work the minimal rung's current models are positioned for; the whitelist, not the model, is what
+   keeps it from answering.
 3. **Record it**: `orch frontdesk --set frontdesk --agent-id <id>`. `orch resume` will then remind a
    compacted or rotated orchestrator that the human is reachable only through it.
 4. **Tell the human where to go**, in one line, and stop narrating to your own session. From this
@@ -118,6 +120,6 @@ nothing.
 
 ## Without Paseo
 
-On a CLI harness the front desk is a second interactive session on an economy model, started in its
+On a CLI harness the front desk is a second interactive session on a minimal-rung model, started in its
 own worktree with the brief as its first prompt. The human types there. Native peer messaging between
 local sessions queues race-free, so `Drain your inbox.` may be sent that way without an idle check.
