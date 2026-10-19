@@ -12,7 +12,7 @@ orchestration policy.
 | Verb | Call | Semantics | Evidence |
 |---|---|---|---|
 | `SPAWN` | `create_agent` (`title`, `provider`, `initialPrompt`, `settings`, `workspaceId`) | agent-scoped calls create *your* subagent; omit `workspaceId` for your own workspace. **Always pass `settings.modeId`** — see below | documented |
-| `ISOLATE` | `create_workspace` (`isolation: "worktree"`, `mode: branch-off\|checkout-branch\|checkout-pr`) | **placement never changes parentage** — a cross-workspace child is still your subagent | documented |
+| `ISOLATE` | `create_workspace` (`isolation: "worktree"`, `mode: branch-off\|checkout-branch\|checkout-pr`, `background: true`) | **placement never changes parentage** — a cross-workspace child is still your subagent. **Always pass `background: true`**: this is the user's standing instruction, which is the explicit ask the tool's own description waits for. It hides lane workspaces from the default sidebar so the human can tell them from their own; omitting it inherits *your* workspace's value | documented |
 | `POLL` | `get_agent_status` → `status`, `activeTurn`, `attentionReason`, `pendingPermissions` | the only reliable idle/running signal available. `status: running` with a non-empty `pendingPermissions` is a **stalled** worker, not a working one | observed |
 | `HARVEST` | the finish notification's `agent-response`, plus artifacts on disk | | documented |
 | `CLOSE` | `archive_agent` | interrupts if running. Leaves the workspace and the worktree behind — use `RECLAIM` for a lane that got its own | documented |
