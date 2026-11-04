@@ -3753,7 +3753,7 @@ def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
             out.append("BUDGET — about $%.0f of $%.0f used." % (spent, limit))
     if open_entries >= FANOUT_WARN:
         out.append(
-            "FAN-OUT %d open dispatches — each one returns a report you must "
+            "FAN-OUT %d open lanes — each one returns a report you must "
             "read, and intake is what grows this context. Land and close what "
             "is finished before dispatching more." % open_entries
         )
