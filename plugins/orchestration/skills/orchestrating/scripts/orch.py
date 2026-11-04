@@ -2087,10 +2087,48 @@ def policy_path(repo_key: str, program: str) -> str:
     return os.path.join(program_dir(repo_key, program), "policy.json")
 
 
+def enforcing_flag_path() -> str:
+    """`<state root>/enforcing`: the Stop hook's shell prefilter skips Python without it.
+
+    It may only ever over-report. A missing flag while a program enforces turns
+    enforcement off silently, so it is created on every sighting of a non-`off`
+    level and removed only when no program under the state root enforces.
+    """
+    return os.path.join(state_root(), "enforcing")
+
+
+def ensure_enforcing_flag() -> None:
+    path = enforcing_flag_path()
+    if os.path.exists(path):
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o644))  # O_CREAT is atomic
+
+
+def any_program_enforcing() -> bool:
+    root = state_root()
+    try:
+        repos = os.listdir(root)
+    except OSError:
+        return False
+    for repo in repos:
+        rdir = os.path.join(root, repo)
+        if not os.path.isdir(rdir):
+            continue
+        for program in os.listdir(rdir):
+            level = _load_json(os.path.join(rdir, program, "policy.json")).get("level")
+            if level in ("warn", "strict"):
+                return True
+    return False
+
+
 def policy_level(repo_key: str, program: str) -> str:
-    """The program's level; absent or unreadable means `off`."""
+    """The program's level; absent or unreadable means `off`. Heals the enforcing flag."""
     level = _load_json(policy_path(repo_key, program)).get("level")
-    return level if level in POLICY_LEVELS else "off"
+    level = level if level in POLICY_LEVELS else "off"
+    if level != "off":
+        ensure_enforcing_flag()
+    return level
 
 
 def uses_agent_track(root: str) -> bool:
@@ -2109,6 +2147,13 @@ def cmd_policy(args: argparse.Namespace) -> int:
                         % (", ".join(POLICY_LEVELS), args.level))
     _save_json(policy_path(repo_key, program),
                {"version": POLICY_VERSION, "level": args.level, "set_at": _now()})
+    if args.level != "off":
+        ensure_enforcing_flag()
+    elif not any_program_enforcing():
+        try:
+            os.unlink(enforcing_flag_path())
+        except FileNotFoundError:
+            pass
     print("policy for program %s: %s" % (program, args.level))
     return 0
 

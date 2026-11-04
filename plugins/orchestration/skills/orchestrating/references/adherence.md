@@ -29,6 +29,12 @@ PATH. Without both, the agent-track rules never apply — a program without agen
 `orch stop-check` runs as a Stop hook in every session and is silent unless the session belongs to a
 program at `warn` or `strict`.
 
+The hook starts no interpreter unless `<state root>/enforcing` exists (`$XDG_STATE_HOME` or
+`~/.local/state`, then `agent-orchestration`). `orch policy warn|strict` creates it, every command
+that reads a non-`off` level re-creates it, and `orch policy off` removes it only once no program
+under the state root still enforces — so a hand-edited `policy.json` takes effect at the next
+`orch` command (`roster`, say).
+
 - **A lane** — the session whose worktree is exactly one running entry's `worktree` — must leave a
   checkpoint that exists, is fresh, and fills all four labels (`briefs.md`). The block names the
   missing labels.

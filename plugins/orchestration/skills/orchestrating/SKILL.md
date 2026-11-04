@@ -15,7 +15,7 @@ hooks:
         - type: command
           command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch_hook.py" ] && exec "$PY" "$d/scripts/orch_hook.py" wake check --format hook; done; exit 0'
         - type: command
-          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch_hook.py" ] && exec "$PY" "$d/scripts/orch_hook.py" stop-check --format hook; done; exit 0'
+          command: 'S="${XDG_STATE_HOME:-$HOME/.local/state}/agent-orchestration/enforcing"; [ -e "$S" ] || exit 0; PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch_hook.py" ] && exec "$PY" "$d/scripts/orch_hook.py" stop-check --format hook; done; exit 0'
   SessionStart:
     - matcher: "compact|resume"
       hooks:

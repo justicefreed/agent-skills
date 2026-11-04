@@ -514,9 +514,73 @@ def case_hooks_use_launcher():
                [c for c in cmds if "orch_hook.py" not in c or "/orch.py" in c], [])
 
 
+@contextlib.contextmanager
+def own_state_root():
+    """A fresh XDG_STATE_HOME: the flag is global to the state root, so cases must not share one."""
+    saved = os.environ["XDG_STATE_HOME"]
+    os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="orch-adh-flag-")
+    try:
+        yield os.path.join(os.environ["XDG_STATE_HOME"], "agent-orchestration", "enforcing")
+    finally:
+        os.environ["XDG_STATE_HOME"] = saved
+
+
+def case_enforcing_flag():
+    with own_state_root() as flag:
+        sc = Scenario()
+        first = orch.resolve_program(sc.key, None)
+        check_true("flag: absent before any policy is set", not os.path.exists(flag))
+        run(sc.p, "policy", "strict")
+        check_true("flag: `policy strict` writes it", os.path.exists(flag))
+        wt = linked_worktree(sc.p, "flag-other")
+        run(sc.p, "open", "--program", "other", "--agent-id", "agent-other",
+            "--brief", write_brief(sc.p, wt, "other.md", "none"))
+        run(sc.p, "policy", "--program", "other", "warn")
+        run(sc.p, "policy", "--program", first, "off")
+        check_true("flag: `off` on one of two enforcing programs keeps it", os.path.exists(flag))
+        open(flag, "a").close()  # present either way, so the removal below is what is tested
+        run(sc.p, "policy", "--program", "other", "off")
+        check_true("flag: `off` on the last enforcing program removes it",
+                   not os.path.exists(flag))
+        if os.path.exists(flag):
+            os.remove(flag)
+        with open(os.path.join(orch.program_dir(sc.key, "other"), "policy.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"version": 1, "level": "strict", "set_at": "2026-01-01T00:00:00+00:00"}, fh)
+        run(sc.p, "roster", "--program", "other")
+        check_true("flag: a hand-written strict policy.json plus `roster` re-creates it",
+                   os.path.exists(flag))
+
+
+def case_stop_hook_prefilter():
+    cmd = [c for c in hook_commands() if "stop-check" in c]
+    check_same("prefilter: exactly one stop-check hook (test sanity)", len(cmd), 1)
+    with own_state_root() as flag:
+        sc = lane_scenario("strict")  # hand-written policy: no `orch` command has run since
+        if os.path.exists(flag):
+            os.remove(flag)
+        env = dict(os.environ, ORCH_SKILL_DIR=SKILL_DIR)
+
+        def fire(sid):
+            p = subprocess.run(["bash", "-c", cmd[0]], cwd=sc.cw, env=env,
+                               input=json.dumps({"cwd": sc.cw, "session_id": sid}),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+            try:
+                return p.stdout, json.loads(p.stdout) if p.stdout.strip() else None
+            except ValueError:
+                return p.stdout, "unparseable"
+
+        out, parsed = fire("pf1")
+        check_same("prefilter: the real Stop hook prints nothing without the flag", out, "")
+        open(flag, "a").close()
+        out, parsed = fire("pf2")
+        check_true("prefilter: with the flag, strict + vacuous checkpoint blocks", blocks(parsed))
+
+
 for fn in (case_p1_policy, case_p2_close, case_p3_open, case_p4_lane, case_p4_loop_guard,
            case_p4_orchestrator, case_p4_several_programs, case_p4_no_track_calls, case_p5_summary, case_p6_overrides,
-           case_hooks_use_launcher):
+           case_hooks_use_launcher, case_enforcing_flag, case_stop_hook_prefilter):
     case(fn)
 
 print("\n%s" % ("all adherence cases pass" if not FAILURES
