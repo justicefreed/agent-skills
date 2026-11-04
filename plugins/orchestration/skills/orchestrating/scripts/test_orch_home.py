@@ -156,7 +156,7 @@ def case_a_rollback_compat():
         except Exception as exc:  # main's render crashes on a mapping today
             code, out, err = 99, "", repr(exc)
         check_same("A: main's `%s` succeeds on branch-written state" % cmd[0], code, 0)
-        if cmd[0] in ("roster", "render"):
+        if cmd[0] == "render":  # roster has never printed advances
             check_true("A: `%s` prints a mapping advance as track:T-015" % cmd[0],
                        "track:T-015" in out)
     eid = entry["entry"]
@@ -207,7 +207,7 @@ def case_b_marker_delivery_whoami_resume_close():
     code, out, err = run(cw, "inbox", "drain", "--format", "hook", "--to", "w1")
     check_true("B: `inbox drain --format hook` in C's worktree delivers P's item",
                "ping from the planner" in out)
-    code, out, err = run(cw, "whoami")
+    code, out, err = run(cw, "whoami", "--worktree", cw)
     check_true("B: `whoami` in C's worktree returns the entry (%s)" % eid,
                code == 0 and eid in err)
     code, out, err = run(cw, "resume")
@@ -243,7 +243,7 @@ def case_b_env_override():
         code, out, err = run(cw, "inbox", "drain", "--format", "hook", "--to", "w2")
         check_true("B: ORCH_HOME (no marker) routes `inbox drain` to P", "env route ping" in out)
         fresh()
-        code, out, err = run(cw, "whoami")
+        code, out, err = run(cw, "whoami", "--worktree", cw)
         check_true("B: ORCH_HOME (no marker) makes `whoami` return the entry",
                    code == 0 and eid in err)
         fresh()

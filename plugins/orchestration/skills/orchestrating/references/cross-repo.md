@@ -23,7 +23,7 @@ code.
 
 ## Rework
 
-Correction after acceptance: `orch update` the entry, then `orch inbox send` the correction
+A rejected result: `orch update` the entry, then `orch inbox send` the correction
 **verbatim**. No track write — the item has not advanced.
 
 ## `orch consume <entry>`

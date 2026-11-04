@@ -2,7 +2,7 @@
 """A hermetic stand-in for agent-track's `show` and `advance`.
 
 State is the JSON fixture named by FAKE_TRACK_FIXTURE:
-  {"items": {"T-015": {"title": "...", "tasks": [{"label": "...", "done": false,
+  {"items": {"T-015": {"title": "...", "tasks": [{"label": "...", "checked": false,
                                                   "actor": "optional gate"}],
                         "blockedBy": []}}}
 Every advance attempt (success or not) is appended to FAKE_TRACK_LOG as one
@@ -45,7 +45,7 @@ def positional():
 
 def current(item):
     for task in item["tasks"]:
-        if not task.get("done"):
+        if not task.get("checked"):
             return task
     return None
 
@@ -54,7 +54,7 @@ def shape(item_id, item):
     cur = current(item)
     return {"id": item_id, "title": item.get("title", item_id),
             "done": cur is None, "tasks": item["tasks"],
-            "progress": {"done": sum(1 for t in item["tasks"] if t.get("done")),
+            "progress": {"done": sum(1 for t in item["tasks"] if t.get("checked")),
                          "total": len(item["tasks"])},
             "currentTask": ({"label": cur["label"], "actor": cur.get("actor")}
                             if cur else None),
@@ -83,10 +83,13 @@ if cur is None:
     fail("ITEM_COMPLETE", "every task of %s is ticked" % ids[0])
 if cur.get("actor"):
     fail("GATE_REQUIRES_RULING", "current task carries !%s" % cur["actor"])
+forced = os.environ.get("FAKE_TRACK_ADVANCE_ERROR")
+if forced:  # simulate a write that lost a race after `show` said it was current
+    fail(forced, "forced by FAKE_TRACK_ADVANCE_ERROR")
 expect = flag("--expect")
 if expect is not None and expect != cur["label"]:
     fail("WRITE_CONFLICT", "current task is %r, not %r" % (cur["label"], expect))
-cur["done"] = True
+cur["checked"] = True
 tmp = fixture + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(data, fh, indent=2)

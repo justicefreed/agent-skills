@@ -13,7 +13,7 @@ PY="${TEST_PYTHON:-}"
 [ -x "$PY" ] || PY=/usr/bin/python3
 [ -x "$PY" ] || PY=python3
 
-out="$(mktemp -d)"
+out="$(mktemp -d "${TMPDIR:-/tmp}/test-suites.XXXXXX")"  # BSD mktemp ignores TMPDIR without a template
 trap 'rm -rf "$out"' EXIT
 pids=()
 suites=()

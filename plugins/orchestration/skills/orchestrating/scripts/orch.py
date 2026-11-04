@@ -4655,7 +4655,8 @@ def _age_seconds(stamp: Optional[str]) -> Optional[float]:
     if not stamp:
         return None
     try:
-        when = datetime.fromisoformat(stamp)
+        # 3.9's fromisoformat rejects a trailing `Z`; a hand-set stamp has one.
+        when = datetime.fromisoformat(stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp)
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:

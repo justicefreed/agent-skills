@@ -114,8 +114,8 @@ def marker(worktree):
     return os.path.join(gd, "orch-home.json")
 
 
-TASKS = [{"label": "Implement retry policy", "done": False},
-         {"label": "Verify production behavior", "done": False}]
+TASKS = [{"label": "Implement retry policy", "checked": False},
+         {"label": "Verify production behavior", "checked": False}]
 ADV = "\n  - track: T-015\n    expect: Implement retry policy"
 
 
@@ -177,6 +177,8 @@ class Scenario(object):
         return orch.load_tracker(self.tracker())
 
     def entry(self):
+        if not os.path.exists(self.tracker()):  # every open refused: none minted
+            return None
         entries = self.data()["entries"]
         return entries[0] if entries else None
 
@@ -229,7 +231,7 @@ def case_c_refusals():
     check_true("C: `open` refuses a track item that does not exist", code != 0 and "T-404" in err)
     code, out, err = sc.open(ADV.replace("Implement retry policy", "No such task"), "m2.md")
     check_true("C: `open` refuses an `expect` label no task has", code != 0 and "No such task" in err)
-    done = [dict(TASKS[0], done=True), dict(TASKS[1])]
+    done = [dict(TASKS[0], checked=True), dict(TASKS[1])]
     set_fixture(sc.fixture, done)
     code, out, err = sc.open(ADV, "m3.md")
     check_true("C: `open` refuses an `expect` task that is already done", code != 0 and "done" in err)
@@ -246,7 +248,7 @@ def case_c_refusals():
 
 
 def case_c_target_not_yet_current_allowed():
-    tasks = [{"label": "Approve design", "done": False}, dict(TASKS[0])]
+    tasks = [{"label": "Approve design", "checked": False}, dict(TASKS[0])]
     sc = Scenario(tasks=tasks)
     check_same("C: a target whose task is not yet current is allowed at `open`", sc.opened[0], 0)
 
@@ -278,7 +280,7 @@ def case_d_happy_path():
     check_true("D1: the entry is gone (closed through the shared path)", sc.entry() is None)
     check_true("D1: the marker is gone", not os.path.exists(marker(sc.cw)))
     fx = read_fixture(sc.fixture)["items"]["T-015"]["tasks"]
-    check_true("D1: the track task was advanced", fx[0]["done"] and not fx[1]["done"])
+    check_true("D1: the track task was advanced", fx[0]["checked"] and not fx[1]["checked"])
     check_true("D1: output is one delta line naming T-015 and the next task",
                "T-015" in out and "Verify production behavior" in out)
     check_true("D1: no exception file remains", not os.path.exists(sc.exception_path(eid)))
@@ -338,11 +340,11 @@ def case_d_pending_refused():
 
 
 def case_d_write_conflict_and_retry():
-    tasks = [{"label": "Approve design", "done": False}, dict(TASKS[0]), dict(TASKS[1])]
+    tasks = [{"label": "Approve design", "checked": False}, dict(TASKS[0]), dict(TASKS[1])]
     sc = Scenario(tasks=tasks).start()
     eid = sc.eid_cached
     code, out, err = consumed(sc, "--evidence", sc.ev())
-    check_same("D3: WRITE_CONFLICT -> exit 3", code, 3)
+    check_same("D3: a different current task -> exit 3", code, 3)
     ent = sc.entry()
     check_true("D3: the entry is left harvested with the decision recorded",
                ent and ent["status"] == "harvested" and ent.get("consumed_text")
@@ -355,7 +357,7 @@ def case_d_write_conflict_and_retry():
     tg = (exc.get("targets") or [{}])[0]
     check_same("E: exception file records tracker, entry, state, code",
                (exc.get("tracker"), exc.get("entry"), tg.get("state"), tg.get("code")),
-               ("root", eid, "failed", "WRITE_CONFLICT"))
+               ("root", eid, "failed", "NOT_CURRENT"))
     check_true("E: exception target has a repair line and an attempts count",
                tg.get("repair") and exc.get("attempts") == 1)
     check_true("D3: repair lines are printed", "orch consume" in out + err)
@@ -368,7 +370,7 @@ def case_d_write_conflict_and_retry():
                "UNAPPLIED CONSUMPTION" in out and eid in out)
     # Fix the fixture (the gate task is done), retry with no flags.
     fx = read_fixture(sc.fixture)
-    fx["items"]["T-015"]["tasks"][0]["done"] = True
+    fx["items"]["T-015"]["tasks"][0]["checked"] = True
     with open(sc.fixture, "w", encoding="utf-8") as fh:
         json.dump(fx, fh)
     code, out, err = sc.consume()
@@ -378,8 +380,25 @@ def case_d_write_conflict_and_retry():
                sc.entry() is None and not os.path.exists(marker(sc.cw)))
 
 
+def case_d_track_write_conflict_race():
+    sc = Scenario().start()
+    eid = sc.eid_cached
+    os.environ["FAKE_TRACK_ADVANCE_ERROR"] = "WRITE_CONFLICT"
+    try:
+        code, out, err = consumed(sc, "--evidence", sc.ev())
+    finally:
+        del os.environ["FAKE_TRACK_ADVANCE_ERROR"]
+    check_same("D3: track's own WRITE_CONFLICT on advance -> exit 3", code, 3)
+    try:
+        with open(sc.exception_path(eid), "r", encoding="utf-8") as fh:
+            tg = (json.load(fh).get("targets") or [{}])[0]
+    except (OSError, ValueError):
+        tg = {}
+    check_same("E: the exception carries track's code verbatim", tg.get("code"), "WRITE_CONFLICT")
+
+
 def case_d_retry_counts_attempts():
-    tasks = [{"label": "Approve design", "done": False}, dict(TASKS[0])]
+    tasks = [{"label": "Approve design", "checked": False}, dict(TASKS[0])]
     sc = Scenario(tasks=tasks).start()
     consumed(sc, "--evidence", sc.ev())
     code, out, err = sc.consume()
@@ -395,7 +414,7 @@ def case_d_retry_counts_attempts():
 def case_d_idempotent_already():
     sc = Scenario().start()
     fx = read_fixture(sc.fixture)
-    fx["items"]["T-015"]["tasks"][0]["done"] = True  # someone advanced it already
+    fx["items"]["T-015"]["tasks"][0]["checked"] = True  # someone advanced it already
     with open(sc.fixture, "w", encoding="utf-8") as fh:
         json.dump(fx, fh)
     code, out, err = consumed(sc, "--evidence", sc.ev())
@@ -406,7 +425,7 @@ def case_d_idempotent_already():
 
 
 def case_d_skip_target():
-    tasks = [{"label": "Approve design", "done": False}, dict(TASKS[0])]
+    tasks = [{"label": "Approve design", "checked": False}, dict(TASKS[0])]
     sc = Scenario(tasks=tasks).start()
     code, out, err = consumed(sc, "--evidence", sc.ev())
     check_same("D8 setup: the target fails first (exit 3)", code, 3)
@@ -536,7 +555,7 @@ def case_f_target_moved():
     sc = Scenario(progress_artifact="progress.md").start()
     write_ckpt(sc, GOOD_CKPT)
     fx = read_fixture(sc.fixture)
-    fx["items"]["T-015"]["tasks"][0]["done"] = True
+    fx["items"]["T-015"]["tasks"][0]["checked"] = True
     with open(sc.fixture, "w", encoding="utf-8") as fh:
         json.dump(fx, fh)
     code, text = audit_codes(sc)
@@ -548,7 +567,8 @@ for fn in (case_c_open_accepts_valid_mapping, case_c_refusals,
            case_c_target_not_yet_current_allowed, case_c_real_track,
            case_d_happy_path, case_d_notify_default_on, case_d_evidence_on_ref,
            case_d_bad_evidence, case_d_pending_refused,
-           case_d_write_conflict_and_retry, case_d_retry_counts_attempts,
+           case_d_write_conflict_and_retry, case_d_track_write_conflict_race,
+           case_d_retry_counts_attempts,
            case_d_idempotent_already, case_d_skip_target, case_d_legacy_plan_target,
            case_f_clean, case_f_checkpoint_missing, case_f_checkpoint_stale,
            case_f_checkpoint_incomplete, case_f_harvested_unfinished, case_f_exception,
