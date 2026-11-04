@@ -4,6 +4,10 @@ One **planning repo P** holds the program: `orch` state, agent-track items, the 
 run in linked worktrees of any **code repo C**. Workers never write agent-track; `consume` never
 writes a progress artifact.
 
+**agent-track is optional** ([github.com/justicefreed/agent-track](https://github.com/justicefreed/agent-track)).
+Without it, home binding, inbox delivery, `consume`'s evidence check and `audit` all work; `open`
+refuses a brief with `track:` targets, and legacy plan ids print `update by hand` at consume.
+
 ## Home binding
 
 `repo_identity` resolves the program home: `ORCH_HOME` (a path inside P), else the **home marker**

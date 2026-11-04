@@ -447,6 +447,25 @@ only if exceptions are frequent. Until the exception count shows consumption fai
 is machinery in front of an unmeasured problem. If exceptions become routine it earns its place; the
 exception files are the measurement.
 
+**Adherence is enforced at the strongest lever that fits, in a fixed order: refusal, then turn-end
+block, then surfacing.** A refusal lives in the CLI, so every harness gets it, but it only catches
+an agent that uses the command. A Stop-hook block catches *forgetting*, which nothing else does, but
+it is Claude Code-only and can loop. Surfacing — `resume`, `roster` — is what remains when neither
+fits. Prose is not on the list: it is what adherence was failing under.
+
+**`close` refuses track-linked work at every level, not only at `strict`.** `consume` being
+optional reproduced the original failure exactly — the item silently not advancing — and mapping
+`advances` are new, so no program depended on the old behaviour. The policy levels govern only rules
+that would change an existing program's behaviour.
+
+**Every escape hatch takes a recorded reason, and the record is not a finding.** A rule with no way
+out gets loosened the first time it is wrong; a way out with no record makes the rule optional. The
+override log keeps both honest without making `audit` red forever over a decision someone made.
+
+**The turn-end block fires once per distinct problem set.** A block the agent cannot satisfy —
+a worker waiting on a human — must cost one continuation, not a loop, so a repeat becomes context
+instead of a second block.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.

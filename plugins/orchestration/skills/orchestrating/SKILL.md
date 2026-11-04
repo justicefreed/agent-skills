@@ -230,9 +230,9 @@ landing is commissioned or ruled unnecessary, and its provenance lives somewhere
   as later housekeeping. `orch close` names both. A heartbeat that outlives its lanes is a loop, not
   insurance; a workspace that outlives its worker is a row the human has to dismiss. Commit first —
   reclaiming keeps the branch, not the uncommitted tree.
-- **Track-linked work closes with `orch consume`, not `orch close`.** It verifies the evidence,
-  advances the agent-track item, then closes — or leaves a visible exception naming the repair
-  (exit 3).
+- **Track-linked work closes with `orch consume`; `orch close` refuses it.** `consume` verifies the
+  evidence, advances the agent-track item, then closes — or leaves a visible exception naming the
+  repair (exit 3). An item that must not advance takes `close --untracked "<why>"`.
 - **Reclaim everything else by explicit name, never by glob**, and never while any build is running.
 
 **Done when:** the entry is deleted, every wake it orphaned is gone, every container it held is archived, provenance is durable, and resources are reclaimed.
@@ -243,12 +243,19 @@ landing is commissioned or ruled unnecessary, and its provenance lives somewhere
 binds such a lane to the program, so every command resolves as for a same-repo lane. Layout, the
 marker, rework and exceptions: `references/cross-repo.md`.
 
+## Adherence
+
+**`orch policy off|warn|strict` sets how hard the program enforces itself.** At `strict`, a lane
+cannot end its turn on a missing or vacuous checkpoint, the orchestrator cannot end its turn on an
+unapplied consumption, and planned work must name its track item. Every way out takes a recorded
+reason. Levels and rules: `references/adherence.md`.
+
 ## Reference map
 
 Each step names the reference it needs; load them on demand. Not pointed to above:
 `references/state.md` (tracker layout, ids, the full `orch` command surface),
 `references/verification.md` (the checks-that-cannot-fail catalog), `references/closeout.md`
-(commits, hygiene, reclamation), and `references/statusline.md` (the human's status surface), `references/cross-repo.md`.
+(commits, hygiene, reclamation), and `references/statusline.md` (the human's status surface).
 
 **Tooling.** Tracker and inbox operations go through `scripts/orch.py`; per-harness path resolution,
 `ORCH_SKILL_DIR` included, is in `references/substrates/_capabilities.md`. Never edit tracker files
