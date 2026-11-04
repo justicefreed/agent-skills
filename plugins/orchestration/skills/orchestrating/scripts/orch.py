@@ -75,6 +75,7 @@ OPTIONAL_BRIEF_FIELDS = (
     "max_context_tokens",
     "max_cost_usd",
     "checkpoint_every_calls",
+    "untracked_reason",
 )
 
 # Who reads this lane's diff before it lands. Declared at dispatch, because it
@@ -1338,6 +1339,23 @@ def cmd_open(args: argparse.Namespace) -> int:
         derived = os.path.basename(os.path.dirname(str(plan_doc))) if plan_doc else ""
         program = derived or "default"
 
+    # Planned work in an agent-track program names its item, or says why not.
+    untracked_open = None
+    level = policy_level(repo_key, program)
+    if (level != "off" and not track_targets(fields["advances"])
+            and uses_agent_track(root)):
+        reason = fields.get("untracked_reason")
+        reason = "" if reason is None or isinstance(reason, list) else str(reason).strip()
+        if reason and not is_placeholder(reason):
+            untracked_open = reason
+        else:
+            msg = ("brief %s names no agent-track target. Add a `track:` mapping "
+                   "to `advances`, or set `untracked_reason: <why>` in its front "
+                   "matter." % args.brief)
+            if level == "strict":
+                raise OrchError(msg)
+            print("warning: %s" % msg, file=sys.stderr)
+
     # Counted across the whole program, not this tracker, because the resources
     # a lane consumes are machine-wide and a child tracker's lanes are just as
     # real as root's.
@@ -1431,6 +1449,9 @@ def cmd_open(args: argparse.Namespace) -> int:
         entry["status"] = "running"
     data["entries"].append(entry)
     save_tracker(path, data)
+    if untracked_open:
+        append_override(repo_key, program, "untracked-open", tracker_id, entry_id,
+                        [], untracked_open)
     if lane_git_dir:
         write_home_marker(lane_git_dir, {
             "version": HOME_MARKER_VERSION, "repo_key": repo_key, "root": root,
