@@ -2036,6 +2036,80 @@ def status_text(entry: Dict[str, Any], repo_key: str, program: str, tracker: str
 
 
 # --------------------------------------------------------------------------- #
+# policy and overrides: how hard adherence is enforced, and every way out
+# --------------------------------------------------------------------------- #
+
+POLICY_LEVELS = ("off", "warn", "strict")
+POLICY_VERSION = 1
+OVERRIDE_WINDOW_DAYS = 7
+
+
+def policy_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "policy.json")
+
+
+def policy_level(repo_key: str, program: str) -> str:
+    """The program's level; absent or unreadable means `off`."""
+    level = _load_json(policy_path(repo_key, program)).get("level")
+    return level if level in POLICY_LEVELS else "off"
+
+
+def uses_agent_track(root: str) -> bool:
+    """`<home root>/.track/` is a directory and `track` is on PATH. No subprocess."""
+    return os.path.isdir(os.path.join(root, ".track")) and shutil.which("track") is not None
+
+
+def cmd_policy(args: argparse.Namespace) -> int:
+    repo_key, _, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    if args.level is None:
+        print(policy_level(repo_key, program))
+        return 0
+    if args.level not in POLICY_LEVELS:
+        raise OrchError("policy level must be one of %s. Got %r."
+                        % (", ".join(POLICY_LEVELS), args.level))
+    _save_json(policy_path(repo_key, program),
+               {"version": POLICY_VERSION, "level": args.level, "set_at": _now()})
+    print("policy for program %s: %s" % (program, args.level))
+    return 0
+
+
+def overrides_path(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "overrides.jsonl")
+
+
+def append_override(repo_key: str, program: str, kind: str, tracker: str,
+                    entry: str, targets: List[str], reason: str) -> None:
+    path = overrides_path(repo_key, program)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"at": _now(), "kind": kind, "tracker": tracker,
+                             "entry": entry, "targets": targets,
+                             "reason": reason}) + "\n")
+
+
+def recent_overrides(repo_key: str, program: str,
+                     days: int = OVERRIDE_WINDOW_DAYS) -> List[Dict[str, Any]]:
+    found: List[Dict[str, Any]] = []
+    try:
+        with open(overrides_path(repo_key, program), "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return found
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        age = _age_seconds(rec.get("at"))
+        if age is not None and age <= days * 86400:
+            found.append(rec)
+    return found
+
+
+# --------------------------------------------------------------------------- #
 # audit: report-only checks over the program's open entries
 # --------------------------------------------------------------------------- #
 
@@ -2165,15 +2239,25 @@ def cmd_audit(args: argparse.Namespace) -> int:
     repo_key, root, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
     findings = audit_findings(repo_key, program, root)
+    # Overrides are decisions someone made, not defects: listed, never counted.
+    overrides = recent_overrides(repo_key, program)
     if args.json:
-        print(json.dumps({"program": program, "findings": findings}, indent=2))
-    elif not findings:
+        print(json.dumps({"program": program, "findings": findings,
+                          "overrides": overrides}, indent=2))
+        return 1 if findings else 0
+    if not findings:
         print("audit: program %s clean" % program)
     else:
         for f in findings:
             print("%-22s %s%s  %s" % (f["code"], f["tracker"],
                                       "." + f["entry"] if f["entry"] else "", f["detail"]))
         print("%d finding%s" % (len(findings), "" if len(findings) == 1 else "s"))
+    if overrides:
+        print("\noverrides (last %d days)" % OVERRIDE_WINDOW_DAYS)
+        for o in overrides:
+            print("  %s %-15s %s.%s %s  %s" % (
+                o.get("at"), o.get("kind"), o.get("tracker"), o.get("entry"),
+                ",".join(o.get("targets") or []) or "-", o.get("reason")))
     return 1 if findings else 0
 
 
@@ -2235,6 +2319,10 @@ def cmd_roster(args: argparse.Namespace) -> int:
         print(json.dumps(
             {name: data["entries"] for name, data in trackers}, indent=2))
         return 0
+
+    level = policy_level(repo_key, program)
+    if level != "off":
+        print("policy: %s" % level)
 
     if not trackers:
         print("no trackers for program %r" % program)
@@ -3740,6 +3828,9 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
         for entry in entries:
             lines.append("  " + entry_summary(
                 entry, status_text(entry, repo_key, program, data["tracker_id"])))
+    level = policy_level(repo_key, program)
+    if level != "off":
+        lines.append("policy: %s" % level)
     lines.extend(exception_block(repo_key, program))
     try:
         inbox_program, target = resolve_target(args, repo_key)
@@ -6371,6 +6462,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     common(sp)
     sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("policy", help="show or set the adherence level "
+                                       "(off, warn, strict)")
+    sp.add_argument("level", nargs="?", help="off, warn or strict; omit to show")
+    common(sp)
+    sp.set_defaults(func=cmd_policy)
 
     sp = sub.add_parser("roster", help="print open entries")
     sp.add_argument("--recursive", action="store_true",
