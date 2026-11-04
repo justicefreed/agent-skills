@@ -738,6 +738,9 @@ MAPPING_LIST_FIELDS = ("advances",)
 _MAPPING_ITEM = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:\s+(.*)|)$")
 
 
+ADVANCE_KEYS = ("track", "expect")
+
+
 def advance_label(item: Any) -> str:
     """How one `advances` item prints: a plan id as-is, a mapping as track:<id>."""
     if isinstance(item, dict):
@@ -749,6 +752,81 @@ def _scalar(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         return value[1:-1]
     return value
+
+
+TRACK_TIMEOUT_S = int(os.environ.get("ORCH_TRACK_TIMEOUT", 30))
+
+
+def run_track(args: List[str], root: str) -> Tuple[bool, Dict[str, Any]]:
+    """`track <args> --json --cwd <root>` -> (ok, parsed JSON).
+
+    On failure the parsed JSON is track's own error object (`error` code and
+    `message`), or a synthesised one when it printed nothing parseable.
+    """
+    try:
+        out = subprocess.run(["track"] + args + ["--json", "--cwd", root],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             timeout=TRACK_TIMEOUT_S)
+    except FileNotFoundError:
+        raise OrchError("`track` is not on PATH, and this brief names agent-track "
+                        "targets. Install agent-track, or list the targets as plan "
+                        "ids, which have no automated effect.")
+    except subprocess.TimeoutExpired:
+        return False, {"error": "TIMEOUT", "message": "track %s took over %ss"
+                       % (" ".join(args), TRACK_TIMEOUT_S)}
+    stream = out.stdout if out.returncode == 0 else (out.stderr or out.stdout)
+    try:
+        data = json.loads(stream.decode("utf-8", "replace") or "null")
+    except ValueError:
+        data = None
+    if out.returncode == 0 and isinstance(data, dict):
+        return True, data
+    if isinstance(data, dict) and data.get("error"):
+        return False, data
+    return False, {"error": "TRACK_FAILED", "message": (
+        out.stderr or out.stdout).decode("utf-8", "replace").strip()[:300]}
+
+
+def track_targets(advances: Any) -> List[Dict[str, str]]:
+    if not isinstance(advances, list):
+        return []
+    return [a for a in advances if isinstance(a, dict)]
+
+
+def expect_task_state(item: Dict[str, Any], expect: str) -> Optional[str]:
+    """'done', 'current' or 'open' for the task labelled `expect`; None if absent.
+
+    Field names are track's own `show --json`: `tasks[].label`, `tasks[].checked`
+    and `currentTask.label`.
+    """
+    matches = [t for t in item.get("tasks") or [] if t.get("label") == expect]
+    if not matches:
+        return None
+    if all(t.get("checked") for t in matches):
+        return "done"
+    current = item.get("currentTask") or {}
+    return "current" if current.get("label") == expect else "open"
+
+
+def check_track_targets(advances: Any, root: str, path: str) -> None:
+    """Refuse a brief whose agent-track target cannot be advanced by this lane."""
+    for target in track_targets(advances):
+        ok, item = run_track(["show", target["track"]], root)
+        if not ok:
+            raise OrchError("brief %s: track item %s: %s %s"
+                            % (path, target["track"], item.get("error"),
+                               item.get("message") or ""))
+        state = expect_task_state(item, target["expect"])
+        if state is None:
+            raise OrchError(
+                "brief %s: track item %s has no task labelled exactly %r. Its "
+                "tasks: %s" % (path, target["track"], target["expect"],
+                               "; ".join(t.get("label", "?") for t in item.get("tasks") or [])
+                               or "(none)"))
+        if state == "done":
+            raise OrchError("brief %s: track item %s task %r is already done -- "
+                            "this lane cannot advance it."
+                            % (path, target["track"], target["expect"]))
 
 
 def validate_brief(fields: Dict[str, Any], path: str) -> None:
@@ -800,10 +878,21 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
         )
     else:
         for item in advances:
-            if isinstance(item, dict) and not item.get("track"):
+            if not isinstance(item, dict):
+                continue
+            unknown = sorted(set(item) - set(ADVANCE_KEYS))
+            if unknown:
                 raise OrchError(
-                    "brief %s: a mapping advances item needs a `track` key. Got %r."
-                    % (path, item))
+                    "brief %s: advances item %r has unknown key%s %s; a mapping "
+                    "takes exactly `track` and `expect`%s."
+                    % (path, item, "s" if len(unknown) > 1 else "", ", ".join(unknown),
+                       " (`op` is reserved, not yet accepted)" if "op" in unknown else ""))
+            for key in ADVANCE_KEYS:
+                if not item.get(key) or is_placeholder(item[key]):
+                    raise OrchError(
+                        "brief %s: advances item %r needs a real `%s`. `expect` is "
+                        "the exact label of the track task this lane completes."
+                        % (path, item, key))
 
     if "review" in fields:
         mode = str(fields["review"]).strip()
@@ -1117,6 +1206,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     repo_key, root, common = repo_identity(args.repo)
     fields = parse_front_matter(args.brief)
     validate_brief(fields, args.brief)
+    check_track_targets(fields["advances"], root, args.brief)
 
     # Decide the session mode HERE, before the spawn, and record it. Left to the
     # spawn call it is a field that can be forgotten, and forgetting it is not
