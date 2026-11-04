@@ -25,6 +25,9 @@ expected_artifacts:                              # required, non-empty
   - branch draft/batch-c
   - docs/migration-2026-09/BATCH-C-LANDING.md
 advances: [3.1, 3.4, 3.7]                        # required; or the literal `none`
+#   an item may instead be a mapping `{track: T-015, expect: "<task label>"}`: an agent-track
+#   item in the program repo and the exact task this lane completes. `open` refuses a missing
+#   item, an unmatched label, a done task, or any other key; `orch consume` advances it.
 consumption: review doc for sign-off, then mark rows Merged   # required
 progress_artifact: docs/migration-2026-09/BATCH-C-LANDING.md  # required for long tasks
 archetype: integrator                            # required; sets the start rung, effort, independence
@@ -66,7 +69,10 @@ first dispatch. Keep it small and append only facts a fresh agent cannot re-deri
 milestones, the next bounded action, verification evidence, and any external side effect whose
 outcome is uncertain. Update it after each milestone and immediately before a context-heavy read,
 rotation, compaction, or external mutation. A checkpoint is complete when it names the last durable
-state and one safe next action; chat history is never the checkpoint.
+state and one safe next action; chat history is never the checkpoint. `orch audit` checks four
+labels, each a `Label:` line or a `## Label` heading with real content: `Last durable milestone`,
+`Verification`, `Uncertain external effects` (`none` is valid), `Next safe action`. Relative paths
+resolve against the entry's `worktree`.
 
 Everything else — constraints, rationale, history — goes in the body, because the body is what the
 *worker* reads and duplicating it into structured fields creates two copies that drift.

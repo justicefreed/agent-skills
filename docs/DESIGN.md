@@ -421,6 +421,32 @@ everything. Two substrate built-ins nearly do this and neither replaces the verb
 messaging twice, and `daemon.autoArchiveAfterMerge` is global and triggers on an observed PR merge,
 so it covers lanes that land through a PR and no others.
 
+## 9h. Cross-repo programs, and why consumption is one command
+
+Observed: a program planned in one repo and built in others forced the orchestrator to remember two
+writes after every acceptance — close the entry, advance the track item — and the second was the one
+that got dropped. Two stores drifted with nothing to say so.
+
+**The equivalence principle: a bound lane resolves exactly as a linked worktree of the planning repo
+does.** Every guard, hook, inbox and statusline already works for same-repo lanes; the cheapest
+correct cross-repo design changes only the identity lookup and special-cases no command. A command
+that seems to need special handling is a spec error, not a patch site.
+
+**A marker over an environment variable.** Paseo's `env` is per provider, not per agent, so an
+override cannot be scoped to one lane. A file in the worktree's own git dir can: it follows the lane,
+dies with the worktree, and is read from the filesystem so the statusline never spawns git. `ORCH_HOME`
+remains as the manual override.
+
+**The decision is recorded before the effects.** `consume` verifies evidence, saves `harvested` with
+the evidence, and only then touches `track`. A crash leaves a durable decision and an incomplete
+effect, which `audit` names, rather than an effect with no record. A failed effect leaves an
+exception file naming the exact repair, so retry needs no memory.
+
+**No clerk yet.** A program clerk would own control events and finalization, and is the right shape
+only if exceptions are frequent. Until the exception count shows consumption failing in practice, it
+is machinery in front of an unmeasured problem. If exceptions become routine it earns its place; the
+exception files are the measurement.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.
