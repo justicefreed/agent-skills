@@ -42,9 +42,9 @@ Relative paths resolve against your worktree. It must carry four labels, each a 
 
 ## 3. Drain your inbox
 
-Messages from the orchestrator reach you through your inbox, not your chat. Drain it at every turn
-end and whenever you finish a milestone (`orch inbox drain`, via the `orchestrating` skill's
-scripts), and act on what it holds before continuing.
+Messages from the orchestrator reach you through your inbox, not your chat. This skill's turn-end
+hook delivers anything queued automatically; also run `orch inbox drain` yourself before starting
+a long step, and act on what it holds before continuing.
 
 **Done when:** the inbox is empty at turn end.
 
