@@ -302,8 +302,8 @@ def _read_first_line(path: str) -> Optional[str]:
         return None
 
 
-def _fs_common_dir(start: str) -> Optional[str]:
-    """`git rev-parse --git-common-dir`, answered from the filesystem.
+def _fs_git_dirs(start: str) -> Optional[Tuple[str, str]]:
+    """(per-worktree git dir, common git dir), answered from the filesystem.
 
     `statusline` runs this after every assistant message, and a git process
     costs ~60ms where these few reads cost well under one. Handles a plain
@@ -340,32 +340,93 @@ def _fs_common_dir(start: str) -> Optional[str]:
     pointer = _read_first_line(os.path.join(git_dir, "commondir"))
     if pointer:
         common = os.path.join(git_dir, pointer)
-    return os.path.realpath(common) if os.path.isdir(common) else None
+    if not os.path.isdir(common):
+        return None
+    return os.path.realpath(git_dir), os.path.realpath(common)
+
+
+def _fs_common_dir(start: str) -> Optional[str]:
+    """`git rev-parse --git-common-dir`, answered from the filesystem."""
+    dirs = _fs_git_dirs(start)
+    return dirs[1] if dirs else None
+
+
+HOME_MARKER = "orch-home.json"
+HOME_MARKER_VERSION = 1
+
+# repo_key -> program, for keys resolved through a home marker in this process.
+# Read by `resolve_program`, so a lane bound to P lands in the marker's program
+# rather than being asked to choose between P's programs.
+_MARKER_PROGRAM: Dict[str, str] = {}
 
 
 def repo_identity(start: str) -> Tuple[str, str, str]:
-    """Return (repo_key, repo_root, git_common_dir).
+    """Return (repo_key, repo_root, git_common_dir) of the program HOME.
 
     Keyed on the *common* git dir so every linked worktree of one repository
     maps to a single key. That is what lets the tracker outlive any individual
     lane worktree, and what keeps an orchestrator that moves between worktrees
     pointed at the same state.
+
+    The home is, first match wins: `ORCH_HOME` (a path inside the planning
+    repo), then a home marker in `start`'s own per-worktree git dir (written by
+    `orch open` for a cross-repo lane), then `start`'s own repository. A lane
+    bound to P therefore resolves exactly as a linked worktree of P does.
     """
-    return _repo_identity(os.path.realpath(start))
+    override = os.environ.get("ORCH_HOME")
+    if override:
+        key, root, common, _ = _local_identity(os.path.realpath(override))
+        _MARKER_PROGRAM.pop(key, None)
+        return key, root, common
+    key, root, common, git_dir = _local_identity(os.path.realpath(start))
+    marker = read_home_marker(git_dir)
+    if marker:
+        _MARKER_PROGRAM[marker["repo_key"]] = marker["program"]
+        return marker["repo_key"], marker["root"], marker["common"]
+    _MARKER_PROGRAM.pop(key, None)
+    return key, root, common
+
+
+def local_identity(start: str) -> Tuple[str, str, str, str]:
+    """(repo_key, root, common, git_dir) of `start`'s OWN repository.
+
+    Ignores `ORCH_HOME` and any home marker: this is what `open` compares a
+    lane's worktree against, and where the marker for that worktree lives.
+    """
+    return _local_identity(os.path.realpath(start))
+
+
+def read_home_marker(git_dir: str) -> Optional[Dict[str, Any]]:
+    """The home marker in a per-worktree git dir, or None. Filesystem only."""
+    try:
+        with open(os.path.join(git_dir, HOME_MARKER), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != HOME_MARKER_VERSION:
+        return None
+    if not all(isinstance(data.get(k), str) and data.get(k)
+               for k in ("repo_key", "root", "common", "program", "entry")):
+        return None
+    return data
 
 
 @functools.lru_cache(maxsize=64)
-def _repo_identity(start: str) -> Tuple[str, str, str]:
+def _local_identity(start: str) -> Tuple[str, str, str, str]:
     # Cached per process: a directory does not change repository mid-run, and
-    # one command can ask several times (`open` asks three).
-    common = _fs_common_dir(start)
-    if common is None:
+    # one command can ask several times (`open` asks three). The home marker is
+    # deliberately NOT cached -- `close` removes it mid-run.
+    dirs = _fs_git_dirs(start)
+    if dirs is None:
         common = os.path.realpath(
             _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], start))
+        git_dir = os.path.realpath(_git(["rev-parse", "--absolute-git-dir"], start))
+    else:
+        git_dir, common = dirs
     root = os.path.realpath(os.path.dirname(common)) if common.endswith(".git") \
         else os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
     digest = hashlib.sha256(common.encode("utf-8")).hexdigest()[:8]
-    return "%s-%s" % (os.path.basename(root), digest), root, common
+    return "%s-%s" % (os.path.basename(root), digest), root, common, git_dir
 
 
 def state_root() -> str:
@@ -492,6 +553,8 @@ def resolve_program(repo_key: str, requested: Optional[str]) -> str:
     """
     if requested:
         return requested
+    if _MARKER_PROGRAM.get(repo_key):
+        return _MARKER_PROGRAM[repo_key]
     programs = list_programs(repo_key)
     if not programs:
         return "default"
@@ -1228,6 +1291,11 @@ def cmd_open(args: argparse.Namespace) -> int:
               % (program, tracker_id, path), file=sys.stderr)
 
     entry_id = "e%d" % data["next_entry"]
+    # A lane in another repository is bound to this program by a marker in its
+    # own worktree's git dir. Refused here, before anything is saved.
+    lane_git_dir = cross_repo_git_dir(fields["worktree"], repo_key)
+    if lane_git_dir:
+        check_home_marker(lane_git_dir, program, tracker_id, entry_id)
     data["next_entry"] += 1
     entry = {
         "entry": entry_id,
@@ -1273,6 +1341,14 @@ def cmd_open(args: argparse.Namespace) -> int:
         entry["status"] = "running"
     data["entries"].append(entry)
     save_tracker(path, data)
+    if lane_git_dir:
+        write_home_marker(lane_git_dir, {
+            "version": HOME_MARKER_VERSION, "repo_key": repo_key, "root": root,
+            "common": common, "program": program, "tracker": tracker_id,
+            "entry": entry_id})
+        print("bound %s to program %r (%s)" % (fields["worktree"], program,
+                                                os.path.join(lane_git_dir, HOME_MARKER)),
+              file=sys.stderr)
     if raised and evidence:
         append_escalation(repo_key, program, {
             "at": _now(), "entry": entry_id, "title": entry.get("title"),
@@ -1442,6 +1518,88 @@ def cmd_mint_child(args: argparse.Namespace) -> int:
     return 0
 
 
+def _marker_names(marker: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    return marker.get("program"), marker.get("tracker"), marker.get("entry")
+
+
+def cross_repo_git_dir(worktree: Any, repo_key: str) -> Optional[str]:
+    """The lane worktree's own git dir when it belongs to ANOTHER repository.
+
+    None for a same-repo lane (today's behaviour, unchanged), including one
+    whose worktree does not exist yet -- the substrate usually creates it after
+    `open`. Refuses the two cross-repo shapes a marker cannot safely bind.
+    """
+    path = os.path.realpath(str(worktree))
+    probe = path
+    while not os.path.exists(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    try:
+        key, _, common, git_dir = local_identity(probe)
+    except OrchError:
+        return None             # not in any repository: nothing to bind
+    if key == repo_key:
+        return None
+    if probe != path:
+        raise OrchError(
+            "worktree %s does not exist, and it sits inside another repository "
+            "(%s). Cross-repo lanes need their linked worktree created before "
+            "`orch open`, because the home marker is written into it." % (path, key))
+    if git_dir == common:
+        raise OrchError(
+            "worktree %s is a primary checkout of %s. Cross-repo lanes need a "
+            "linked worktree -- a marker in a primary checkout would bind every "
+            "session in that repo. `git -C %s worktree add <path>` and point the "
+            "brief at that." % (path, key, path))
+    return git_dir
+
+
+def check_home_marker(git_dir: str, program: str, tracker: str, entry: str) -> None:
+    existing = read_home_marker(git_dir)
+    if existing and _marker_names(existing) != (program, tracker, entry):
+        raise OrchError(
+            "this worktree is already bound to program %r tracker %r entry %r "
+            "(%s). One lane per worktree: close that entry first, or use another "
+            "worktree." % (existing.get("program"), existing.get("tracker"),
+                           existing.get("entry"), os.path.join(git_dir, HOME_MARKER)))
+
+
+def write_home_marker(git_dir: str, marker: Dict[str, Any]) -> None:
+    """Atomic, and a no-op when the marker already says exactly this."""
+    path = os.path.join(git_dir, HOME_MARKER)
+    if read_home_marker(git_dir) == marker:
+        return
+    fd, tmp = tempfile.mkstemp(dir=git_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marker, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def remove_home_marker(entry: Dict[str, Any], program: str, tracker: str) -> Optional[str]:
+    """Drop the lane worktree's home marker if it names this entry; its path if so."""
+    worktree = entry.get("worktree")
+    if not worktree or not os.path.isdir(str(worktree)):
+        return None
+    try:
+        git_dir = local_identity(str(worktree))[3]
+    except OrchError:
+        return None
+    marker = read_home_marker(git_dir)
+    if not marker or _marker_names(marker) != (program, tracker, entry["entry"]):
+        return None
+    path = os.path.join(git_dir, HOME_MARKER)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return None
+    return path
+
+
 def lane_has_own_tree(entry: Dict[str, Any], repo: Optional[str]) -> bool:
     """Whether this lane runs somewhere other than the orchestrator's own tree.
 
@@ -1516,6 +1674,9 @@ def cmd_close(args: argparse.Namespace) -> int:
     data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
     save_tracker(path, data)
     print("closed %s (%s): %s" % (entry["entry"], entry["title"], args.consumed))
+    unbound = remove_home_marker(entry, program, args.tracker)
+    if unbound:
+        print("unbound %s" % unbound, file=sys.stderr)
 
     # A lane's liveness insurance dies with the lane. Reported here because
     # closing is the last moment an agent is reliably looking at this entry --
