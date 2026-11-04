@@ -2035,6 +2035,149 @@ def status_text(entry: Dict[str, Any], repo_key: str, program: str, tracker: str
     return entry["status"]
 
 
+# --------------------------------------------------------------------------- #
+# audit: report-only checks over the program's open entries
+# --------------------------------------------------------------------------- #
+
+CHECKPOINT_LABELS = ("Last durable milestone", "Verification",
+                     "Uncertain external effects", "Next safe action")
+VACUOUS_VALUES = {"continue", "ongoing", "in progress", "wip", "pending", "see above"}
+CHECKPOINT_STALE_MIN = int(os.environ.get("ORCH_CHECKPOINT_STALE_MIN", 30))
+HARVESTED_UNFINISHED_MIN = 10
+
+
+def checkpoint_labels(text: str) -> Dict[str, str]:
+    """Label -> value for the checkpoint labels a progress artifact carries.
+
+    A label is a `Label: value` line, or a `## Label` heading whose value is
+    the content up to the next heading. Matching on the label is
+    case-insensitive.
+    """
+    wanted = {label.lower(): label for label in CHECKPOINT_LABELS}
+    found: Dict[str, str] = {}
+    heading: Optional[str] = None
+    body: List[str] = []
+    for raw in text.splitlines() + ["# end"]:
+        line = raw.strip()
+        if line.startswith("#"):
+            if heading:
+                found.setdefault(heading, "\n".join(body).strip())
+            name = line.lstrip("#").strip().rstrip(":").lower()
+            heading = wanted.get(name)
+            body = []
+            continue
+        if heading:
+            body.append(line)
+        name, colon, value = line.partition(":")
+        name = name.strip().lstrip("-* ").strip("*").strip().lower()
+        if colon and name in wanted:
+            found.setdefault(wanted[name], value.strip().strip("*").strip())
+    return found
+
+
+def _vacuous(value: str) -> bool:
+    text = value.strip().rstrip(".").strip().lower()
+    return is_placeholder(text) or text in VACUOUS_VALUES
+
+
+def _entry_path(entry: Dict[str, Any], value: str) -> str:
+    """A path from an entry, relative ones against the entry's worktree."""
+    return value if os.path.isabs(value) else os.path.join(str(entry.get("worktree") or ""), value)
+
+
+def audit_findings(repo_key: str, program: str, root: str) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+
+    def add(code: str, tracker: str, entry: Optional[str], detail: str) -> None:
+        findings.append({"code": code, "tracker": tracker, "entry": entry,
+                         "detail": detail})
+
+    exc_names = set()
+    for rec in load_exceptions(repo_key, program):
+        exc_names.add((rec.get("tracker"), rec.get("entry")))
+        add("exception", str(rec.get("tracker")), rec.get("entry"),
+            "unapplied consumption, %s attempt(s): %s" % (
+                rec.get("attempts"), "; ".join(
+                    "%s %s" % (t.get("track"), t.get("code"))
+                    for t in rec.get("targets") or [] if t.get("state") == "failed")))
+
+    now = datetime.now(timezone.utc).timestamp()
+    for name, data in _read_all_trackers(repo_key, program, True, "root"):
+        for entry in data["entries"]:
+            eid = entry["entry"]
+            status = entry.get("status")
+            if status == "harvested":
+                age = _age_seconds(entry.get("consumed_at") or entry.get("updated_at"))
+                if (age is not None and age > HARVESTED_UNFINISHED_MIN * 60
+                        and (name, eid) not in exc_names
+                        and not os.path.exists(exception_path(repo_key, program, name, eid))):
+                    add("harvested-unfinished", name, eid,
+                        "harvested %d min ago with no exception file -- re-run "
+                        "`%s`" % (age // 60, _consume_ref(eid, name)))
+            if status != "running":
+                continue
+            artifact = entry.get("progress_artifact")
+            if artifact:
+                apath = _entry_path(entry, str(artifact))
+                if not os.path.isfile(apath):
+                    add("checkpoint-missing", name, eid, "%s does not exist" % apath)
+                else:
+                    stale = (now - os.path.getmtime(apath)) / 60
+                    if stale > CHECKPOINT_STALE_MIN:
+                        add("checkpoint-stale", name, eid, "%s last written %d min ago"
+                            % (apath, stale))
+                    try:
+                        with open(apath, "r", encoding="utf-8") as fh:
+                            labels = checkpoint_labels(fh.read())
+                    except (OSError, UnicodeDecodeError):
+                        labels = {}
+                    bad = [label for label in CHECKPOINT_LABELS
+                           if not labels.get(label) or _vacuous(labels[label])]
+                    if bad:
+                        add("checkpoint-incomplete", name, eid, "%s: %s absent, empty "
+                            "or vacuous" % (apath, ", ".join(bad)))
+            worktree = entry.get("worktree")
+            if worktree and os.path.isdir(str(worktree)):
+                try:
+                    lkey, _, _, git_dir = local_identity(str(worktree))
+                except OrchError:
+                    lkey, git_dir = repo_key, ""
+                if lkey != repo_key:
+                    marker = read_home_marker(git_dir)
+                    if not marker or _marker_names(marker) != (program, name, eid):
+                        add("home-unbound", name, eid, "%s %s" % (
+                            worktree, "has no home marker" if not marker else
+                            "is bound to %s/%s/%s" % _marker_names(marker)))
+            targets = track_targets(entry.get("advances"))
+            if targets:
+                for target in targets:
+                    try:
+                        ok, item = run_track(["show", target["track"]], root)
+                    except OrchError:
+                        break               # no `track`: nothing to compare against
+                    if ok and expect_task_state(item, target.get("expect")) == "done":
+                        add("target-moved", name, eid, "%s task %s is already done"
+                            % (target["track"], json.dumps(target.get("expect"))))
+    return findings
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    repo_key, root, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    findings = audit_findings(repo_key, program, root)
+    if args.json:
+        print(json.dumps({"program": program, "findings": findings}, indent=2))
+    elif not findings:
+        print("audit: program %s clean" % program)
+    else:
+        for f in findings:
+            print("%-22s %s%s  %s" % (f["code"], f["tracker"],
+                                      "." + f["entry"] if f["entry"] else "", f["detail"]))
+        print("%d finding%s" % (len(findings), "" if len(findings) == 1 else "s"))
+    return 1 if findings else 0
+
+
+
 def tracker_names(pdir: str) -> List[str]:
     """Tracker ids in a program directory, by NAME and never by parseability.
 
@@ -6221,6 +6364,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reason", help="why the skipped targets should not move")
     common(sp)
     sp.set_defaults(func=cmd_consume)
+
+    sp = sub.add_parser("audit", help="report checkpoint, consumption and binding "
+                                      "problems; exit 1 if any")
+    sp.add_argument("--json", action="store_true")
+    common(sp)
+    sp.set_defaults(func=cmd_audit)
 
     sp = sub.add_parser("roster", help="print open entries")
     sp.add_argument("--recursive", action="store_true",
