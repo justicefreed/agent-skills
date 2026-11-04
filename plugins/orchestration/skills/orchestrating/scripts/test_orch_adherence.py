@@ -408,6 +408,28 @@ def case_p4_orchestrator():
     check_true("P8.6: a non-git cwd -> no output", code == 0 and out.strip() == "")
 
 
+def case_p4_several_programs():
+    # Enforcement must not switch off silently when a repo holds two programs.
+    sc = lane_scenario("strict", ckpt=GOOD_CKPT)
+    sc.write_exception()
+    first_dir = sc.program_dir()
+    wt = linked_worktree(sc.p, "other-lane")
+    code, out, err = run(sc.p, "open", "--program", "other", "--agent-id", "agent-other",
+                         "--brief", write_brief(sc.p, wt, "other.md", "none"))
+    check_same("P8.6: a second program opens alongside the first", code, 0)
+    check_true("P8.6: the repo now holds two programs (test sanity)",
+               len(orch.list_programs(sc.key)) == 2)
+    code, out, parsed = stop(sc.p, session_id="multi1")
+    check_true("P8.6: two programs -> the enforcing one still blocks the orchestrator",
+               blocks(parsed) and "UNAPPLIED CONSUMPTION" in reason_of(parsed))
+    code, out, parsed = stop(sc.p, session_id="multi1")
+    check_true("P8.6: two programs -> the loop guard still holds on a repeat",
+               not blocks(parsed) and "UNAPPLIED CONSUMPTION" in (context(parsed) or ""))
+    os.remove(os.path.join(first_dir, "policy.json"))
+    code, out, parsed = stop(sc.p, session_id="multi2")
+    check_true("P8.6: two programs, neither enforcing -> no output", out.strip() == "")
+
+
 # --------------------------------------------------------------------------- #
 # P8.7  stop-check never calls track
 # --------------------------------------------------------------------------- #
@@ -467,7 +489,7 @@ def case_p6_overrides():
 
 
 for fn in (case_p1_policy, case_p2_close, case_p3_open, case_p4_lane, case_p4_loop_guard,
-           case_p4_orchestrator, case_p4_no_track_calls, case_p5_summary, case_p6_overrides):
+           case_p4_orchestrator, case_p4_several_programs, case_p4_no_track_calls, case_p5_summary, case_p6_overrides):
     case(fn)
 
 print("\n%s" % ("all adherence cases pass" if not FAILURES

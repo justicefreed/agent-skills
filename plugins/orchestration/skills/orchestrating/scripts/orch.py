@@ -2427,30 +2427,43 @@ def _stop_check(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(cwd)
     if not list_programs(repo_key):
         return 0
+    # Every enforcing program, not just an unambiguous one: refusing to guess
+    # is right for a command that writes, but here it would switch enforcement
+    # off without a word in any repo that holds two programs.
     try:
-        program = resolve_program(repo_key, args.program)
+        programs = [resolve_program(repo_key, args.program)]
     except OrchError:
+        programs = [p["program"] for p in list_programs(repo_key)]
+    found = []  # (program, level, obligations)
+    for program in programs:
+        level = policy_level(repo_key, program)
+        if level == "off":
+            continue
+        obligations = stop_obligations(repo_key, program, cwd)
+        if obligations:
+            found.append((program, level, obligations))
+    if not found:
         return 0
-    level = policy_level(repo_key, program)
-    if level == "off":
-        return 0
-    obligations = stop_obligations(repo_key, program, cwd)
-    if not obligations:
-        return 0
-    text = stop_reason(repo_key, program, obligations)
+    text = "\n\n".join(stop_reason(repo_key, program, obligations)
+                       for program, _, obligations in found)
     if args.format != "hook":
         print(text)
         return 0
 
     session_id = payload.get("session_id")
     session_id = session_id if isinstance(session_id, str) and session_id else None
-    fingerprint = stop_fingerprint(obligations)
+    fingerprint = hashlib.sha256("|".join(
+        "%s=%s" % (program, stop_fingerprint(obligations))
+        for program, _, obligations in found).encode("utf-8")).hexdigest()
+    records = ([stop_block_path(repo_key, program, session_id) for program, _, _ in found]
+               if session_id else [])
     suppressed = bool(payload.get("stop_hook_active")) or session_id is None
-    record = stop_block_path(repo_key, program, session_id) if session_id else None
-    if not suppressed and _load_json(record).get("fingerprint") == fingerprint:
+    if not suppressed and all(_load_json(r).get("fingerprint") == fingerprint
+                              for r in records):
         suppressed = True
-    if level == "strict" and not suppressed:
-        _save_json(record, {"fingerprint": fingerprint, "at": _now()})
+    if any(level == "strict" for _, level, _ in found) and not suppressed:
+        for record in records:
+            _save_json(record, {"fingerprint": fingerprint, "at": _now()})
         print(json.dumps({"decision": "block", "reason": text}))
     else:
         print(json.dumps({"hookSpecificOutput": {

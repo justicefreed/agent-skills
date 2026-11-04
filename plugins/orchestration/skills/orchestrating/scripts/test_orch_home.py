@@ -170,7 +170,8 @@ def case_a_rollback_compat():
     names = orch.tracker_names(os.path.dirname(path))
     check_true("A: tracker_names does not list exceptions/ as a tracker",
                "exceptions" not in names and "root" in names)
-    code, out, err = run(repo, "close", eid, "--consumed", "used the output")
+    code, out, err = run(repo, "close", eid, "--consumed", "used the output",
+                         "--untracked", "compat test: the item must not advance")
     check_same("A: main's `close` succeeds on branch-written state", code, 0)
 
 
