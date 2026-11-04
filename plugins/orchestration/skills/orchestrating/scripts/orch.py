@@ -2396,7 +2396,12 @@ def _fs_toplevel(start: str) -> Optional[str]:
 
 def stop_obligations(repo_key: str, program: str, cwd: str
                      ) -> Optional[List[Dict[str, Any]]]:
-    """This session's outstanding findings, or None when its role is ambiguous."""
+    """This session's outstanding findings, or None when its role is ambiguous.
+
+    Not either/or: a lane session owes its entry's checkpoint AND the
+    orchestrator obligations of the tracker it owns (its `child_tracker`, if
+    any); a non-lane session owns `root`. A sub-orchestrator gets both, and the
+    root is never blocked by a grandchild's exception."""
     top = _fs_toplevel(cwd)
     matches = []
     for name, data in _read_all_trackers(repo_key, program, True, "root"):
@@ -2409,9 +2414,12 @@ def stop_obligations(repo_key: str, program: str, cwd: str
     findings = audit_findings(repo_key, program, "", track=False, git=False)
     if len(matches) == 1 and matches[0][1].get("status") == "running":
         name, entry = matches[0]
-        return [f for f in findings if f["code"] in LANE_CODES
-                and f["tracker"] == name and f["entry"] == entry["entry"]]
-    return [f for f in findings if f["code"] in ORCHESTRATOR_CODES]
+        owned = entry.get("child_tracker")
+        return [f for f in findings
+                if (f["code"] in LANE_CODES and f["tracker"] == name
+                    and f["entry"] == entry["entry"])
+                or (owned and f["code"] in ORCHESTRATOR_CODES and f["tracker"] == owned)]
+    return [f for f in findings if f["code"] in ORCHESTRATOR_CODES and f["tracker"] == "root"]
 
 
 def stop_reason(repo_key: str, program: str, obligations: List[Dict[str, Any]]) -> str:
