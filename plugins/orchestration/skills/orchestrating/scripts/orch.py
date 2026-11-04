@@ -302,8 +302,8 @@ def _read_first_line(path: str) -> Optional[str]:
         return None
 
 
-def _fs_common_dir(start: str) -> Optional[str]:
-    """`git rev-parse --git-common-dir`, answered from the filesystem.
+def _fs_git_dirs(start: str) -> Optional[Tuple[str, str]]:
+    """(per-worktree git dir, common git dir), answered from the filesystem.
 
     `statusline` runs this after every assistant message, and a git process
     costs ~60ms where these few reads cost well under one. Handles a plain
@@ -340,32 +340,93 @@ def _fs_common_dir(start: str) -> Optional[str]:
     pointer = _read_first_line(os.path.join(git_dir, "commondir"))
     if pointer:
         common = os.path.join(git_dir, pointer)
-    return os.path.realpath(common) if os.path.isdir(common) else None
+    if not os.path.isdir(common):
+        return None
+    return os.path.realpath(git_dir), os.path.realpath(common)
+
+
+def _fs_common_dir(start: str) -> Optional[str]:
+    """`git rev-parse --git-common-dir`, answered from the filesystem."""
+    dirs = _fs_git_dirs(start)
+    return dirs[1] if dirs else None
+
+
+HOME_MARKER = "orch-home.json"
+HOME_MARKER_VERSION = 1
+
+# repo_key -> program, for keys resolved through a home marker in this process.
+# Read by `resolve_program`, so a lane bound to P lands in the marker's program
+# rather than being asked to choose between P's programs.
+_MARKER_PROGRAM: Dict[str, str] = {}
 
 
 def repo_identity(start: str) -> Tuple[str, str, str]:
-    """Return (repo_key, repo_root, git_common_dir).
+    """Return (repo_key, repo_root, git_common_dir) of the program HOME.
 
     Keyed on the *common* git dir so every linked worktree of one repository
     maps to a single key. That is what lets the tracker outlive any individual
     lane worktree, and what keeps an orchestrator that moves between worktrees
     pointed at the same state.
+
+    The home is, first match wins: `ORCH_HOME` (a path inside the planning
+    repo), then a home marker in `start`'s own per-worktree git dir (written by
+    `orch open` for a cross-repo lane), then `start`'s own repository. A lane
+    bound to P therefore resolves exactly as a linked worktree of P does.
     """
-    return _repo_identity(os.path.realpath(start))
+    override = os.environ.get("ORCH_HOME")
+    if override:
+        key, root, common, _ = _local_identity(os.path.realpath(override))
+        _MARKER_PROGRAM.pop(key, None)
+        return key, root, common
+    key, root, common, git_dir = _local_identity(os.path.realpath(start))
+    marker = read_home_marker(git_dir)
+    if marker:
+        _MARKER_PROGRAM[marker["repo_key"]] = marker["program"]
+        return marker["repo_key"], marker["root"], marker["common"]
+    _MARKER_PROGRAM.pop(key, None)
+    return key, root, common
+
+
+def local_identity(start: str) -> Tuple[str, str, str, str]:
+    """(repo_key, root, common, git_dir) of `start`'s OWN repository.
+
+    Ignores `ORCH_HOME` and any home marker: this is what `open` compares a
+    lane's worktree against, and where the marker for that worktree lives.
+    """
+    return _local_identity(os.path.realpath(start))
+
+
+def read_home_marker(git_dir: str) -> Optional[Dict[str, Any]]:
+    """The home marker in a per-worktree git dir, or None. Filesystem only."""
+    try:
+        with open(os.path.join(git_dir, HOME_MARKER), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != HOME_MARKER_VERSION:
+        return None
+    if not all(isinstance(data.get(k), str) and data.get(k)
+               for k in ("repo_key", "root", "common", "program", "entry")):
+        return None
+    return data
 
 
 @functools.lru_cache(maxsize=64)
-def _repo_identity(start: str) -> Tuple[str, str, str]:
+def _local_identity(start: str) -> Tuple[str, str, str, str]:
     # Cached per process: a directory does not change repository mid-run, and
-    # one command can ask several times (`open` asks three).
-    common = _fs_common_dir(start)
-    if common is None:
+    # one command can ask several times (`open` asks three). The home marker is
+    # deliberately NOT cached -- `close` removes it mid-run.
+    dirs = _fs_git_dirs(start)
+    if dirs is None:
         common = os.path.realpath(
             _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], start))
+        git_dir = os.path.realpath(_git(["rev-parse", "--absolute-git-dir"], start))
+    else:
+        git_dir, common = dirs
     root = os.path.realpath(os.path.dirname(common)) if common.endswith(".git") \
         else os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
     digest = hashlib.sha256(common.encode("utf-8")).hexdigest()[:8]
-    return "%s-%s" % (os.path.basename(root), digest), root, common
+    return "%s-%s" % (os.path.basename(root), digest), root, common, git_dir
 
 
 def state_root() -> str:
@@ -492,6 +553,8 @@ def resolve_program(repo_key: str, requested: Optional[str]) -> str:
     """
     if requested:
         return requested
+    if _MARKER_PROGRAM.get(repo_key):
+        return _MARKER_PROGRAM[repo_key]
     programs = list_programs(repo_key)
     if not programs:
         return "default"
@@ -635,7 +698,20 @@ def parse_front_matter(path: str) -> Dict[str, Any]:
                     "%s:%d cannot mix a scalar and a list for %r"
                     % (path, lineno, key)
                 )
-            out[key].append(_scalar(line.lstrip()[2:].strip()))
+            item = line.lstrip()[2:].strip()
+            pair = _MAPPING_ITEM.match(item) if key in MAPPING_LIST_FIELDS else None
+            out[key].append({pair.group(1): _scalar((pair.group(2) or "").strip())}
+                            if pair else _scalar(item))
+            continue
+        # An indented `key: value` continues the mapping item above it.
+        if (line[:1].isspace() and key in MAPPING_LIST_FIELDS
+                and isinstance(out.get(key), list) and out[key]
+                and isinstance(out[key][-1], dict)):
+            pair = _MAPPING_ITEM.match(line.strip())
+            if not pair:
+                raise OrchError("%s:%d cannot parse %r as a mapping key"
+                                % (path, lineno, line))
+            out[key][-1][pair.group(1)] = _scalar((pair.group(2) or "").strip())
             continue
         if ":" not in line:
             raise OrchError(
@@ -655,10 +731,102 @@ def parse_front_matter(path: str) -> Dict[str, Any]:
     return out
 
 
+# List fields whose items may be one-level mappings (`- track: T-1` plus
+# indented `expect: ...` lines). Only these, so a colon inside an ordinary
+# list item -- an artifact path, a note -- still reads as a plain string.
+MAPPING_LIST_FIELDS = ("advances",)
+_MAPPING_ITEM = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:\s+(.*)|)$")
+
+
+ADVANCE_KEYS = ("track", "expect")
+
+
+def advance_label(item: Any) -> str:
+    """How one `advances` item prints: a plan id as-is, a mapping as track:<id>."""
+    if isinstance(item, dict):
+        return "track:%s" % item.get("track")
+    return str(item)
+
+
 def _scalar(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         return value[1:-1]
     return value
+
+
+TRACK_TIMEOUT_S = int(os.environ.get("ORCH_TRACK_TIMEOUT", 30))
+
+
+def run_track(args: List[str], root: str) -> Tuple[bool, Dict[str, Any]]:
+    """`track <args> --json --cwd <root>` -> (ok, parsed JSON).
+
+    On failure the parsed JSON is track's own error object (`error` code and
+    `message`), or a synthesised one when it printed nothing parseable.
+    """
+    try:
+        out = subprocess.run(["track"] + args + ["--json", "--cwd", root],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             timeout=TRACK_TIMEOUT_S)
+    except FileNotFoundError:
+        raise OrchError("`track` is not on PATH, and this brief names agent-track "
+                        "targets. Install agent-track, or list the targets as plan "
+                        "ids, which have no automated effect.")
+    except subprocess.TimeoutExpired:
+        return False, {"error": "TIMEOUT", "message": "track %s took over %ss"
+                       % (" ".join(args), TRACK_TIMEOUT_S)}
+    stream = out.stdout if out.returncode == 0 else (out.stderr or out.stdout)
+    try:
+        data = json.loads(stream.decode("utf-8", "replace") or "null")
+    except ValueError:
+        data = None
+    if out.returncode == 0 and isinstance(data, dict):
+        return True, data
+    if isinstance(data, dict) and data.get("error"):
+        return False, data
+    return False, {"error": "TRACK_FAILED", "message": (
+        out.stderr or out.stdout).decode("utf-8", "replace").strip()[:300]}
+
+
+def track_targets(advances: Any) -> List[Dict[str, str]]:
+    if not isinstance(advances, list):
+        return []
+    return [a for a in advances if isinstance(a, dict)]
+
+
+def expect_task_state(item: Dict[str, Any], expect: str) -> Optional[str]:
+    """'done', 'current' or 'open' for the task labelled `expect`; None if absent.
+
+    Field names are track's own `show --json`: `tasks[].label`, `tasks[].checked`
+    and `currentTask.label`.
+    """
+    matches = [t for t in item.get("tasks") or [] if t.get("label") == expect]
+    if not matches:
+        return None
+    if all(t.get("checked") for t in matches):
+        return "done"
+    current = item.get("currentTask") or {}
+    return "current" if current.get("label") == expect else "open"
+
+
+def check_track_targets(advances: Any, root: str, path: str) -> None:
+    """Refuse a brief whose agent-track target cannot be advanced by this lane."""
+    for target in track_targets(advances):
+        ok, item = run_track(["show", target["track"]], root)
+        if not ok:
+            raise OrchError("brief %s: track item %s: %s %s"
+                            % (path, target["track"], item.get("error"),
+                               item.get("message") or ""))
+        state = expect_task_state(item, target["expect"])
+        if state is None:
+            raise OrchError(
+                "brief %s: track item %s has no task labelled exactly %r. Its "
+                "tasks: %s" % (path, target["track"], target["expect"],
+                               "; ".join(t.get("label", "?") for t in item.get("tasks") or [])
+                               or "(none)"))
+        if state == "done":
+            raise OrchError("brief %s: track item %s task %r is already done -- "
+                            "this lane cannot advance it."
+                            % (path, target["track"], target["expect"]))
 
 
 def validate_brief(fields: Dict[str, Any], path: str) -> None:
@@ -708,6 +876,23 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
             "brief %s: advances must be a non-empty list or the literal `none`."
             % path
         )
+    else:
+        for item in advances:
+            if not isinstance(item, dict):
+                continue
+            unknown = sorted(set(item) - set(ADVANCE_KEYS))
+            if unknown:
+                raise OrchError(
+                    "brief %s: advances item %r has unknown key%s %s; a mapping "
+                    "takes exactly `track` and `expect`%s."
+                    % (path, item, "s" if len(unknown) > 1 else "", ", ".join(unknown),
+                       " (`op` is reserved, not yet accepted)" if "op" in unknown else ""))
+            for key in ADVANCE_KEYS:
+                if not item.get(key) or is_placeholder(item[key]):
+                    raise OrchError(
+                        "brief %s: advances item %r needs a real `%s`. `expect` is "
+                        "the exact label of the track task this lane completes."
+                        % (path, item, key))
 
     if "review" in fields:
         mode = str(fields["review"]).strip()
@@ -859,7 +1044,7 @@ def entry_flags(entry: Dict[str, Any]) -> List[str]:
     return flags
 
 
-def entry_summary(entry: Dict[str, Any]) -> str:
+def entry_summary(entry: Dict[str, Any], status: Optional[str] = None) -> str:
     flags = entry_flags(entry)
     limits = entry.get("limits") or {}
     envelope = ("≤%sc/%sK/$%.2f" % (
@@ -869,7 +1054,7 @@ def entry_summary(entry: Dict[str, Any]) -> str:
                 if limits else "LEGACY-UNBOUNDED")
     return "  ".join(filter(None, [
         entry["entry"],
-        entry["status"],
+        status or entry["status"],
         (entry.get("agent_id") or "-")[:8],
         entry.get("session_name") or "-",
         entry["title"],
@@ -1021,6 +1206,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     repo_key, root, common = repo_identity(args.repo)
     fields = parse_front_matter(args.brief)
     validate_brief(fields, args.brief)
+    check_track_targets(fields["advances"], root, args.brief)
 
     # Decide the session mode HERE, before the spawn, and record it. Left to the
     # spawn call it is a field that can be forgotten, and forgetting it is not
@@ -1195,6 +1381,11 @@ def cmd_open(args: argparse.Namespace) -> int:
               % (program, tracker_id, path), file=sys.stderr)
 
     entry_id = "e%d" % data["next_entry"]
+    # A lane in another repository is bound to this program by a marker in its
+    # own worktree's git dir. Refused here, before anything is saved.
+    lane_git_dir = cross_repo_git_dir(fields["worktree"], repo_key)
+    if lane_git_dir:
+        check_home_marker(lane_git_dir, program, tracker_id, entry_id)
     data["next_entry"] += 1
     entry = {
         "entry": entry_id,
@@ -1240,6 +1431,14 @@ def cmd_open(args: argparse.Namespace) -> int:
         entry["status"] = "running"
     data["entries"].append(entry)
     save_tracker(path, data)
+    if lane_git_dir:
+        write_home_marker(lane_git_dir, {
+            "version": HOME_MARKER_VERSION, "repo_key": repo_key, "root": root,
+            "common": common, "program": program, "tracker": tracker_id,
+            "entry": entry_id})
+        print("bound %s to program %r (%s)" % (fields["worktree"], program,
+                                                os.path.join(lane_git_dir, HOME_MARKER)),
+              file=sys.stderr)
     if raised and evidence:
         append_escalation(repo_key, program, {
             "at": _now(), "entry": entry_id, "title": entry.get("title"),
@@ -1409,6 +1608,88 @@ def cmd_mint_child(args: argparse.Namespace) -> int:
     return 0
 
 
+def _marker_names(marker: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+    return marker.get("program"), marker.get("tracker"), marker.get("entry")
+
+
+def cross_repo_git_dir(worktree: Any, repo_key: str) -> Optional[str]:
+    """The lane worktree's own git dir when it belongs to ANOTHER repository.
+
+    None for a same-repo lane (today's behaviour, unchanged), including one
+    whose worktree does not exist yet -- the substrate usually creates it after
+    `open`. Refuses the two cross-repo shapes a marker cannot safely bind.
+    """
+    path = os.path.realpath(str(worktree))
+    probe = path
+    while not os.path.exists(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    try:
+        key, _, common, git_dir = local_identity(probe)
+    except OrchError:
+        return None             # not in any repository: nothing to bind
+    if key == repo_key:
+        return None
+    if probe != path:
+        raise OrchError(
+            "worktree %s does not exist, and it sits inside another repository "
+            "(%s). Cross-repo lanes need their linked worktree created before "
+            "`orch open`, because the home marker is written into it." % (path, key))
+    if git_dir == common:
+        raise OrchError(
+            "worktree %s is a primary checkout of %s. Cross-repo lanes need a "
+            "linked worktree -- a marker in a primary checkout would bind every "
+            "session in that repo. `git -C %s worktree add <path>` and point the "
+            "brief at that." % (path, key, path))
+    return git_dir
+
+
+def check_home_marker(git_dir: str, program: str, tracker: str, entry: str) -> None:
+    existing = read_home_marker(git_dir)
+    if existing and _marker_names(existing) != (program, tracker, entry):
+        raise OrchError(
+            "this worktree is already bound to program %r tracker %r entry %r "
+            "(%s). One lane per worktree: close that entry first, or use another "
+            "worktree." % (existing.get("program"), existing.get("tracker"),
+                           existing.get("entry"), os.path.join(git_dir, HOME_MARKER)))
+
+
+def write_home_marker(git_dir: str, marker: Dict[str, Any]) -> None:
+    """Atomic, and a no-op when the marker already says exactly this."""
+    path = os.path.join(git_dir, HOME_MARKER)
+    if read_home_marker(git_dir) == marker:
+        return
+    fd, tmp = tempfile.mkstemp(dir=git_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marker, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def remove_home_marker(entry: Dict[str, Any], program: str, tracker: str) -> Optional[str]:
+    """Drop the lane worktree's home marker if it names this entry; its path if so."""
+    worktree = entry.get("worktree")
+    if not worktree or not os.path.isdir(str(worktree)):
+        return None
+    try:
+        git_dir = local_identity(str(worktree))[3]
+    except OrchError:
+        return None
+    marker = read_home_marker(git_dir)
+    if not marker or _marker_names(marker) != (program, tracker, entry["entry"]):
+        return None
+    path = os.path.join(git_dir, HOME_MARKER)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return None
+    return path
+
+
 def lane_has_own_tree(entry: Dict[str, Any], repo: Optional[str]) -> bool:
     """Whether this lane runs somewhere other than the orchestrator's own tree.
 
@@ -1464,6 +1745,42 @@ def reclaim_close_obligations(entry: Dict[str, Any], repo: Optional[str]) -> Lis
     return []
 
 
+def close_entry(repo_key: str, program: str, tracker: str, path: str,
+                data: Dict[str, Any], entry: Dict[str, Any], consumed: str,
+                repo: Optional[str]) -> None:
+    """Remove a consumed entry and report what closing it owes. Shared by
+    `orch close` and `orch consume`, so the two can never drift apart."""
+    data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
+    save_tracker(path, data)
+    print("closed %s (%s): %s" % (entry["entry"], entry["title"], consumed))
+    unbound = remove_home_marker(entry, program, tracker)
+    if unbound:
+        print("unbound %s" % unbound, file=sys.stderr)
+    # A closed entry has nothing left to apply; an exception left behind would
+    # be surfaced at every resume for an entry that no longer exists.
+    exc = exception_path(repo_key, program, tracker, entry["entry"])
+    if os.path.exists(exc):
+        os.unlink(exc)
+
+    # A lane's liveness insurance dies with the lane. Reported here because
+    # closing is the last moment an agent is reliably looking at this entry --
+    # deferred to "housekeeping", it is the thing that gets deferred forever.
+    arm_wake_ticks(repo_key, program)
+    for line in wake_close_obligations(repo_key, program, tracker,
+                                       entry["entry"], len(data["entries"])):
+        print(line, file=sys.stderr)
+    for line in reclaim_close_obligations(entry, repo):
+        print(line, file=sys.stderr)
+    if entry.get("child_tracker"):
+        child = tracker_path(repo_key, program, entry["child_tracker"])
+        if os.path.exists(child):
+            remaining = len(load_tracker(child).get("entries", []))
+            if remaining:
+                print("NOTE: sub-orchestrator %s still has %d open entr%s"
+                      % (entry["child_tracker"], remaining,
+                         "y" if remaining == 1 else "ies"), file=sys.stderr)
+
+
 def cmd_close(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -1479,29 +1796,386 @@ def cmd_close(args: argparse.Namespace) -> int:
             "nobody used -- that is the signal, not a formality."
             % entry["consumption"]
         )
-
-    data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
-    save_tracker(path, data)
-    print("closed %s (%s): %s" % (entry["entry"], entry["title"], args.consumed))
-
-    # A lane's liveness insurance dies with the lane. Reported here because
-    # closing is the last moment an agent is reliably looking at this entry --
-    # deferred to "housekeeping", it is the thing that gets deferred forever.
-    arm_wake_ticks(repo_key, program)
-    for line in wake_close_obligations(repo_key, program, args.tracker,
-                                       entry["entry"], len(data["entries"])):
-        print(line, file=sys.stderr)
-    for line in reclaim_close_obligations(entry, args.repo):
-        print(line, file=sys.stderr)
-    if entry.get("child_tracker"):
-        child = tracker_path(repo_key, program, entry["child_tracker"])
-        if os.path.exists(child):
-            remaining = len(load_tracker(child).get("entries", []))
-            if remaining:
-                print("NOTE: sub-orchestrator %s still has %d open entr%s"
-                      % (entry["child_tracker"], remaining,
-                         "y" if remaining == 1 else "ies"), file=sys.stderr)
+    close_entry(repo_key, program, args.tracker, path, data, entry,
+                args.consumed, args.repo)
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# consume: verify evidence, advance agent-track, close -- or leave an exception
+# --------------------------------------------------------------------------- #
+
+EXCEPTION_VERSION = 1
+
+
+def exceptions_dir(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "exceptions")
+
+
+def exception_path(repo_key: str, program: str, tracker: str, entry: str) -> str:
+    return os.path.join(exceptions_dir(repo_key, program), "%s.%s.json" % (tracker, entry))
+
+
+def load_exceptions(repo_key: str, program: str) -> List[Dict[str, Any]]:
+    edir = exceptions_dir(repo_key, program)
+    if not os.path.isdir(edir):
+        return []
+    found = []
+    for name in sorted(os.listdir(edir)):
+        if name.endswith(".json"):
+            rec = _load_json(os.path.join(edir, name))
+            if rec:
+                found.append(rec)
+    return found
+
+
+def _git_ok(args: List[str], cwd: str) -> bool:
+    try:
+        return subprocess.run(["git", "-C", cwd] + args, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,
+                              timeout=GIT_TIMEOUT_S).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def verify_evidence(item: str) -> Optional[str]:
+    """None when the evidence item checks out, else why it does not."""
+    if item.startswith("commit:"):
+        repo_part, at, rest = item[len("commit:"):].rpartition("@")
+        if not at or not repo_part or not rest:
+            return "expected commit:<repo path>@<sha>[,on=<ref>]"
+        sha, _, opt = rest.partition(",")
+        ref = None
+        if opt:
+            if not opt.startswith("on=") or not opt[3:]:
+                return "unknown commit option %r (only on=<ref>)" % opt
+            ref = opt[3:]
+        if not os.path.isabs(repo_part):
+            return "repo path %r is relative; give an absolute path" % repo_part
+        repo = os.path.realpath(repo_part)
+        if not os.path.isdir(repo):
+            return "repo %s does not exist" % repo
+        if not _git_ok(["cat-file", "-e", "%s^{commit}" % sha], repo):
+            return "%s is not a commit in %s" % (sha, repo)
+        if ref and not _git_ok(["merge-base", "--is-ancestor", sha, ref], repo):
+            return "%s is not on %s in %s" % (sha, ref, repo)
+        return None
+    if item.startswith("file:"):
+        target = item[len("file:"):]
+        if not os.path.isabs(target):
+            return "file path %r is relative; give an absolute path" % target
+        if not os.path.isfile(target):
+            return "%s does not exist" % target
+        if os.path.getsize(target) == 0:
+            return "%s is empty" % target
+        return None
+    return "unknown evidence form (commit:<repo>@<sha>[,on=<ref>] or file:<abs path>)"
+
+
+def _consume_ref(entry_id: str, tracker: str) -> str:
+    return "orch consume %s%s" % (entry_id, "" if tracker == "root" else " --tracker " + tracker)
+
+
+def apply_track_target(target: Dict[str, str], root: str, notify: bool,
+                       retry_cmd: str) -> Dict[str, Any]:
+    """One track target against the program home -> its result record."""
+    tid, expect = target["track"], target["expect"]
+    rec: Dict[str, Any] = {"track": tid, "expect": expect}
+    repair = ("track show %s --cwd %s; then: %s" % (tid, root, retry_cmd))
+
+    def failed(code: str, detail: str) -> Dict[str, Any]:
+        rec.update(state="failed", code=code, detail=detail, repair=repair)
+        return rec
+
+    ok, item = run_track(["show", tid], root)
+    if not ok:
+        return failed(str(item.get("error")), str(item.get("message") or ""))
+    state = expect_task_state(item, expect)
+    if state is None:
+        return failed("LABEL_NOT_FOUND", "no task labelled %r" % expect)
+    if state == "done":
+        rec["state"] = "already"
+        return rec
+    if state != "current":
+        return failed("NOT_CURRENT", "current task is %s"
+                      % json.dumps((item.get("currentTask") or {}).get("label")))
+    ok, res = run_track(["advance", tid, "--expect", expect]
+                        + (["--notify"] if notify else []), root)
+    if not ok:
+        return failed(str(res.get("error")), str(res.get("message") or ""))
+    rec["state"] = "applied"
+    ok, after = run_track(["show", tid], root)
+    if ok:
+        rec["next"] = (after.get("currentTask") or {}).get("label")
+        rec["blocked_by"] = after.get("blockedBy") or []
+    return rec
+
+
+def _target_line(rec: Dict[str, Any]) -> str:
+    state = rec.get("state")
+    if state == "applied":
+        nxt = rec.get("next")
+        blocked = rec.get("blocked_by") or []
+        return "%s advanced → %s%s" % (
+            rec["track"], json.dumps(nxt) if nxt else "complete",
+            " (blocked by %s)" % ", ".join(blocked) if blocked else "")
+    if state == "already":
+        return "%s already done: %s" % (rec["track"], json.dumps(rec["expect"]))
+    if state == "skipped":
+        return "%s skipped: %s" % (rec["track"], rec.get("reason"))
+    return "%s FAILED %s: %s" % (rec["track"], rec.get("code"), rec.get("detail"))
+
+
+def cmd_consume(args: argparse.Namespace) -> int:
+    repo_key, root, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = tracker_path(repo_key, program, args.tracker)
+    data = load_tracker(path)
+    entry = find_entry(data, args.entry)
+    if entry["status"] == "pending":
+        raise OrchError("%s is pending -- nothing was spawned, so there is nothing "
+                        "to consume. Close it instead if it is abandoned." % entry["entry"])
+    retry = entry["status"] == "harvested"
+    consumed = args.consumed or (entry.get("consumed_text") if retry else None)
+    if not consumed or is_placeholder(consumed):
+        raise OrchError(
+            "consume requires --consumed '<what happened to the output>'.\n"
+            "This entry's stated consumption was: %s" % entry["consumption"])
+    evidence = list(args.evidence or (entry.get("evidence") if retry else None) or [])
+    if not evidence:
+        raise OrchError("consume requires at least one --evidence "
+                        "(commit:<repo>@<sha>[,on=<ref>] or file:<abs path>).")
+    skips = list(args.skip_target or [])
+    if skips and (not args.reason or is_placeholder(args.reason)):
+        raise OrchError("--skip-target needs --reason '<why>'.")
+
+    bad = [(ev, why) for ev, why in ((ev, verify_evidence(ev)) for ev in evidence) if why]
+    if bad:
+        for ev, why in bad:
+            print("evidence %s: %s" % (ev, why), file=sys.stderr)
+        print("nothing recorded; %s unchanged." % entry["entry"], file=sys.stderr)
+        return 1
+
+    # The decision is durable before any effect is attempted.
+    entry["status"] = "harvested"
+    entry["consumed_text"] = consumed
+    entry["evidence"] = evidence
+    entry["consumed_at"] = entry.get("consumed_at") if retry and entry.get("consumed_at") \
+        else _now()
+    entry["updated_at"] = _now()
+    save_tracker(path, data)
+
+    exc_path = exception_path(repo_key, program, args.tracker, entry["entry"])
+    prior = _load_json(exc_path)
+    applied_before = {t.get("track") for t in prior.get("targets") or []
+                      if t.get("state") == "applied"}
+    retry_cmd = _consume_ref(entry["entry"], args.tracker)
+    results = []
+    advances = entry.get("advances")
+    for item in advances if isinstance(advances, list) else []:
+        if not isinstance(item, dict):
+            print("plan %s: update by hand" % item)
+            continue
+        if item.get("track") in applied_before:
+            results.append({"track": item["track"], "expect": item.get("expect"),
+                            "state": "applied"})
+            continue
+        if item.get("track") in skips:
+            results.append({"track": item["track"], "expect": item.get("expect"),
+                            "state": "skipped", "reason": args.reason})
+            continue
+        results.append(apply_track_target(item, root, not args.no_notify, retry_cmd))
+
+    for rec in results:
+        if rec["track"] not in applied_before:
+            print(_target_line(rec))
+    failed = [r for r in results if r.get("state") == "failed"]
+    if not failed:
+        close_entry(repo_key, program, args.tracker, path, data, entry, consumed, args.repo)
+        return 0
+
+    now = _now()
+    os.makedirs(exceptions_dir(repo_key, program), exist_ok=True)
+    _save_json(exc_path, {
+        "version": EXCEPTION_VERSION, "tracker": args.tracker, "entry": entry["entry"],
+        "title": entry.get("title"), "created_at": prior.get("created_at") or now,
+        "updated_at": now, "attempts": int(prior.get("attempts") or 0) + 1,
+        "consumed": consumed, "evidence": evidence, "targets": results,
+    })
+    print("UNAPPLIED: %s stays harvested; exception at %s" % (entry["entry"], exc_path),
+          file=sys.stderr)
+    for rec in failed:
+        print("  repair %s: %s" % (rec["track"], rec["repair"]), file=sys.stderr)
+    print("  or, if a target should not move: %s --skip-target <id> --reason '<why>'"
+          % retry_cmd, file=sys.stderr)
+    return 3
+
+
+def exception_block(repo_key: str, program: str) -> List[str]:
+    """The UNAPPLIED CONSUMPTION block `orch resume` prints, or nothing."""
+    lines: List[str] = []
+    for rec in load_exceptions(repo_key, program):
+        if not lines:
+            lines.append("UNAPPLIED CONSUMPTION — decided, but agent-track was not "
+                         "advanced. Repair, then re-run consume:")
+        lines.append("  %s.%s %s (attempts %s)" % (rec.get("tracker"), rec.get("entry"),
+                                                   rec.get("title"), rec.get("attempts")))
+        for t in rec.get("targets") or []:
+            if t.get("state") == "failed":
+                lines.append("    %s %s: %s" % (t.get("track"), t.get("code"), t.get("detail")))
+                lines.append("      repair: %s" % t.get("repair"))
+    return lines
+
+
+def status_text(entry: Dict[str, Any], repo_key: str, program: str, tracker: str) -> str:
+    """The entry's status, marked `!track` when an unapplied consumption exists."""
+    if entry.get("status") == "harvested" and os.path.exists(
+            exception_path(repo_key, program, tracker, entry["entry"])):
+        return "harvested !track"
+    return entry["status"]
+
+
+# --------------------------------------------------------------------------- #
+# audit: report-only checks over the program's open entries
+# --------------------------------------------------------------------------- #
+
+CHECKPOINT_LABELS = ("Last durable milestone", "Verification",
+                     "Uncertain external effects", "Next safe action")
+VACUOUS_VALUES = {"continue", "ongoing", "in progress", "wip", "pending", "see above"}
+CHECKPOINT_STALE_MIN = int(os.environ.get("ORCH_CHECKPOINT_STALE_MIN", 30))
+HARVESTED_UNFINISHED_MIN = 10
+
+
+def checkpoint_labels(text: str) -> Dict[str, str]:
+    """Label -> value for the checkpoint labels a progress artifact carries.
+
+    A label is a `Label: value` line, or a `## Label` heading whose value is
+    the content up to the next heading. Matching on the label is
+    case-insensitive.
+    """
+    wanted = {label.lower(): label for label in CHECKPOINT_LABELS}
+    found: Dict[str, str] = {}
+    heading: Optional[str] = None
+    body: List[str] = []
+    for raw in text.splitlines() + ["# end"]:
+        line = raw.strip()
+        if line.startswith("#"):
+            if heading:
+                found.setdefault(heading, "\n".join(body).strip())
+            name = line.lstrip("#").strip().rstrip(":").lower()
+            heading = wanted.get(name)
+            body = []
+            continue
+        if heading:
+            body.append(line)
+        name, colon, value = line.partition(":")
+        name = name.strip().lstrip("-* ").strip("*").strip().lower()
+        if colon and name in wanted:
+            found.setdefault(wanted[name], value.strip().strip("*").strip())
+    return found
+
+
+def _vacuous(value: str) -> bool:
+    text = value.strip().rstrip(".").strip().lower()
+    return is_placeholder(text) or text in VACUOUS_VALUES
+
+
+def _entry_path(entry: Dict[str, Any], value: str) -> str:
+    """A path from an entry, relative ones against the entry's worktree."""
+    return value if os.path.isabs(value) else os.path.join(str(entry.get("worktree") or ""), value)
+
+
+def audit_findings(repo_key: str, program: str, root: str) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+
+    def add(code: str, tracker: str, entry: Optional[str], detail: str) -> None:
+        findings.append({"code": code, "tracker": tracker, "entry": entry,
+                         "detail": detail})
+
+    exc_names = set()
+    for rec in load_exceptions(repo_key, program):
+        exc_names.add((rec.get("tracker"), rec.get("entry")))
+        add("exception", str(rec.get("tracker")), rec.get("entry"),
+            "unapplied consumption, %s attempt(s): %s" % (
+                rec.get("attempts"), "; ".join(
+                    "%s %s" % (t.get("track"), t.get("code"))
+                    for t in rec.get("targets") or [] if t.get("state") == "failed")))
+
+    now = datetime.now(timezone.utc).timestamp()
+    for name, data in _read_all_trackers(repo_key, program, True, "root"):
+        for entry in data["entries"]:
+            eid = entry["entry"]
+            status = entry.get("status")
+            if status == "harvested":
+                age = _age_seconds(entry.get("consumed_at") or entry.get("updated_at"))
+                if (age is not None and age > HARVESTED_UNFINISHED_MIN * 60
+                        and (name, eid) not in exc_names
+                        and not os.path.exists(exception_path(repo_key, program, name, eid))):
+                    add("harvested-unfinished", name, eid,
+                        "harvested %d min ago with no exception file -- re-run "
+                        "`%s`" % (age // 60, _consume_ref(eid, name)))
+            if status != "running":
+                continue
+            artifact = entry.get("progress_artifact")
+            if artifact:
+                apath = _entry_path(entry, str(artifact))
+                if not os.path.isfile(apath):
+                    add("checkpoint-missing", name, eid, "%s does not exist" % apath)
+                else:
+                    stale = (now - os.path.getmtime(apath)) / 60
+                    if stale > CHECKPOINT_STALE_MIN:
+                        add("checkpoint-stale", name, eid, "%s last written %d min ago"
+                            % (apath, stale))
+                    try:
+                        with open(apath, "r", encoding="utf-8") as fh:
+                            labels = checkpoint_labels(fh.read())
+                    except (OSError, UnicodeDecodeError):
+                        labels = {}
+                    bad = [label for label in CHECKPOINT_LABELS
+                           if not labels.get(label) or _vacuous(labels[label])]
+                    if bad:
+                        add("checkpoint-incomplete", name, eid, "%s: %s absent, empty "
+                            "or vacuous" % (apath, ", ".join(bad)))
+            worktree = entry.get("worktree")
+            if worktree and os.path.isdir(str(worktree)):
+                try:
+                    lkey, _, _, git_dir = local_identity(str(worktree))
+                except OrchError:
+                    lkey, git_dir = repo_key, ""
+                if lkey != repo_key:
+                    marker = read_home_marker(git_dir)
+                    if not marker or _marker_names(marker) != (program, name, eid):
+                        add("home-unbound", name, eid, "%s %s" % (
+                            worktree, "has no home marker" if not marker else
+                            "is bound to %s/%s/%s" % _marker_names(marker)))
+            targets = track_targets(entry.get("advances"))
+            if targets:
+                for target in targets:
+                    try:
+                        ok, item = run_track(["show", target["track"]], root)
+                    except OrchError:
+                        break               # no `track`: nothing to compare against
+                    if ok and expect_task_state(item, target.get("expect")) == "done":
+                        add("target-moved", name, eid, "%s task %s is already done"
+                            % (target["track"], json.dumps(target.get("expect"))))
+    return findings
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    repo_key, root, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    findings = audit_findings(repo_key, program, root)
+    if args.json:
+        print(json.dumps({"program": program, "findings": findings}, indent=2))
+    elif not findings:
+        print("audit: program %s clean" % program)
+    else:
+        for f in findings:
+            print("%-22s %s%s  %s" % (f["code"], f["tracker"],
+                                      "." + f["entry"] if f["entry"] else "", f["detail"]))
+        print("%d finding%s" % (len(findings), "" if len(findings) == 1 else "s"))
+    return 1 if findings else 0
+
 
 
 def tracker_names(pdir: str) -> List[str]:
@@ -1574,7 +2248,8 @@ def cmd_roster(args: argparse.Namespace) -> int:
             print("  (no open entries)")
         for entry in data["entries"]:
             total += 1
-            print("  " + entry_summary(entry))
+            print("  " + entry_summary(
+                entry, status_text(entry, repo_key, program, name)))
     print("\n%d open entr%s. This is RECORDED intent, not liveness -- reconcile "
           "against the substrate before acting."
           % (total, "y" if total == 1 else "ies"))
@@ -1595,9 +2270,10 @@ def cmd_render(args: argparse.Namespace) -> int:
         print("|---|---|---|---|---|---|")
         for e in data["entries"]:
             advances = e["advances"]
-            adv = ", ".join(advances) if isinstance(advances, list) else advances
+            adv = (", ".join(advance_label(a) for a in advances)
+                   if isinstance(advances, list) else advances)
             print("| %s | %s | %s | %s | %s | %s |" % (
-                e["entry"], e["status"], e.get("session_name")
+                e["entry"], status_text(e, repo_key, program, name), e.get("session_name")
                 or (e.get("agent_id") or "-")[:8],
                 e["title"], adv, e["consumption"]))
         print()
@@ -3062,7 +3738,9 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
         entries = data.get("entries", [])
         lines.append("open dispatches: %d" % len(entries))
         for entry in entries:
-            lines.append("  " + entry_summary(entry))
+            lines.append("  " + entry_summary(
+                entry, status_text(entry, repo_key, program, data["tracker_id"])))
+    lines.extend(exception_block(repo_key, program))
     try:
         inbox_program, target = resolve_target(args, repo_key)
     except OrchError:
@@ -5672,6 +6350,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--consumed", help="what happened to the output")
     common(sp)
     sp.set_defaults(func=cmd_close)
+
+    sp = sub.add_parser("consume",
+                        help="verify evidence, advance agent-track targets, close")
+    sp.add_argument("entry")
+    sp.add_argument("--consumed", help="what happened to the output")
+    sp.add_argument("--evidence", action="append",
+                    help="commit:<repo>@<sha>[,on=<ref>] or file:<abs path>; repeatable")
+    sp.add_argument("--no-notify", action="store_true",
+                    help="do not fire agent-track notifiers on the advance")
+    sp.add_argument("--skip-target", action="append",
+                    help="track id to resolve without advancing; needs --reason")
+    sp.add_argument("--reason", help="why the skipped targets should not move")
+    common(sp)
+    sp.set_defaults(func=cmd_consume)
+
+    sp = sub.add_parser("audit", help="report checkpoint, consumption and binding "
+                                      "problems; exit 1 if any")
+    sp.add_argument("--json", action="store_true")
+    common(sp)
+    sp.set_defaults(func=cmd_audit)
 
     sp = sub.add_parser("roster", help="print open entries")
     sp.add_argument("--recursive", action="store_true",
