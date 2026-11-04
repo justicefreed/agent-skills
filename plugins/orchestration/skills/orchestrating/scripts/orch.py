@@ -1499,6 +1499,7 @@ def cmd_open(args: argparse.Namespace) -> int:
                  LABEL_ENTRY, entry_id,
                  "" if tracker_id == "root" else " and `%s: %s`" % (LABEL_TRACKER, tracker_id)),
               file=sys.stderr)
+    print("every lane prompt carries this line: %s" % LANE_LOAD_LINE, file=sys.stderr)
     flags = entry_flags(entry)
     if flags:
         print("flags: " + " ".join(flags), file=sys.stderr)
@@ -4716,6 +4717,25 @@ def _labelled_entry(repo_key: str, labels: Dict[str, Any]
         return path, data, None, ref
 
 
+LANE_LOAD_LINE = "Before anything else, load the working-a-lane skill with the Skill tool."
+
+
+def lane_load_refusal(repo_key: str, program: str, *texts: Any) -> Tuple[str, str]:
+    """(policy level, refusal text or "") for a labelled lane spawn whose prompt
+    lacks a line naming both `working-a-lane` and `Skill`. A PreToolUse
+    `updatedInput` is not applied to Agent spawns, so the prompt must carry it."""
+    level = policy_level(repo_key, program)
+    if level not in ("warn", "strict"):
+        return level, ""
+    for text in texts:
+        for line in str(text or "").lower().splitlines():
+            if LANE_SKILL in line and "skill" in line:
+                return level, ""
+    return level, ("a lane prompt must tell its worker to load the %s skill -- the "
+                   "Skill tool is the only way a subagent loads it. Add this line: "
+                   "%s" % (LANE_SKILL, LANE_LOAD_LINE))
+
+
 def _deny(reason: str) -> int:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -4836,6 +4856,11 @@ def _spawn_guard(args: argparse.Namespace) -> int:
         if entry is None:
             return _deny("subagent prompt names %s: %s, which is not an open entry."
                          % (LABEL_ENTRY, ref))
+        level, load_refusal = lane_load_refusal(
+            repo_key, resolve_program(repo_key, labels.get(LABEL_PROGRAM)),
+            tool_input.get("prompt"))
+        if load_refusal and level == "strict":
+            return _deny(load_refusal)
         canonical, long_context, how = agent_tool_model(tool_input)
         refusal = _check_resolved(entry, canonical, long_context, how, "spawning")
         override = str(labels.get(LABEL_OVERRIDE) or "").strip()
@@ -4851,7 +4876,7 @@ def _spawn_guard(args: argparse.Namespace) -> int:
             entry["notes"].append({"at": _now(), "note": "spawn override: %s" % override})
         entry["updated_at"] = _now()
         save_tracker(path, data)
-        return 0
+        return _advise(load_refusal) if load_refusal else 0
 
     if name == "mcp__paseo__create_agent":
         labels = tool_input.get("labels") or {}
@@ -4876,6 +4901,10 @@ def _spawn_guard(args: argparse.Namespace) -> int:
             entry = find_entry(data, ref)
         except OrchError as exc:
             return _deny("spawn labelled %s=%s, but %s" % (LABEL_ENTRY, ref, exc))
+        level, load_refusal = lane_load_refusal(
+            repo_key, program, tool_input.get("initialPrompt"), tool_input.get("prompt"))
+        if load_refusal and level == "strict":
+            return _deny(load_refusal)
         settings = tool_input.get("settings") or {}
         mode = settings.get("modeId")
         if not mode or mode != entry.get("mode"):
@@ -4899,7 +4928,7 @@ def _spawn_guard(args: argparse.Namespace) -> int:
             entry["notes"].append({"at": _now(), "note": "spawn override: %s" % override})
         entry["updated_at"] = _now()
         save_tracker(path, data)
-        return 0
+        return _advise(load_refusal) if load_refusal else 0
 
     agent_id = str(tool_input.get("agentId") or "")
     found = _entry_by_agent(repo_key, agent_id) if agent_id else None
