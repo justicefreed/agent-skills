@@ -1044,7 +1044,7 @@ def entry_flags(entry: Dict[str, Any]) -> List[str]:
     return flags
 
 
-def entry_summary(entry: Dict[str, Any]) -> str:
+def entry_summary(entry: Dict[str, Any], status: Optional[str] = None) -> str:
     flags = entry_flags(entry)
     limits = entry.get("limits") or {}
     envelope = ("≤%sc/%sK/$%.2f" % (
@@ -1054,7 +1054,7 @@ def entry_summary(entry: Dict[str, Any]) -> str:
                 if limits else "LEGACY-UNBOUNDED")
     return "  ".join(filter(None, [
         entry["entry"],
-        entry["status"],
+        status or entry["status"],
         (entry.get("agent_id") or "-")[:8],
         entry.get("session_name") or "-",
         entry["title"],
@@ -1745,6 +1745,42 @@ def reclaim_close_obligations(entry: Dict[str, Any], repo: Optional[str]) -> Lis
     return []
 
 
+def close_entry(repo_key: str, program: str, tracker: str, path: str,
+                data: Dict[str, Any], entry: Dict[str, Any], consumed: str,
+                repo: Optional[str]) -> None:
+    """Remove a consumed entry and report what closing it owes. Shared by
+    `orch close` and `orch consume`, so the two can never drift apart."""
+    data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
+    save_tracker(path, data)
+    print("closed %s (%s): %s" % (entry["entry"], entry["title"], consumed))
+    unbound = remove_home_marker(entry, program, tracker)
+    if unbound:
+        print("unbound %s" % unbound, file=sys.stderr)
+    # A closed entry has nothing left to apply; an exception left behind would
+    # be surfaced at every resume for an entry that no longer exists.
+    exc = exception_path(repo_key, program, tracker, entry["entry"])
+    if os.path.exists(exc):
+        os.unlink(exc)
+
+    # A lane's liveness insurance dies with the lane. Reported here because
+    # closing is the last moment an agent is reliably looking at this entry --
+    # deferred to "housekeeping", it is the thing that gets deferred forever.
+    arm_wake_ticks(repo_key, program)
+    for line in wake_close_obligations(repo_key, program, tracker,
+                                       entry["entry"], len(data["entries"])):
+        print(line, file=sys.stderr)
+    for line in reclaim_close_obligations(entry, repo):
+        print(line, file=sys.stderr)
+    if entry.get("child_tracker"):
+        child = tracker_path(repo_key, program, entry["child_tracker"])
+        if os.path.exists(child):
+            remaining = len(load_tracker(child).get("entries", []))
+            if remaining:
+                print("NOTE: sub-orchestrator %s still has %d open entr%s"
+                      % (entry["child_tracker"], remaining,
+                         "y" if remaining == 1 else "ies"), file=sys.stderr)
+
+
 def cmd_close(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
     program = resolve_program(repo_key, args.program)
@@ -1760,32 +1796,243 @@ def cmd_close(args: argparse.Namespace) -> int:
             "nobody used -- that is the signal, not a formality."
             % entry["consumption"]
         )
-
-    data["entries"] = [e for e in data["entries"] if e["entry"] != entry["entry"]]
-    save_tracker(path, data)
-    print("closed %s (%s): %s" % (entry["entry"], entry["title"], args.consumed))
-    unbound = remove_home_marker(entry, program, args.tracker)
-    if unbound:
-        print("unbound %s" % unbound, file=sys.stderr)
-
-    # A lane's liveness insurance dies with the lane. Reported here because
-    # closing is the last moment an agent is reliably looking at this entry --
-    # deferred to "housekeeping", it is the thing that gets deferred forever.
-    arm_wake_ticks(repo_key, program)
-    for line in wake_close_obligations(repo_key, program, args.tracker,
-                                       entry["entry"], len(data["entries"])):
-        print(line, file=sys.stderr)
-    for line in reclaim_close_obligations(entry, args.repo):
-        print(line, file=sys.stderr)
-    if entry.get("child_tracker"):
-        child = tracker_path(repo_key, program, entry["child_tracker"])
-        if os.path.exists(child):
-            remaining = len(load_tracker(child).get("entries", []))
-            if remaining:
-                print("NOTE: sub-orchestrator %s still has %d open entr%s"
-                      % (entry["child_tracker"], remaining,
-                         "y" if remaining == 1 else "ies"), file=sys.stderr)
+    close_entry(repo_key, program, args.tracker, path, data, entry,
+                args.consumed, args.repo)
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# consume: verify evidence, advance agent-track, close -- or leave an exception
+# --------------------------------------------------------------------------- #
+
+EXCEPTION_VERSION = 1
+
+
+def exceptions_dir(repo_key: str, program: str) -> str:
+    return os.path.join(program_dir(repo_key, program), "exceptions")
+
+
+def exception_path(repo_key: str, program: str, tracker: str, entry: str) -> str:
+    return os.path.join(exceptions_dir(repo_key, program), "%s.%s.json" % (tracker, entry))
+
+
+def load_exceptions(repo_key: str, program: str) -> List[Dict[str, Any]]:
+    edir = exceptions_dir(repo_key, program)
+    if not os.path.isdir(edir):
+        return []
+    found = []
+    for name in sorted(os.listdir(edir)):
+        if name.endswith(".json"):
+            rec = _load_json(os.path.join(edir, name))
+            if rec:
+                found.append(rec)
+    return found
+
+
+def _git_ok(args: List[str], cwd: str) -> bool:
+    try:
+        return subprocess.run(["git", "-C", cwd] + args, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,
+                              timeout=GIT_TIMEOUT_S).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def verify_evidence(item: str) -> Optional[str]:
+    """None when the evidence item checks out, else why it does not."""
+    if item.startswith("commit:"):
+        repo_part, at, rest = item[len("commit:"):].rpartition("@")
+        if not at or not repo_part or not rest:
+            return "expected commit:<repo path>@<sha>[,on=<ref>]"
+        sha, _, opt = rest.partition(",")
+        ref = None
+        if opt:
+            if not opt.startswith("on=") or not opt[3:]:
+                return "unknown commit option %r (only on=<ref>)" % opt
+            ref = opt[3:]
+        if not os.path.isabs(repo_part):
+            return "repo path %r is relative; give an absolute path" % repo_part
+        repo = os.path.realpath(repo_part)
+        if not os.path.isdir(repo):
+            return "repo %s does not exist" % repo
+        if not _git_ok(["cat-file", "-e", "%s^{commit}" % sha], repo):
+            return "%s is not a commit in %s" % (sha, repo)
+        if ref and not _git_ok(["merge-base", "--is-ancestor", sha, ref], repo):
+            return "%s is not on %s in %s" % (sha, ref, repo)
+        return None
+    if item.startswith("file:"):
+        target = item[len("file:"):]
+        if not os.path.isabs(target):
+            return "file path %r is relative; give an absolute path" % target
+        if not os.path.isfile(target):
+            return "%s does not exist" % target
+        if os.path.getsize(target) == 0:
+            return "%s is empty" % target
+        return None
+    return "unknown evidence form (commit:<repo>@<sha>[,on=<ref>] or file:<abs path>)"
+
+
+def _consume_ref(entry_id: str, tracker: str) -> str:
+    return "orch consume %s%s" % (entry_id, "" if tracker == "root" else " --tracker " + tracker)
+
+
+def apply_track_target(target: Dict[str, str], root: str, notify: bool,
+                       retry_cmd: str) -> Dict[str, Any]:
+    """One track target against the program home -> its result record."""
+    tid, expect = target["track"], target["expect"]
+    rec: Dict[str, Any] = {"track": tid, "expect": expect}
+    repair = ("track show %s --cwd %s; then: %s" % (tid, root, retry_cmd))
+
+    def failed(code: str, detail: str) -> Dict[str, Any]:
+        rec.update(state="failed", code=code, detail=detail, repair=repair)
+        return rec
+
+    ok, item = run_track(["show", tid], root)
+    if not ok:
+        return failed(str(item.get("error")), str(item.get("message") or ""))
+    state = expect_task_state(item, expect)
+    if state is None:
+        return failed("LABEL_NOT_FOUND", "no task labelled %r" % expect)
+    if state == "done":
+        rec["state"] = "already"
+        return rec
+    if state != "current":
+        return failed("NOT_CURRENT", "current task is %s"
+                      % json.dumps((item.get("currentTask") or {}).get("label")))
+    ok, res = run_track(["advance", tid, "--expect", expect]
+                        + (["--notify"] if notify else []), root)
+    if not ok:
+        return failed(str(res.get("error")), str(res.get("message") or ""))
+    rec["state"] = "applied"
+    ok, after = run_track(["show", tid], root)
+    if ok:
+        rec["next"] = (after.get("currentTask") or {}).get("label")
+        rec["blocked_by"] = after.get("blockedBy") or []
+    return rec
+
+
+def _target_line(rec: Dict[str, Any]) -> str:
+    state = rec.get("state")
+    if state == "applied":
+        nxt = rec.get("next")
+        blocked = rec.get("blocked_by") or []
+        return "%s advanced → %s%s" % (
+            rec["track"], json.dumps(nxt) if nxt else "complete",
+            " (blocked by %s)" % ", ".join(blocked) if blocked else "")
+    if state == "already":
+        return "%s already done: %s" % (rec["track"], json.dumps(rec["expect"]))
+    if state == "skipped":
+        return "%s skipped: %s" % (rec["track"], rec.get("reason"))
+    return "%s FAILED %s: %s" % (rec["track"], rec.get("code"), rec.get("detail"))
+
+
+def cmd_consume(args: argparse.Namespace) -> int:
+    repo_key, root, _ = repo_identity(args.repo)
+    program = resolve_program(repo_key, args.program)
+    path = tracker_path(repo_key, program, args.tracker)
+    data = load_tracker(path)
+    entry = find_entry(data, args.entry)
+    if entry["status"] == "pending":
+        raise OrchError("%s is pending -- nothing was spawned, so there is nothing "
+                        "to consume. Close it instead if it is abandoned." % entry["entry"])
+    retry = entry["status"] == "harvested"
+    consumed = args.consumed or (entry.get("consumed_text") if retry else None)
+    if not consumed or is_placeholder(consumed):
+        raise OrchError(
+            "consume requires --consumed '<what happened to the output>'.\n"
+            "This entry's stated consumption was: %s" % entry["consumption"])
+    evidence = list(args.evidence or (entry.get("evidence") if retry else None) or [])
+    if not evidence:
+        raise OrchError("consume requires at least one --evidence "
+                        "(commit:<repo>@<sha>[,on=<ref>] or file:<abs path>).")
+    skips = list(args.skip_target or [])
+    if skips and (not args.reason or is_placeholder(args.reason)):
+        raise OrchError("--skip-target needs --reason '<why>'.")
+
+    bad = [(ev, why) for ev, why in ((ev, verify_evidence(ev)) for ev in evidence) if why]
+    if bad:
+        for ev, why in bad:
+            print("evidence %s: %s" % (ev, why), file=sys.stderr)
+        print("nothing recorded; %s unchanged." % entry["entry"], file=sys.stderr)
+        return 1
+
+    # The decision is durable before any effect is attempted.
+    entry["status"] = "harvested"
+    entry["consumed_text"] = consumed
+    entry["evidence"] = evidence
+    entry["consumed_at"] = entry.get("consumed_at") if retry and entry.get("consumed_at") \
+        else _now()
+    entry["updated_at"] = _now()
+    save_tracker(path, data)
+
+    exc_path = exception_path(repo_key, program, args.tracker, entry["entry"])
+    prior = _load_json(exc_path)
+    applied_before = {t.get("track") for t in prior.get("targets") or []
+                      if t.get("state") == "applied"}
+    retry_cmd = _consume_ref(entry["entry"], args.tracker)
+    results = []
+    advances = entry.get("advances")
+    for item in advances if isinstance(advances, list) else []:
+        if not isinstance(item, dict):
+            print("plan %s: update by hand" % item)
+            continue
+        if item.get("track") in applied_before:
+            results.append({"track": item["track"], "expect": item.get("expect"),
+                            "state": "applied"})
+            continue
+        if item.get("track") in skips:
+            results.append({"track": item["track"], "expect": item.get("expect"),
+                            "state": "skipped", "reason": args.reason})
+            continue
+        results.append(apply_track_target(item, root, not args.no_notify, retry_cmd))
+
+    for rec in results:
+        if rec["track"] not in applied_before:
+            print(_target_line(rec))
+    failed = [r for r in results if r.get("state") == "failed"]
+    if not failed:
+        close_entry(repo_key, program, args.tracker, path, data, entry, consumed, args.repo)
+        return 0
+
+    now = _now()
+    os.makedirs(exceptions_dir(repo_key, program), exist_ok=True)
+    _save_json(exc_path, {
+        "version": EXCEPTION_VERSION, "tracker": args.tracker, "entry": entry["entry"],
+        "title": entry.get("title"), "created_at": prior.get("created_at") or now,
+        "updated_at": now, "attempts": int(prior.get("attempts") or 0) + 1,
+        "consumed": consumed, "evidence": evidence, "targets": results,
+    })
+    print("UNAPPLIED: %s stays harvested; exception at %s" % (entry["entry"], exc_path),
+          file=sys.stderr)
+    for rec in failed:
+        print("  repair %s: %s" % (rec["track"], rec["repair"]), file=sys.stderr)
+    print("  or, if a target should not move: %s --skip-target <id> --reason '<why>'"
+          % retry_cmd, file=sys.stderr)
+    return 3
+
+
+def exception_block(repo_key: str, program: str) -> List[str]:
+    """The UNAPPLIED CONSUMPTION block `orch resume` prints, or nothing."""
+    lines: List[str] = []
+    for rec in load_exceptions(repo_key, program):
+        if not lines:
+            lines.append("UNAPPLIED CONSUMPTION — decided, but agent-track was not "
+                         "advanced. Repair, then re-run consume:")
+        lines.append("  %s.%s %s (attempts %s)" % (rec.get("tracker"), rec.get("entry"),
+                                                   rec.get("title"), rec.get("attempts")))
+        for t in rec.get("targets") or []:
+            if t.get("state") == "failed":
+                lines.append("    %s %s: %s" % (t.get("track"), t.get("code"), t.get("detail")))
+                lines.append("      repair: %s" % t.get("repair"))
+    return lines
+
+
+def status_text(entry: Dict[str, Any], repo_key: str, program: str, tracker: str) -> str:
+    """The entry's status, marked `!track` when an unapplied consumption exists."""
+    if entry.get("status") == "harvested" and os.path.exists(
+            exception_path(repo_key, program, tracker, entry["entry"])):
+        return "harvested !track"
+    return entry["status"]
 
 
 def tracker_names(pdir: str) -> List[str]:
@@ -1858,7 +2105,8 @@ def cmd_roster(args: argparse.Namespace) -> int:
             print("  (no open entries)")
         for entry in data["entries"]:
             total += 1
-            print("  " + entry_summary(entry))
+            print("  " + entry_summary(
+                entry, status_text(entry, repo_key, program, name)))
     print("\n%d open entr%s. This is RECORDED intent, not liveness -- reconcile "
           "against the substrate before acting."
           % (total, "y" if total == 1 else "ies"))
@@ -1882,7 +2130,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             adv = (", ".join(advance_label(a) for a in advances)
                    if isinstance(advances, list) else advances)
             print("| %s | %s | %s | %s | %s | %s |" % (
-                e["entry"], e["status"], e.get("session_name")
+                e["entry"], status_text(e, repo_key, program, name), e.get("session_name")
                 or (e.get("agent_id") or "-")[:8],
                 e["title"], adv, e["consumption"]))
         print()
@@ -3347,7 +3595,9 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
         entries = data.get("entries", [])
         lines.append("open dispatches: %d" % len(entries))
         for entry in entries:
-            lines.append("  " + entry_summary(entry))
+            lines.append("  " + entry_summary(
+                entry, status_text(entry, repo_key, program, data["tracker_id"])))
+    lines.extend(exception_block(repo_key, program))
     try:
         inbox_program, target = resolve_target(args, repo_key)
     except OrchError:
@@ -5957,6 +6207,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--consumed", help="what happened to the output")
     common(sp)
     sp.set_defaults(func=cmd_close)
+
+    sp = sub.add_parser("consume",
+                        help="verify evidence, advance agent-track targets, close")
+    sp.add_argument("entry")
+    sp.add_argument("--consumed", help="what happened to the output")
+    sp.add_argument("--evidence", action="append",
+                    help="commit:<repo>@<sha>[,on=<ref>] or file:<abs path>; repeatable")
+    sp.add_argument("--no-notify", action="store_true",
+                    help="do not fire agent-track notifiers on the advance")
+    sp.add_argument("--skip-target", action="append",
+                    help="track id to resolve without advancing; needs --reason")
+    sp.add_argument("--reason", help="why the skipped targets should not move")
+    common(sp)
+    sp.set_defaults(func=cmd_consume)
 
     sp = sub.add_parser("roster", help="print open entries")
     sp.add_argument("--recursive", action="store_true",
