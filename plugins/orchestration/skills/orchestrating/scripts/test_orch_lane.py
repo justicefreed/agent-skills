@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the working-a-lane addendum (spec orch-working-a-lane, section W7).
+"""Pin the working-a-lane addendum (rationale: docs/DESIGN.md §9h).
 
 Run: python3 test_orch_lane.py
 

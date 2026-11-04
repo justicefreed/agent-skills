@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pin structured `advances`, `orch consume`, exceptions and `orch audit`
-(spec orch-cross-repo-consume, sections C, D, E and F).
+(rationale: docs/DESIGN.md §9h).
 
 Run: python3 test_orch_consume.py
 

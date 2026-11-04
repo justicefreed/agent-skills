@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin cross-repo home binding (spec orch-cross-repo-consume, sections A and B).
+"""Pin cross-repo home binding (rationale: docs/DESIGN.md §9h).
 
 Run: python3 test_orch_home.py
 

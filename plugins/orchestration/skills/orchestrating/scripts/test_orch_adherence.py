@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin the deterministic-adherence levers (spec orch-adherence, section P8).
+"""Pin the deterministic-adherence levers (rationale: docs/DESIGN.md §9h).
 
 Run: python3 test_orch_adherence.py
 
