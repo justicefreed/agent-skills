@@ -553,8 +553,8 @@ def case_enforcing_flag():
 
 
 def case_stop_hook_prefilter():
-    cmd = [c for c in hook_commands() if "stop-check" in c]
-    check_same("prefilter: exactly one stop-check hook (test sanity)", len(cmd), 1)
+    cmd = sorted(set(c for c in hook_commands() if "stop-check" in c))
+    check_same("prefilter: exactly one distinct stop-check hook (test sanity)", len(cmd), 1)
     with own_state_root() as flag:
         sc = lane_scenario("strict")  # hand-written policy: no `orch` command has run since
         if os.path.exists(flag):

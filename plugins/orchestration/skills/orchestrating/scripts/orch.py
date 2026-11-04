@@ -2437,6 +2437,9 @@ def stop_reason(repo_key: str, program: str, obligations: List[Dict[str, Any]]) 
                     f["entry"], t.get("track"), t.get("code"), t.get("repair")))
         elif f["code"] == "harvested-unfinished":
             lines.append("UNFINISHED CONSUMPTION %s: %s" % (f["entry"], f["detail"]))
+        elif f["code"] == "lane-skill-not-loaded":
+            lines.append("Load the working-a-lane skill with the Skill tool, then "
+                         "finish as its report contract says.")
     return "\n".join(lines)
 
 
@@ -2448,6 +2451,69 @@ def stop_fingerprint(obligations: List[Dict[str, Any]]) -> str:
 def stop_block_path(repo_key: str, program: str, session_id: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
     return os.path.join(program_dir(repo_key, program), "stop-blocks", safe + ".json")
+
+
+# A SubagentStop payload's cwd is the PARENT's, so a subagent is matched to its
+# lane by the `orch_entry:` line of its spawn prompt -- the first transcript
+# line -- never by directory. Both reads are capped file reads.
+TRANSCRIPT_HEAD_CAP = 256 * 1024
+TRANSCRIPT_SKILL_CAP = 8 * 1024 * 1024
+LANE_SKILL = "working-a-lane"
+_SKILL_CALL_RE = re.compile(r'"name"\s*:\s*"Skill"')
+
+
+def _strings(node: Any) -> List[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _strings(v)]
+    if isinstance(node, list):
+        return [s for v in node for s in _strings(v)]
+    return []
+
+
+def transcript_labels(path: Any) -> Dict[str, str]:
+    """The prompt labels on a subagent transcript's first line, or {}."""
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return {}
+    with open(path, "rb") as fh:
+        head = fh.readline(TRANSCRIPT_HEAD_CAP).decode("utf-8", "replace")
+    try:
+        texts = _strings(json.loads(head))
+    except ValueError:
+        texts = [head.replace("\\n", "\n")]   # truncated: scan the raw line
+    return prompt_labels(*texts)
+
+
+def transcript_loaded_lane_skill(path: str) -> Optional[bool]:
+    """Whether the transcript holds a Skill call naming working-a-lane; None
+    when it is over the cap and the check is skipped."""
+    if os.path.getsize(path) > TRANSCRIPT_SKILL_CAP:
+        return None
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if LANE_SKILL in line and _SKILL_CALL_RE.search(line):
+                return True
+    return False
+
+
+def subagent_obligations(repo_key: str, program: str, labels: Dict[str, str],
+                         transcript: str) -> List[Dict[str, Any]]:
+    """Lane obligations only, for the entry a subagent's prompt names."""
+    path = tracker_path(repo_key, program, labels.get(LABEL_TRACKER) or "root")
+    if not os.path.isfile(path):
+        return []
+    try:
+        entry = find_entry(load_tracker(path), str(labels.get(LABEL_ENTRY)))
+    except OrchError:
+        return []
+    name, eid = labels.get(LABEL_TRACKER) or "root", entry["entry"]
+    found = [f for f in audit_findings(repo_key, program, "", track=False, git=False)
+             if f["code"] in LANE_CODES and f["tracker"] == name and f["entry"] == eid]
+    if transcript_loaded_lane_skill(transcript) is False:
+        found.append({"code": "lane-skill-not-loaded", "tracker": name, "entry": eid,
+                      "detail": "no Skill call for %s" % LANE_SKILL})
+    return found
 
 
 def cmd_stop_check(args: argparse.Namespace) -> int:
@@ -2479,12 +2545,27 @@ def _stop_check(args: argparse.Namespace) -> int:
         programs = [resolve_program(repo_key, args.program)]
     except OrchError:
         programs = [p["program"] for p in list_programs(repo_key)]
+    event = payload.get("hook_event_name") or "Stop"
+    subagent = event == "SubagentStop"
+    labels: Dict[str, str] = {}
+    transcript = payload.get("agent_transcript_path")
+    if subagent:
+        # Never the cwd role check: the cwd is the parent's. Lane obligations
+        # only, for the entry the subagent's own spawn prompt names.
+        labels = transcript_labels(transcript)
+        ref = str(labels.get(LABEL_ENTRY) or "").strip()
+        if not ref or ref.lower() == "none":
+            return 0
+        if labels.get(LABEL_PROGRAM):
+            programs = [p["program"] for p in list_programs(repo_key)
+                        if p["program"] == labels[LABEL_PROGRAM]]
     found = []  # (program, level, obligations)
     for program in programs:
         level = policy_level(repo_key, program)
         if level == "off":
             continue
-        obligations = stop_obligations(repo_key, program, cwd)
+        obligations = (subagent_obligations(repo_key, program, labels, str(transcript))
+                       if subagent else stop_obligations(repo_key, program, cwd))
         if obligations:
             found.append((program, level, obligations))
     if not found:
@@ -2495,8 +2576,10 @@ def _stop_check(args: argparse.Namespace) -> int:
         print(text)
         return 0
 
-    session_id = payload.get("session_id")
+    session_id = payload.get("agent_id" if subagent else "session_id")
     session_id = session_id if isinstance(session_id, str) and session_id else None
+    if subagent and session_id:
+        session_id = "agent-" + session_id      # the loop guard is per subagent
     fingerprint = hashlib.sha256("|".join(
         "%s=%s" % (program, stop_fingerprint(obligations))
         for program, _, obligations in found).encode("utf-8")).hexdigest()
@@ -2512,7 +2595,7 @@ def _stop_check(args: argparse.Namespace) -> int:
         print(json.dumps({"decision": "block", "reason": text}))
     else:
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "Stop", "additionalContext": text}}))
+            "hookEventName": event, "additionalContext": text}}))
     return 0
 
 
