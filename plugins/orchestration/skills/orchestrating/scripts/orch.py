@@ -1788,6 +1788,21 @@ def cmd_close(args: argparse.Namespace) -> int:
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
 
+    # A track-linked entry closes through `consume`, which advances the item.
+    # Refused at every level: mapping `advances` are new, so nothing older is hit.
+    targets = [str(t.get("track")) for t in track_targets(entry.get("advances"))]
+    untracked = (args.untracked or "").strip()
+    if targets and not untracked:
+        eid = entry["entry"]
+        raise OrchError(
+            "%s has agent-track targets (%s). Close it with `orch consume %s "
+            "--consumed ... --evidence ...`,\nor, if the item must not advance, "
+            "`orch close %s --consumed \"...\" --untracked \"<why>\"`."
+            % (eid, ", ".join(targets), eid, eid))
+    if targets and is_placeholder(untracked):
+        raise OrchError("--untracked is a placeholder (%r). Say why the track "
+                        "item must not advance." % untracked)
+
     if not args.consumed or is_placeholder(args.consumed):
         raise OrchError(
             "closing requires --consumed '<what happened to the output>'.\n"
@@ -1798,6 +1813,9 @@ def cmd_close(args: argparse.Namespace) -> int:
         )
     close_entry(repo_key, program, args.tracker, path, data, entry,
                 args.consumed, args.repo)
+    if targets:
+        append_override(repo_key, program, "untracked-close", args.tracker,
+                        entry["entry"], targets, untracked)
     return 0
 
 
@@ -6440,6 +6458,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("close", help="delete a consumed entry")
     sp.add_argument("entry")
     sp.add_argument("--consumed", help="what happened to the output")
+    sp.add_argument("--untracked", metavar="REASON",
+                    help="close a track-linked entry without advancing its "
+                         "items; recorded as an override")
     common(sp)
     sp.set_defaults(func=cmd_close)
 
