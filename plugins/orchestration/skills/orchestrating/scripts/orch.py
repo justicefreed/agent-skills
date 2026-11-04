@@ -635,7 +635,20 @@ def parse_front_matter(path: str) -> Dict[str, Any]:
                     "%s:%d cannot mix a scalar and a list for %r"
                     % (path, lineno, key)
                 )
-            out[key].append(_scalar(line.lstrip()[2:].strip()))
+            item = line.lstrip()[2:].strip()
+            pair = _MAPPING_ITEM.match(item) if key in MAPPING_LIST_FIELDS else None
+            out[key].append({pair.group(1): _scalar((pair.group(2) or "").strip())}
+                            if pair else _scalar(item))
+            continue
+        # An indented `key: value` continues the mapping item above it.
+        if (line[:1].isspace() and key in MAPPING_LIST_FIELDS
+                and isinstance(out.get(key), list) and out[key]
+                and isinstance(out[key][-1], dict)):
+            pair = _MAPPING_ITEM.match(line.strip())
+            if not pair:
+                raise OrchError("%s:%d cannot parse %r as a mapping key"
+                                % (path, lineno, line))
+            out[key][-1][pair.group(1)] = _scalar((pair.group(2) or "").strip())
             continue
         if ":" not in line:
             raise OrchError(
@@ -653,6 +666,20 @@ def parse_front_matter(path: str) -> Dict[str, Any]:
         else:
             out[key] = _scalar(value)
     return out
+
+
+# List fields whose items may be one-level mappings (`- track: T-1` plus
+# indented `expect: ...` lines). Only these, so a colon inside an ordinary
+# list item -- an artifact path, a note -- still reads as a plain string.
+MAPPING_LIST_FIELDS = ("advances",)
+_MAPPING_ITEM = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:\s+(.*)|)$")
+
+
+def advance_label(item: Any) -> str:
+    """How one `advances` item prints: a plan id as-is, a mapping as track:<id>."""
+    if isinstance(item, dict):
+        return "track:%s" % item.get("track")
+    return str(item)
 
 
 def _scalar(value: str) -> str:
@@ -708,6 +735,12 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
             "brief %s: advances must be a non-empty list or the literal `none`."
             % path
         )
+    else:
+        for item in advances:
+            if isinstance(item, dict) and not item.get("track"):
+                raise OrchError(
+                    "brief %s: a mapping advances item needs a `track` key. Got %r."
+                    % (path, item))
 
     if "review" in fields:
         mode = str(fields["review"]).strip()
@@ -1595,7 +1628,8 @@ def cmd_render(args: argparse.Namespace) -> int:
         print("|---|---|---|---|---|---|")
         for e in data["entries"]:
             advances = e["advances"]
-            adv = ", ".join(advances) if isinstance(advances, list) else advances
+            adv = (", ".join(advance_label(a) for a in advances)
+                   if isinstance(advances, list) else advances)
             print("| %s | %s | %s | %s | %s | %s |" % (
                 e["entry"], e["status"], e.get("session_name")
                 or (e.get("agent_id") or "-")[:8],
