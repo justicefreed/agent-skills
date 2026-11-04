@@ -2308,6 +2308,23 @@ def cmd_audit(args: argparse.Namespace) -> int:
 # stop-check: the turn-end adherence check, a Stop hook
 # --------------------------------------------------------------------------- #
 
+def audit_summary(repo_key: str, program: str) -> Optional[str]:
+    """One `audit:` line for resume and roster, or None when clean. Skips
+    `target-moved` (no `track` call), so `orch audit` stays authoritative."""
+    try:
+        findings = audit_findings(repo_key, program, "", track=False)
+    except OrchError:
+        return None
+    if not findings:
+        return None
+    counts: Dict[str, int] = {}
+    for f in findings:
+        counts[f["code"]] = counts.get(f["code"], 0) + 1
+    return "audit: %d finding%s (%s) — orch audit" % (
+        len(findings), "" if len(findings) == 1 else "s",
+        ", ".join(code if n == 1 else "%s ×%d" % (code, n) for code, n in counts.items()))
+
+
 LANE_CODES = ("checkpoint-missing", "checkpoint-stale", "checkpoint-incomplete")
 ORCHESTRATOR_CODES = ("exception", "harvested-unfinished")
 
@@ -2521,6 +2538,9 @@ def cmd_roster(args: argparse.Namespace) -> int:
     print("\n%d open entr%s. This is RECORDED intent, not liveness -- reconcile "
           "against the substrate before acting."
           % (total, "y" if total == 1 else "ies"))
+    summary = audit_summary(repo_key, program)
+    if summary:
+        print(summary)
     return 0
 
 
@@ -4011,6 +4031,9 @@ def render_resume(repo_key: str, program: str, args: argparse.Namespace) -> str:
     level = policy_level(repo_key, program)
     if level != "off":
         lines.append("policy: %s" % level)
+    summary = audit_summary(repo_key, program)
+    if summary:
+        lines.append(summary)
     lines.extend(exception_block(repo_key, program))
     try:
         inbox_program, target = resolve_target(args, repo_key)
