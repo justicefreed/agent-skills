@@ -2198,7 +2198,11 @@ def _entry_path(entry: Dict[str, Any], value: str) -> str:
     return value if os.path.isabs(value) else os.path.join(str(entry.get("worktree") or ""), value)
 
 
-def audit_findings(repo_key: str, program: str, root: str) -> List[Dict[str, Any]]:
+def audit_findings(repo_key: str, program: str, root: str, track: bool = True,
+                   git: bool = True) -> List[Dict[str, Any]]:
+    """Every audit finding. `track=False` skips `target-moved` (the only `track`
+    call); `git=False` also skips `home-unbound`, whose identity lookup can fall
+    back to git -- so `stop-check` spawns nothing."""
     findings: List[Dict[str, Any]] = []
 
     def add(code: str, tracker: str, entry: Optional[str], detail: str) -> None:
@@ -2250,7 +2254,7 @@ def audit_findings(repo_key: str, program: str, root: str) -> List[Dict[str, Any
                         add("checkpoint-incomplete", name, eid, "%s: %s absent, empty "
                             "or vacuous" % (apath, ", ".join(bad)))
             worktree = entry.get("worktree")
-            if worktree and os.path.isdir(str(worktree)):
+            if git and worktree and os.path.isdir(str(worktree)):
                 try:
                     lkey, _, _, git_dir = local_identity(str(worktree))
                 except OrchError:
@@ -2261,7 +2265,7 @@ def audit_findings(repo_key: str, program: str, root: str) -> List[Dict[str, Any
                         add("home-unbound", name, eid, "%s %s" % (
                             worktree, "has no home marker" if not marker else
                             "is bound to %s/%s/%s" % _marker_names(marker)))
-            targets = track_targets(entry.get("advances"))
+            targets = track_targets(entry.get("advances")) if track else []
             if targets:
                 for target in targets:
                     try:
@@ -2298,6 +2302,143 @@ def cmd_audit(args: argparse.Namespace) -> int:
                 o.get("at"), o.get("kind"), o.get("tracker"), o.get("entry"),
                 ",".join(o.get("targets") or []) or "-", o.get("reason")))
     return 1 if findings else 0
+
+
+# --------------------------------------------------------------------------- #
+# stop-check: the turn-end adherence check, a Stop hook
+# --------------------------------------------------------------------------- #
+
+LANE_CODES = ("checkpoint-missing", "checkpoint-stale", "checkpoint-incomplete")
+ORCHESTRATOR_CODES = ("exception", "harvested-unfinished")
+
+
+def _fs_resolvable(path: str) -> bool:
+    """True when `repo_identity(path)` can answer without spawning git."""
+    dirs = _fs_git_dirs(path)
+    return dirs is not None and dirs[1].endswith(".git")
+
+
+def _fs_toplevel(start: str) -> Optional[str]:
+    """The worktree top-level containing `start`, from the filesystem only."""
+    here = os.path.realpath(start)
+    if not os.path.isdir(here):
+        here = os.path.dirname(here)
+    while True:
+        if os.path.exists(os.path.join(here, ".git")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def stop_obligations(repo_key: str, program: str, cwd: str
+                     ) -> Optional[List[Dict[str, Any]]]:
+    """This session's outstanding findings, or None when its role is ambiguous."""
+    top = _fs_toplevel(cwd)
+    matches = []
+    for name, data in _read_all_trackers(repo_key, program, True, "root"):
+        for entry in data["entries"]:
+            wt = entry.get("worktree")
+            if top and wt and os.path.realpath(str(wt)) == top:
+                matches.append((name, entry))
+    if len(matches) > 1:
+        return None                 # an inherited worktree: whoami's view too
+    findings = audit_findings(repo_key, program, "", track=False, git=False)
+    if len(matches) == 1 and matches[0][1].get("status") == "running":
+        name, entry = matches[0]
+        return [f for f in findings if f["code"] in LANE_CODES
+                and f["tracker"] == name and f["entry"] == entry["entry"]]
+    return [f for f in findings if f["code"] in ORCHESTRATOR_CODES]
+
+
+def stop_reason(repo_key: str, program: str, obligations: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    checkpoints: Dict[str, List[str]] = {}
+    for f in obligations:
+        if f["code"] in LANE_CODES:
+            checkpoints.setdefault(str(f["entry"]), []).append(f["detail"])
+    for eid, details in checkpoints.items():
+        lines.append("CHECKPOINT REQUIRED for %s: %s. Update it with the last durable "
+                     "milestone, verification evidence, uncertain external effects "
+                     "and one safe next action, then stop." % (eid, "; ".join(details)))
+    excs = {(str(r.get("tracker")), str(r.get("entry"))): r
+            for r in load_exceptions(repo_key, program)}
+    for f in obligations:
+        if f["code"] == "exception":
+            rec = excs.get((f["tracker"], str(f["entry"]))) or {}
+            failed = [t for t in rec.get("targets") or [] if t.get("state") == "failed"]
+            if not failed:
+                lines.append("UNAPPLIED CONSUMPTION %s: %s" % (f["entry"], f["detail"]))
+            for t in failed:
+                lines.append("UNAPPLIED CONSUMPTION %s: %s %s — %s" % (
+                    f["entry"], t.get("track"), t.get("code"), t.get("repair")))
+        elif f["code"] == "harvested-unfinished":
+            lines.append("UNFINISHED CONSUMPTION %s: %s" % (f["entry"], f["detail"]))
+    return "\n".join(lines)
+
+
+def stop_fingerprint(obligations: List[Dict[str, Any]]) -> str:
+    keys = sorted("%s:%s.%s" % (f["code"], f["tracker"], f["entry"]) for f in obligations)
+    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
+
+
+def stop_block_path(repo_key: str, program: str, session_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    return os.path.join(program_dir(repo_key, program), "stop-blocks", safe + ".json")
+
+
+def cmd_stop_check(args: argparse.Namespace) -> int:
+    """Block (strict) or report (warn) a turn end that leaves an obligation.
+
+    A Stop hook in every session, so: no `track` or git subprocess, and silent
+    with exit 0 on every error path -- a crashing Stop hook is worse than none.
+    """
+    try:
+        return _stop_check(args)
+    except Exception:
+        return 0
+
+
+def _stop_check(args: argparse.Namespace) -> int:
+    payload = hook_payload() if args.format == "hook" else {}
+    cwd = _hook_cwd() if args.format == "hook" else None
+    cwd = cwd or os.path.realpath(args.repo)
+    override = os.environ.get("ORCH_HOME")
+    if not _fs_resolvable(cwd) or (override and not _fs_resolvable(override)):
+        return 0
+    repo_key, _, _ = repo_identity(cwd)
+    if not list_programs(repo_key):
+        return 0
+    try:
+        program = resolve_program(repo_key, args.program)
+    except OrchError:
+        return 0
+    level = policy_level(repo_key, program)
+    if level == "off":
+        return 0
+    obligations = stop_obligations(repo_key, program, cwd)
+    if not obligations:
+        return 0
+    text = stop_reason(repo_key, program, obligations)
+    if args.format != "hook":
+        print(text)
+        return 0
+
+    session_id = payload.get("session_id")
+    session_id = session_id if isinstance(session_id, str) and session_id else None
+    fingerprint = stop_fingerprint(obligations)
+    suppressed = bool(payload.get("stop_hook_active")) or session_id is None
+    record = stop_block_path(repo_key, program, session_id) if session_id else None
+    if not suppressed and _load_json(record).get("fingerprint") == fingerprint:
+        suppressed = True
+    if level == "strict" and not suppressed:
+        _save_json(record, {"fingerprint": fingerprint, "at": _now()})
+        print(json.dumps({"decision": "block", "reason": text}))
+    else:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "Stop", "additionalContext": text}}))
+    return 0
 
 
 
@@ -6504,6 +6645,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     common(sp)
     sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("stop-check",
+                        help="turn-end adherence check; a Stop hook, blocks at strict")
+    sp.add_argument("--format", choices=("text", "hook"), default="text")
+    common(sp)
+    sp.set_defaults(func=cmd_stop_check)
 
     sp = sub.add_parser("policy", help="show or set the adherence level "
                                        "(off, warn, strict)")

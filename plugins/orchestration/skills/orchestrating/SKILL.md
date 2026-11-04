@@ -14,6 +14,8 @@ hooks:
           command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" cost --format hook; done; exit 0'
         - type: command
           command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" wake check --format hook; done; exit 0'
+        - type: command
+          command: 'PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; for d in "$ORCH_SKILL_DIR" "$CLAUDE_PLUGIN_ROOT/skills/orchestrating" "$HOME/.claude/skills/orchestrating" "$HOME/.agents/skills/orchestrating"; do [ -f "$d/scripts/orch.py" ] && exec "$PY" "$d/scripts/orch.py" stop-check --format hook; done; exit 0'
   SessionStart:
     - matcher: "compact|resume"
       hooks:
