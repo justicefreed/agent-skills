@@ -47,6 +47,14 @@ already blocked for the same set of problems, gets the text as context instead o
 A changed set blocks again. A problem that cannot be fixed now — the worker is waiting on a human —
 therefore costs one continuation, not a loop.
 
+## Where each lane is covered
+
+| Lane runs as | Reached by |
+|---|---|
+| An `Agent` subagent in the orchestrator's session | `SubagentStop` hook in that session, keyed to the `orch_entry:` line of the subagent's transcript |
+| A separate Claude Code session (Paseo, worktree) | the Stop hooks of the `working-a-lane` skill the lane loads |
+| A non-Claude harness | CLI refusals only; no turn-end block |
+
 ## Ways out
 
 | Need | Command | Recorded as |

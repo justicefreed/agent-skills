@@ -156,6 +156,9 @@ this worktree's inbox is claimed.
 3. **`SPAWN`**, with `ISOLATE` if the work earns its own branch or worktree, using exactly the
    model, mode and label `orch open` printed — the spawn guard refuses anything else.
 
+Every lane prompt carries the line `Before anything else, load the working-a-lane skill with the Skill
+tool.`; the worker's checkpoint, inbox, evidence and report rules live there, not in the brief.
+
 Reference the project's standing-rules file — generated from `assets/STANDING-RULES.template.md` on
 first use — and never restate it: repeated prose costs output tokens every dispatch and goes stale on
 the first correction.
