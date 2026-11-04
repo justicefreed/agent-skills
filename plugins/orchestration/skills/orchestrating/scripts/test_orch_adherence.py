@@ -488,8 +488,35 @@ def case_p6_overrides():
                audit_lines(run(sc.p, "roster")[1]), [])
 
 
+# --------------------------------------------------------------------------- #
+# hook cost: the bytecode-cached launcher and the `enforcing` flag prefilter
+# --------------------------------------------------------------------------- #
+
+SKILL_DIR = os.path.dirname(HERE)
+
+
+def hook_commands():
+    """Every `command:` in SKILL.md's frontmatter, unquoted, keyed by its subcommand text."""
+    with open(os.path.join(SKILL_DIR, "SKILL.md"), "r", encoding="utf-8") as fh:
+        front = fh.read().split("\n---", 1)[0]
+    cmds = []
+    for line in front.splitlines():
+        line = line.strip()
+        if line.startswith("command: '") and line.endswith("'"):
+            cmds.append(line[len("command: '"):-1].replace("''", "'"))
+    return cmds
+
+
+def case_hooks_use_launcher():
+    cmds = hook_commands()
+    check_true("hook: the frontmatter holds hook commands (test sanity)", len(cmds) >= 9)
+    check_same("hook: every frontmatter hook names orch_hook.py, none orch.py",
+               [c for c in cmds if "orch_hook.py" not in c or "/orch.py" in c], [])
+
+
 for fn in (case_p1_policy, case_p2_close, case_p3_open, case_p4_lane, case_p4_loop_guard,
-           case_p4_orchestrator, case_p4_several_programs, case_p4_no_track_calls, case_p5_summary, case_p6_overrides):
+           case_p4_orchestrator, case_p4_several_programs, case_p4_no_track_calls, case_p5_summary, case_p6_overrides,
+           case_hooks_use_launcher):
     case(fn)
 
 print("\n%s" % ("all adherence cases pass" if not FAILURES

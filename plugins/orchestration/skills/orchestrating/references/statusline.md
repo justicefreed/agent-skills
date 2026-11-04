@@ -101,7 +101,7 @@ known-absolute interpreter, and let `PATH` answer only as a last resort.
 {
   "statusLine": {
     "type": "command",
-    "command": "PY=\"${ORCH_PYTHON:-}\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || PY=python3; exec \"$PY\" ~/.claude/skills/orchestrating/scripts/orch.py statusline"
+    "command": "PY=\"${ORCH_PYTHON:-}\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || PY=python3; exec \"$PY\" ~/.claude/skills/orchestrating/scripts/orch_hook.py statusline"
   }
 }
 ```
@@ -123,7 +123,7 @@ only be read once. Forward it:
 #!/usr/bin/env bash
 PY="${ORCH_PYTHON:-}"; [ -x "$PY" ] || PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3
 INPUT=$(cat)
-ORCH=$(printf '%s' "$INPUT" | "$PY" ~/.claude/skills/orchestrating/scripts/orch.py statusline)
+ORCH=$(printf '%s' "$INPUT" | "$PY" ~/.claude/skills/orchestrating/scripts/orch_hook.py statusline)
 printf '%s' "$INPUT" | your-existing-statusline
 [ -n "$ORCH" ] && printf '\n%s' "$ORCH"    # second line, only when there is something to say
 ```
