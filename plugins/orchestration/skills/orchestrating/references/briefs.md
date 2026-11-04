@@ -65,14 +65,8 @@ wrong incentive. A brief claiming `in-brief` whose report carries no such pass d
 integrator escalates. See `integration.md`.
 
 **`progress_artifact:` is the checkpoint for work that can outlive a turn**, and exists before the
-first dispatch. Keep it small and append only facts a fresh agent cannot re-derive: completed
-milestones, the next bounded action, verification evidence, and any external side effect whose
-outcome is uncertain. Update it after each milestone and immediately before a context-heavy read,
-rotation, compaction, or external mutation. A checkpoint is complete when it names the last durable
-state and one safe next action; chat history is never the checkpoint. `orch audit` checks four
-labels, each a `Label:` line or a `## Label` heading with real content: `Last durable milestone`,
-`Verification`, `Uncertain external effects` (`none` is valid), `Next safe action`. Relative paths
-resolve against the entry's `worktree`.
+first dispatch. The worker's rules for it (what to write, when, the four labels `orch audit` checks)
+live in the `working-a-lane` skill. Relative paths resolve against the entry's `worktree`.
 
 Everything else — constraints, rationale, history — goes in the body, because the body is what the
 *worker* reads and duplicating it into structured fields creates two copies that drift.
@@ -102,66 +96,12 @@ instruction to load this skill plus a recommended fan-out shape.
 ## The report contract
 
 Every brief specifies the shape of the reply, because an unshaped reply costs the orchestrator
-context it cannot get back.
+context it cannot get back. The shape (decision block, suppression rules, when a report is due, how
+to cite evidence) is the `working-a-lane` skill's, which every lane prompt tells the worker to load.
+The orchestrator's side of it:
 
-**The contract binds every artifact the worker produces, not only its reply.** A review document, a
-detail file, a summary written to disk — all of them follow the suppression rules below. A worker
-that keeps a disciplined reply and then writes a sprawling document has moved the cost rather than
-removed it, and the document is what the human actually reads.
-
-### When you may report
-
-A report is due when the task is **finished**, not when the worker next has something to say.
-
-- **Complete the task in one run.** Waiting for a long-running command is work; reporting
-  "in progress" as though finished is not.
-- **A tool or shell call that times out is an infrastructure event, not a result.** Re-issue it. Do
-  not treat the timeout as a failure of the task, and do not report a partial outcome as final — but
-  *do* say you re-issued, because a command that times out repeatedly is itself a finding.
-- **If you genuinely cannot finish**, say so explicitly and name what is incomplete. An honest
-  partial report is fine; a partial report shaped like a complete one is not.
-
-This is the precondition the rest of the contract assumes. An orchestrator reading a well-formed
-decision block has no way to tell that the work behind it stopped halfway — which is the same
-indistinguishable-failure shape as everything in `verification.md`.
-
-**Open with a decision block, ≤300 words:**
-
-1. **Verdict** — one line.
-2. **What changed** — identifiers with one line each.
-3. **Needs a human ruling** — one line each, or "none".
-4. **Falsification** — *what would have made this red? Was it observed red?* If it could not be made
-   to fail, say so — **that is the finding**.
-5. **Numbers that matter** — only those crossing a threshold that changes a decision.
-
-Then long-form detail **to a file**, with the path given. Not pasted into the reply.
-
-**Do the verification; don't narrate it.** Suppress unless actionable, in the reply *and in every
-document you write*:
-
-- **measurements** that cross no threshold that changes a decision;
-- **test-suite contents** — surface a suite only when it needed loosening, when a guard could not be
-  written, when something pre-existing broke, or when coverage the human should know about is absent;
-- **the adversarial pass**, which is part of *drafting*, not a deliverable — report the final state,
-  calling out only (a) a scope change or (b) a newly surfaced unfixed issue;
-- **alternatives not taken**, beyond a genuine close runner-up or a decision that turned on a real
-  tradeoff;
-- **changelog narration** — give the **result**, not the path to it. No "first I tried X, then the
-  review said Y, so I changed to Z." Keep the callouts that change the human's decision; drop the
-  journey. This one matters most in documents, where the temptation to narrate is strongest and the
-  reader is least interested.
-
-**Always surface:** anything needing a ruling, stated as a decision with options; anything you could
-not verify, and anything you are guessing; behaviour that changes in the field; findings outside
-your scope that you did not fix.
-
-**Honesty clause.** Concede or defend — no hedging, no splitting the difference to be agreeable. If
-the brief's premise is wrong, say so; orchestrator briefs have been wrong before and saying so was
-the right call. Distinguish *wrong* from *unverified* from *I would have done it differently*; the
-last is the least interesting.
-
-**State the provenance of every number.** Which tree it came from, and whether that tree could have
-gone red. A suite run where the change under test is absent is always green.
-
-Also: **do not commit** — the orchestrator commits, with explicit paths, because a worker's
-commit-everything can sweep a sibling's work.
+- A report is due only when the task is finished; a partial report shaped like a complete one is
+  indistinguishable from a finished lane (`verification.md`).
+- The contract binds every artifact the worker writes, not only its reply: the document is what the
+  human actually reads.
+- The brief's premise may be wrong; the skill tells workers to say so. Treat that as a finding.

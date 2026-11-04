@@ -466,6 +466,20 @@ override log keeps both honest without making `audit` red forever over a decisio
 a worker waiting on a human — must cost one continuation, not a loop, so a repeat becomes context
 instead of a second block.
 
+**Vocabulary.** A **lane** is the tracked unit of work: an open entry with its brief, container,
+limits, checkpoint and current worker; it outlives any one worker. A **worker** is one agent instance
+currently working a lane; it can lose context and be replaced. A **dispatch** is one act of sending a
+lane to a worker; a lane may be dispatched more than once. `orch_entry: none` spawns are not lanes.
+
+**Why the lane contract is its own skill.** `orchestrating` carries authority downward: what the
+orchestrator may decide, spend and land. A lane owes obligations upward: read the brief, keep the
+checkpoint, drain the inbox, report with verifiable evidence. Folding both into one skill loaded the
+orchestrator's whole body into every worker and buried the worker's duties in it. Two probed facts
+(Claude Code 2.1.295) forced the skill to be model-invocable: a `/skill` line in a subagent's prompt
+is not executed, and a PreToolUse `updatedInput` is not applied to `Agent` spawns, so the
+orchestrator cannot inject the contract. The only route is a prompt line telling the worker to call
+the Skill tool, which loads only skills without `disable-model-invocation`.
+
 ## 10. Principles
 
 1. Persist what cannot be re-derived; re-derive what can.

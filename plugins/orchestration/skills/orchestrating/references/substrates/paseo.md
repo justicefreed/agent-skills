@@ -166,7 +166,9 @@ in `~/.paseo/config.json`. The built-in `claude` provider accepts a `command` ar
 the launched binary, and an `env` map. The launcher only affects agents whose cwd is under a lane
 root (Paseo worktrees, `CLAUDE_LANE_ROOTS`); it locates the real `claude` binary and injects
 `assets/lane-profile/lane-settings.json`, which disables the `claude-mem` observer and injection and
-the `explanatory-output-style` plugin. Serena and the skills listing are deliberately left on:
+the `explanatory-output-style` plugin. The launcher matches by directory (lane roots), which is looser than the tracker's entry-based
+definition of a lane: a session under a lane root that has no open entry still gets the profile.
+Serena and the skills listing are deliberately left on:
 Serena's tools can reduce reads, and the skills listing has no per-session off switch.
 `ENABLE_STOP_REVIEW=0` disables the security-guidance plugin's per-stop LLM review for Paseo agents
 while its commit/push reviews stay on. `scripts/link-skills.sh` keeps the installed copy current.
