@@ -398,12 +398,9 @@ LOAD_LINE = "Before anything else, load the working-a-lane skill with the Skill 
 
 
 def spawn_guard(repo, tool, tool_input):
-    orch._HOOK_PAYLOAD = {"tool_name": tool, "tool_input": tool_input, "cwd": repo}
-    orch._HOOK_PAYLOAD_READ = True
-    try:
-        code, out, err = run(repo, "spawn-guard")
-    finally:
-        orch._HOOK_PAYLOAD, orch._HOOK_PAYLOAD_READ = None, False
+    # Fed on stdin like a real hook: run() resets the payload cache before each call.
+    payload = {"tool_name": tool, "tool_input": tool_input, "cwd": repo}
+    code, out, err = run(repo, "spawn-guard", stdin=json.dumps(payload))
     fresh()
     if not out.strip():
         return None
