@@ -150,8 +150,9 @@ The skill's turn-end hook runs `orch cost --format hook` and speaks **only** whe
 
 | Advisory | Default trigger | Override |
 |---|---|---|
-| Context, plan a rotation | 250K | `ORCH_CONTEXT_WARN` |
-| Context, rotate now | 400K | `ORCH_CONTEXT_URGENT` |
+| Context, delegate reads | 250K | `ORCH_CONTEXT_WARN` |
+| Context, compact now | 400K | `ORCH_CONTEXT_URGENT` |
+| Plugin sends `/compact` (Paseo) | 300K | `ORCH_COMPACT_AT` |
 | Too many model calls in one turn | 12 calls since the last human turn | `ORCH_TURN_CALLS_WARN` |
 | Fan-out too wide to consume | 8 open dispatches | `ORCH_FANOUT_WARN` |
 | Budget | 75% and 100% of the limit | `orch budget --set` |
@@ -191,6 +192,39 @@ one, better than halving the per-call cost. The
 only thing wrong with it was timing — the harness waited until the window was nearly full, so the
 session spent five hundred calls in the expensive band first — and the fact that the summary is a
 recollection of state rather than the state itself. Both are fixed without a new agent.
+
+**Compact at a turn end, on purpose.** Measured, an Opus 5.5 orchestrator on a 1M window ran to 642K
+with no automatic compaction; both of its compactions were the human typing `/compact`. An agent
+cannot do this for itself: a prompt it sends through Paseo arrives wrapped as an agent message and
+is read as text, and a `/compact` that lands mid-turn compacts but kills the turn. A Paseo plugin's
+send arrives as a user prompt, so the orch-inbox plugin does it at the one moment nothing is in
+flight — a completed turn end with no inbox item to deliver, no pending question, agent idle:
+
+```bash
+orch compaction due --explain     # the /compact line to send now, or exit 3 and why not
+orch compaction prompt            # the orchestrator compaction prompt (assets/compact-prompt.md)
+orch compaction followup --explain  # after that compaction lands: its first-turn prompt, once
+```
+
+`due` answers only for a long-lived role, once context passes `ORCH_COMPACT_AT` (300K; never below
+the loop-safe window for the measured floor), not within `ORCH_LOOP_CALL_GAP` calls of the last
+compaction, and once per session per `ORCH_COMPACT_RETRY_S` (600s). `ORCH_COMPACT_AT=0` disables
+it. There is no checkpoint turn first: a turn end is already a seam, and the prompt makes the
+summary carry a **Do first** list — unwritten rulings, unanswered questions, unconsumed lane
+reports, anything marked for a second look — which the resumed orchestrator works before anything
+else.
+
+A compaction leaves the agent **idle**: unlike a rotation, nothing starts its next turn, so that
+list would wait for the human. The compaction runs as an ordinary turn, so when *its* turn ends the
+plugin sends the follow-up (`assets/compact-followup.md`) — once, only for a compaction `due`
+requested and that has visibly landed in the transcript, and not past `ORCH_COMPACT_FOLLOWUP_S`
+(30 min). A human-typed `/compact` gets no follow-up: the human is already driving.
+
+The harness window stays as the **backstop** for the turn that never ends, which the plugin cannot
+reach. While turn-end compaction is on, `orch compaction window` answers at least `ORCH_COMPACT_AT`
+plus `ORCH_COMPACT_WINDOW_MARGIN` (150K) — at or under the threshold it would fire first, mid-turn,
+with the repo's generic summary instead of the orchestrator prompt. Outside Paseo
+nothing can send either; the urgent advisory asks the human to.
 
 **Make it early.** The harness's auto-compact window is configurable from 100K to 1M tokens, and it
 otherwise waits until near the model's limit. But the window is not a free dial, and the failure mode

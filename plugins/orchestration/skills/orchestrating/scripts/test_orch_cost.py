@@ -98,6 +98,10 @@ def hook_model_check(transcript_path, source="resume"):
 # 1. The compaction window honours a measured floor.
 # --------------------------------------------------------------------------- #
 
+# The floor policy in isolation: with turn-end compaction on, `window` is also
+# raised clear of ORCH_COMPACT_AT (section 7), which would mask every number here.
+_compact_at = orch.COMPACT_AT
+orch.COMPACT_AT = 0
 root = make_repo()
 repo_key, _, _ = orch.repo_identity(root)
 program = orch.resolve_program(repo_key, None)
@@ -125,6 +129,11 @@ with open(cpath, "w", encoding="utf-8") as fh:
 code, out, err = run(root, "compaction", "window", "--any-role", "--explain")
 check_same("a recorded window below the safe minimum is clamped up",
            (code, out.strip()), (0, "200000"))
+
+orch.COMPACT_AT = _compact_at
+code, out, err = run(root, "compaction", "window", "--any-role")
+check_same("with turn-end compaction on, the window sits above its threshold",
+           (code, out.strip()), (0, str(orch.COMPACT_AT + orch.COMPACT_WINDOW_MARGIN)))
 
 # --------------------------------------------------------------------------- #
 # 2. The per-turn call count, and the STEPS advisory.
@@ -192,6 +201,122 @@ code, out, err = hook_model_check(_superseded, source="startup")
 check_same("a non-resume SessionStart stays silent", (code, out.strip()), (0, ""))
 code, out, err = hook_model_check(_superseded, source="resume")
 check_true("a resume SessionStart speaks", code == 0 and "MODEL" in out)
+
+# --------------------------------------------------------------------------- #
+# 4. Hooks find their program in a repo with several, and the context
+#    advisory's dedupe is per session. Both silenced one orchestrator at 642K.
+# --------------------------------------------------------------------------- #
+
+print("\nprogram from claim, warn dedupe")
+_saved_state = os.environ.get("XDG_STATE_HOME")
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+_repo = make_repo()
+_rk, _, _ = orch.repo_identity(_repo)
+for _name in ("alpha", "beta"):
+    _pdir = orch.program_dir(_rk, _name)
+    os.makedirs(_pdir, exist_ok=True)
+    with open(os.path.join(_pdir, "root.json"), "w") as _fh:
+        json.dump({"entries": []}, _fh)
+try:
+    orch.resolve_program(_rk, None, _repo)
+    check_true("two programs and no claim still refuses", False)
+except orch.OrchError:
+    check_true("two programs and no claim still refuses", True)
+with open(orch.claims_path(_rk), "w") as _fh:
+    json.dump({os.path.realpath(_repo): {"target": "root", "program": "beta"}}, _fh)
+check_same("the worktree's claim names the program", orch.resolve_program(_rk, None, _repo), "beta")
+with open(orch.claims_path(_rk), "w") as _fh:
+    json.dump({os.path.realpath(_repo): {"target": "root", "program": "gone"}}, _fh)
+try:
+    orch.resolve_program(_rk, None, _repo)
+    check_true("a claim naming no existing program is not trusted", False)
+except orch.OrchError:
+    check_true("a claim naming no existing program is not trusted", True)
+
+_adv = ["CONTEXT 300K"]
+_w = lambda ctx, sess: orch._should_warn(_rk, "beta", {"context": ctx}, _adv, session=sess)
+check_same("first warning speaks", _w(300_000, "a"), True)
+check_same("the same level again stays quiet", _w(320_000, "a"), False)
+check_same("a successor session speaks below its predecessor's mark", _w(260_000, "b"), True)
+check_same("after compacting, the next climb speaks", (_w(395_000, "b"), _w(255_000, "b")), (True, True))
+if _saved_state is None:
+    del os.environ["XDG_STATE_HOME"]
+else:
+    os.environ["XDG_STATE_HOME"] = _saved_state
+
+# --------------------------------------------------------------------------- #
+# 5. `compaction due`: when the plugin should send /compact at a turn end.
+# --------------------------------------------------------------------------- #
+
+print("\ncompaction due")
+_scan = lambda last, calls=200, at=None: {"last": last, "calls": calls,
+    "events": [] if at is None else [{"at_call": at}]}
+_due = lambda scan, floor=30_000, req=None, now=1000.0: orch.compaction_due(
+    scan, floor, req or {}, "s1", now)[0]
+check_same("under the threshold is not due", _due(_scan(250_000)), False)
+check_same("over the threshold is due", _due(_scan(310_000)), True)
+check_same("a high floor raises the threshold past COMPACT_AT",
+           _due(_scan(310_000), floor=150_000), False)
+check_same("a compaction a few calls ago is a loop, not due",
+           _due(_scan(310_000, calls=200, at=195)), False)
+check_same("a recent request for this session is not re-sent",
+           _due(_scan(320_000), req={"session": "s1", "at_epoch": 900, "context": 310_000}), False)
+check_same("a request that has aged out is re-sent",
+           _due(_scan(320_000), req={"session": "s1", "at_epoch": 0, "context": 310_000}), True)
+check_same("another session's request does not block this one",
+           _due(_scan(320_000), req={"session": "s0", "at_epoch": 900, "context": 310_000}), True)
+check_true("the prompt asks for a Do first list",
+           "## Do first" in orch.compact_prompt())
+
+# --------------------------------------------------------------------------- #
+# 6. `compaction followup`: the first turn after a requested compaction.
+# --------------------------------------------------------------------------- #
+
+print("\ncompaction followup")
+_req = {"session": "s1", "followup": "pending", "at_epoch": 900, "compactions": 1}
+_fu = lambda compactions, req=_req, now=1000.0: orch.followup_due(
+    {"compactions": compactions}, req, "s1", now)[0]
+check_same("not owed before the compaction lands", _fu(1), False)
+check_same("owed once it lands", _fu(2), True)
+check_same("not owed twice", _fu(2, {**_req, "followup": "sent"}), False)
+check_same("not owed for a compaction nobody requested", _fu(2, {}), False)
+check_same("not owed once stale", _fu(2, now=900.0 + orch.COMPACT_FOLLOWUP_S + 1), False)
+
+_saved_state = os.environ.get("XDG_STATE_HOME")
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+_repo = make_repo()
+_big = [call("r%d" % i, input_tokens=10, cache_read_input_tokens=1000 * i,
+             cache_creation_input_tokens=0, output_tokens=5) for i in range(1, 40)]
+_big.append(call("rlast", input_tokens=10, cache_read_input_tokens=320_000,
+                 cache_creation_input_tokens=0, output_tokens=5))
+_t = transcript(_big)
+code, out, err = run(_repo, "compaction", "due", "--any-role", "--transcript", _t)
+check_true("due prints the /compact line", code == 0 and out.startswith("/compact "))
+code, out, err = run(_repo, "compaction", "followup", "--any-role", "--transcript", _t)
+check_same("followup waits for the compaction", code, 3)
+with open(_t, "a") as _fh:
+    _fh.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
+    _fh.write(json.dumps(call("rpost", input_tokens=10, cache_read_input_tokens=30_000,
+                              cache_creation_input_tokens=0, output_tokens=5)) + "\n")
+code, out, err = run(_repo, "compaction", "followup", "--any-role", "--transcript", _t)
+check_true("followup prints the Do-first prompt once it lands",
+           code == 0 and "Do first" in out)
+code, out, err = run(_repo, "compaction", "followup", "--any-role", "--transcript", _t)
+check_same("and only once", code, 3)
+if _saved_state is None:
+    del os.environ["XDG_STATE_HOME"]
+else:
+    os.environ["XDG_STATE_HOME"] = _saved_state
+
+# --------------------------------------------------------------------------- #
+# 7. The harness window is a backstop, above the turn-end threshold.
+# --------------------------------------------------------------------------- #
+
+print("\nbackstop window")
+check_same("a blind 300K window is raised clear of ORCH_COMPACT_AT",
+           orch.backstop_window(300_000), orch.COMPACT_AT + orch.COMPACT_WINDOW_MARGIN)
+check_same("a window already higher is kept", orch.backstop_window(700_000), 700_000)
+check_same("never past the harness ceiling", orch.backstop_window(2_000_000), orch.WINDOW_CEILING)
 
 print()
 if FAILURES:

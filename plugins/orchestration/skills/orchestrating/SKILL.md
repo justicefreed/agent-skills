@@ -194,9 +194,13 @@ an admission gate, not a warning after the money is gone. At a lane boundary, ch
 from the artifact rather than continue a bloated history. If recovery is necessary, preserve the
 worktree and patch first; a successor inspects and verifies uncommitted work before committing it.
 
-**Rotate before you are expensive.** Compaction fires early and a session-start hook re-derives
-your state afterwards; act at a seam when the turn-end hook warns (`references/cost.md`). When a
-summary will not do, `orch rotate begin` — **never spawn a successor and archive yourself**
+**Compact before you are expensive.** Compaction is the routine reset: same agent, same inbox, lanes
+keep running, and `orch resume` re-derives your state afterwards. On Paseo the orch-inbox plugin
+sends `/compact` with an orchestrator prompt at a quiet turn end once context passes
+`ORCH_COMPACT_AT`, then a follow-up turn that has you work the summary's **Do first** list
+(`references/cost.md`). Never send
+`/compact` to yourself — it arrives as plain text, or kills your turn. Rotation is for when a
+summary will not do: `orch rotate begin` — **never spawn a successor and archive yourself**
 (`references/rotation.md`, which also covers `cursor_root_envelope_limit` and
 `cursor_blob_capacity`). When the hook raises `FRONT-DESK`, offer one once (`references/frontdesk.md`).
 

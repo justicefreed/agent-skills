@@ -139,6 +139,7 @@ type HookContext = {
     agents: {
       ref(id: string): {
         send(text: string): Promise<unknown>;
+        refresh(): Promise<unknown>;
         timeline: { append(input: unknown): Promise<unknown> };
       };
     };
@@ -146,7 +147,96 @@ type HookContext = {
   signal: AbortSignal;
 };
 
+// Paseo times a lifecycle hook out at 30s (observed: "Plugin RPC timed out"),
+// and this runs after the settle delay and an inbox drain. Measured, `due` reads
+// a 23MB transcript in 0.2s, so this is a ceiling, not an expectation.
+const COMPACT_TIMEOUT_MS = 10_000;
 
+/** One `orch compaction <action>` call: its stdout, or null for "no". */
+async function compactionAsk(
+  action: "due" | "followup",
+  agentId: string,
+  repo: string,
+  sessionId: string | undefined,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const argv = ["--repo", repo, "compaction", action, "--explain"];
+  if (sessionId) argv.push("--session-id", sessionId);
+  try {
+    const result = await orchRun(argv, { signal, timeout: COMPACT_TIMEOUT_MS });
+    if (result.stderr.trim()) console.log(`[orch-inbox] ${agentId}: ${result.stderr.trim()}`);
+    return result.stdout.trim() || null;
+  } catch (error) {
+    // Exit 3 is the ordinary "no". Its reason is logged only for an agent that
+    // could ever get a yes -- a worker's "not a long-lived role" would be one
+    // line per turn of every lane, and "not owed" is every quiet turn.
+    const code = (error as { code?: unknown }).code;
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
+    if (code !== 3) {
+      console.error(`[orch-inbox] compaction ${action} failed for ${agentId}: ${String(error)}`);
+    } else if (action === "due" && stderr && !stderr.includes("long-lived role")
+               && !stderr.includes("no program")) {
+      console.log(`[orch-inbox] ${agentId}: ${stderr}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Compaction for a long-lived role, at a quiet turn end. Two sends, each on its
+ * own turn end:
+ *
+ *  1. `/compact <orchestrator prompt>`, when `orch compaction due` says so.
+ *  2. After that compaction's own turn ends, the follow-up prompt from
+ *     `orch compaction followup`. A compaction leaves the agent idle -- unlike a
+ *     rotation, nothing starts its next turn -- so without this the summary's
+ *     "Do first" list waits for the human.
+ *
+ * An agent cannot run `/compact` on itself: a prompt it sends through Paseo
+ * arrives wrapped as an agent message and is read as plain text, and one that
+ * lands mid-turn kills that turn. A plugin send arrives as a user prompt, and a
+ * turn end is the one moment nothing is in flight. Verified: a multi-line
+ * `/compact <instructions>` sent from here compacts, the summarizer honours
+ * every line, and the compaction runs as an ordinary turn with its own
+ * turn_started / turn_ended. Every decision lives in `orch`; this only carries
+ * the text it prints.
+ */
+async function compactionTurnEnd(agentId: string, repo: string, context: HookContext): Promise<void> {
+  const ref = context.paseo.agents.ref(agentId);
+  let sessionId: string | undefined;
+  try {
+    const snap: any = await ref.refresh();
+    const a = snap?.agent ?? snap;
+    // A pending question or permission means the human is mid-decision; a
+    // compaction now would summarise the question out from under them.
+    if (Array.isArray(a?.pendingPermissions) && a.pendingPermissions.length) return;
+    // Already running again: a human or a delivery got in first, and a send now
+    // would land mid-turn and kill that turn.
+    if (a?.status && a.status !== "idle") {
+      console.log(`[orch-inbox] compaction check skipped for ${agentId}: status ${a.status}`);
+      return;
+    }
+    sessionId = a?.persistence?.sessionId ?? a?.runtimeInfo?.sessionId ?? undefined;
+  } catch (error) {
+    console.error(`[orch-inbox] compaction check skipped for ${agentId}: ${String(error)}`);
+    return;
+  }
+
+  // The follow-up first: a turn end right after a requested compaction is
+  // that compaction's own, and it is owed its first turn before anything else.
+  const followup = await compactionAsk("followup", agentId, repo, sessionId, context.signal);
+  const compact = followup
+    ? null
+    : await compactionAsk("due", agentId, repo, sessionId, context.signal);
+  const text = followup ?? (compact?.startsWith("/compact") ? compact : null);
+  if (!text || context.signal.aborted) return;
+  try {
+    await ref.send(text);
+    console.log(`[orch-inbox] sent ${followup ? "post-compaction follow-up" : "/compact"} to ${agentId}`);
+  } catch (error) {
+    console.error(`[orch-inbox] compaction send failed for ${agentId}: ${String(error)}`);
+  }
+}
 
 export default function contribute(server: PluginServerContext) {
   // The status surface. Read-only, and the only thing in this plugin the human
@@ -205,7 +295,7 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.on("agent.turn_ended", async (event: any, context: HookContext) => {
-    const agent = event.agent as { id: string; cwd?: string | null };
+    const agent = event.agent as { id: string; cwd?: string | null; provider?: string };
 
     // A cancelled turn means a human interrupted and is driving this agent right
     // now. Delivering here would contend with them.
@@ -238,7 +328,15 @@ export default function contribute(server: PluginServerContext) {
       // Drain then send, never the reverse: an item drained without delivery is
       // gone, so the send must be the very next thing we do.
       const text = await drain(repo, target, context.signal);
-      if (!text) return;
+      if (!text) {
+        // Nothing to deliver, so this turn end is a quiet seam: the place to
+        // compact a long-lived role on purpose. Delivery wins when both apply --
+        // the delivered turn ends too, and the check runs again then.
+        if (event.outcome?.kind === "completed" && CLAUDE_HARNESS_PROVIDERS.has(agent.provider ?? "")) {
+          await compactionTurnEnd(agent.id, repo, context);
+        }
+        return;
+      }
 
       try {
         await context.paseo.agents.ref(agent.id).send(text);

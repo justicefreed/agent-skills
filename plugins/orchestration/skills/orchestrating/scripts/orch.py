@@ -544,13 +544,20 @@ def list_programs(repo_key: str) -> List[Dict[str, Any]]:
     return found
 
 
-def resolve_program(repo_key: str, requested: Optional[str]) -> str:
+def resolve_program(repo_key: str, requested: Optional[str],
+                    start: str = ".") -> str:
     """Pick the program, or explain why the caller must choose.
 
     Deliberately refuses to guess when several programs exist. A second
     namespace opened alongside an existing one splits state into halves that
     each look internally consistent -- the one minting mistake worth an
     interruption.
+
+    The worktree's inbox claim is not a guess: it is a record, made on purpose,
+    of which program this worktree belongs to. Without consulting it, every
+    hook in a repo with two programs resolved nothing and exited silently --
+    measured, an orchestrator ran to 642K with its context advisory never once
+    able to fire.
     """
     if requested:
         return requested
@@ -561,6 +568,9 @@ def resolve_program(repo_key: str, requested: Optional[str]) -> str:
         return "default"
     if len(programs) == 1:
         return programs[0]["program"]
+    claimed = _claimed_program(repo_key, start)
+    if claimed and claimed in {p["program"] for p in programs}:
+        return claimed
     names = ", ".join(p["program"] for p in programs)
     raise OrchError(
         "several programs exist for this repo (%s); pass --program to choose.\n"
@@ -1263,7 +1273,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     carried = []
     if raised:
         repo_key_early = repo_identity(args.repo)[0]
-        program_early = args.program or (resolve_program(repo_key_early, None)
+        program_early = args.program or (resolve_program(repo_key_early, None, args.repo)
                                          if list_programs(repo_key_early) else None)
         uncovered = []
         for field, wanted, order, what in raised:
@@ -1330,7 +1340,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         program = args.program
     elif list_programs(repo_key):
         # Something already exists: reuse it, or refuse to guess between several.
-        program = resolve_program(repo_key, None)
+        program = resolve_program(repo_key, None, args.repo)
     else:
         # First program for this repo. Derive from the plan document's directory
         # if there is one, else `default`. Notify, do not ask -- a poor name is
@@ -1528,7 +1538,7 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 def cmd_update(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = tracker_path(repo_key, program, args.tracker)
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
@@ -1610,7 +1620,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 def cmd_mint_child(args: argparse.Namespace) -> int:
     """Allocate a child tracker id. The parent is the only minter, by design."""
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = tracker_path(repo_key, program, args.tracker)
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
@@ -1805,7 +1815,7 @@ def close_entry(repo_key: str, program: str, tracker: str, path: str,
 
 def cmd_close(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = tracker_path(repo_key, program, args.tracker)
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
@@ -1968,7 +1978,7 @@ def _target_line(rec: Dict[str, Any]) -> str:
 
 def cmd_consume(args: argparse.Namespace) -> int:
     repo_key, root, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = tracker_path(repo_key, program, args.tracker)
     data = load_tracker(path)
     entry = find_entry(data, args.entry)
@@ -2139,7 +2149,7 @@ def uses_agent_track(root: str) -> bool:
 
 def cmd_policy(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     if args.level is None:
         print(policy_level(repo_key, program))
         return 0
@@ -2326,7 +2336,7 @@ def audit_findings(repo_key: str, program: str, root: str, track: bool = True,
 
 def cmd_audit(args: argparse.Namespace) -> int:
     repo_key, root, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     findings = audit_findings(repo_key, program, root)
     # Overrides are decisions someone made, not defects: listed, never counted.
     overrides = recent_overrides(repo_key, program)
@@ -2551,7 +2561,7 @@ def _stop_check(args: argparse.Namespace) -> int:
     # is right for a command that writes, but here it would switch enforcement
     # off without a word in any repo that holds two programs.
     try:
-        programs = [resolve_program(repo_key, args.program)]
+        programs = [resolve_program(repo_key, args.program, getattr(args, "repo", "."))]
     except OrchError:
         programs = [p["program"] for p in list_programs(repo_key)]
     event = payload.get("hook_event_name") or "Stop"
@@ -2659,7 +2669,7 @@ def _read_all_trackers(repo_key: str, program: str,
 
 def cmd_roster(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     trackers = _read_all_trackers(repo_key, program, args.recursive, args.tracker)
 
     if args.json:
@@ -2696,7 +2706,7 @@ def cmd_roster(args: argparse.Namespace) -> int:
 
 def cmd_render(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     trackers = _read_all_trackers(repo_key, program, args.recursive, args.tracker)
     print("# Open dispatches - %s\n" % program)
     for name, data in trackers:
@@ -2727,7 +2737,7 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     """
     repo_key, root, _ = repo_identity(args.repo)
     worktree = os.path.realpath(args.worktree or os.getcwd())
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     matches = []
     for name, data in _read_all_trackers(repo_key, program, True, "root"):
         for entry in data["entries"]:
@@ -2757,7 +2767,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
     tracker: provenance has already graduated into the repo.
     """
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     alive = {a.strip() for a in (args.alive or "").split(",") if a.strip()}
     if not alive and not args.assume_none_alive:
         raise OrchError(
@@ -2855,6 +2865,16 @@ def _worktree_key(start: str) -> str:
     return os.path.realpath(_git(["rev-parse", "--show-toplevel"], start))
 
 
+def _claimed_program(repo_key: str, start: str) -> Optional[str]:
+    """The program this worktree's inbox claim names, or None. Never raises."""
+    try:
+        claim = _load_claims(repo_key).get(_worktree_key(start)) or {}
+    except (OrchError, OSError):
+        return None
+    program = claim.get("program")
+    return program if isinstance(program, str) and program else None
+
+
 def resolve_target(args: argparse.Namespace, repo_key: str
                    ) -> Tuple[Optional[str], Optional[str]]:
     """Return (program, target), or (None, None) when this agent has no inbox.
@@ -2877,13 +2897,13 @@ def resolve_target(args: argparse.Namespace, repo_key: str
     program = getattr(args, "program", None)
     explicit = getattr(args, "to", None)
     if explicit:
-        return (program or resolve_program(repo_key, None)), explicit
+        return (program or resolve_program(repo_key, None, args.repo)), explicit
     claim = _load_claims(repo_key).get(_worktree_key(args.repo))
     if claim and claim.get("target"):
         return (program or claim.get("program") or "default"), claim["target"]
     from_env = os.environ.get("ORCH_INBOX_TARGET")
     if from_env:
-        return (program or resolve_program(repo_key, None)), from_env
+        return (program or resolve_program(repo_key, None, args.repo)), from_env
     return None, None
 
 
@@ -2971,7 +2991,7 @@ def _write_claims(repo_key: str, claims: Dict[str, Any]) -> None:
 
 def cmd_inbox_claim(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     worktree = _worktree_key(args.repo)
     claims = _load_claims(repo_key)
     prior = claims.get(worktree)
@@ -3053,7 +3073,7 @@ def cmd_inbox_send(args: argparse.Namespace) -> int:
     if not args.to:
         raise OrchError("--to is required when sending; a sender never guesses "
                         "whose inbox it is writing to")
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     if is_placeholder(args.body):
         raise OrchError("--body must say something actionable")
     item = {
@@ -3720,17 +3740,18 @@ def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any],
     if context >= CONTEXT_URGENT:
         out.append(
             "CONTEXT %dK — every further model call costs about $%.2f, and a "
-            "typical turn is a dozen calls. Rotate now: write a handoff note, "
-            "then hand the program to a fresh orchestrator, which resumes from "
-            "the tracker, the briefs and the plan document. Measured: the same "
-            "work runs ~5x cheaper at a low context."
+            "typical turn is a dozen calls. Compact now: end this turn at a "
+            "seam. On Paseo the orch-inbox plugin sends `/compact` with the "
+            "orchestrator prompt (`orch compaction prompt`) when the turn "
+            "ends; elsewhere, ask the human to run it. Lanes keep running. "
+            "Measured: the same work runs ~5x cheaper at a low context."
             % (context // 1000, per_step)
         )
     elif context >= CONTEXT_WARN:
         out.append(
             "CONTEXT %dK — at about $%.2f per model call and rising. Stop "
             "reading anything large into this session; delegate reads and keep "
-            "only conclusions. Plan a rotation."
+            "only conclusions. Compaction comes at the next quiet turn end."
             % (context // 1000, per_step)
         )
     turn_calls = usage.get("turn_calls", 0)
@@ -3808,7 +3829,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
         args.repo = _hook_cwd() or args.repo
     try:
         repo_key, _, _ = repo_identity(args.repo)
-        program = resolve_program(repo_key, args.program)
+        program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     except OrchError:
         if quiet:
             return 0
@@ -3879,7 +3900,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
 
     if quiet:
         if not advisories or not _should_warn(repo_key, program, usage,
-                                              advisories):
+                                              advisories, session=path):
             return 0
         unpriced = sum(row["calls"] for row in (usage.get("unpriced") or {}).values())
         text = ("COST — $%.0f this session%s, ~$%.2f per model call at %dK "
@@ -3923,13 +3944,19 @@ def cmd_cost(args: argparse.Namespace) -> int:
 
 
 def _should_warn(repo_key: Optional[str], program: Optional[str],
-                 usage: Dict[str, Any], advisories: List[str]) -> bool:
+                 usage: Dict[str, Any], advisories: List[str],
+                 session: str = "") -> bool:
     """Warn when something new is true, or when it got materially worse.
 
     A hook that repeats itself gets switched off, and then it is worth nothing
     at the moment it would have mattered. The signature is the *set* of
     advisory kinds, so a newly-blown budget still speaks even if a context
     warning already fired at this level.
+
+    "New" is judged per session, and a compaction starts the climb over: the
+    record is per program, so a rotated-in successor otherwise inherits its
+    predecessor's high-water mark, and a compacted session never warns again
+    until it passes 1.5x the context it compacted from.
     """
     if not repo_key or not program:
         return True
@@ -3943,14 +3970,16 @@ def _should_warn(repo_key: Optional[str], program: Optional[str],
             prior = json.load(fh)
     except (OSError, ValueError):
         prior = {}
-    if (prior.get("signature") == signature
-            and context < prior.get("context", 0) * 1.5):
+    last_context = (prior.get("context", 0)
+                    if prior.get("session", "") == session else 0)
+    if (last_context and prior.get("signature") == signature
+            and last_context <= context < last_context * 1.5):
         return False
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"signature": signature, "context": context,
-                       "at": _now()}, fh)
+                       "session": session, "at": _now()}, fh)
     except OSError:
         pass
     return True
@@ -3958,7 +3987,7 @@ def _should_warn(repo_key: Optional[str], program: Optional[str],
 
 def cmd_budget(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = budget_path(repo_key, program)
     if args.limit is None:
         data = load_budget(repo_key, program)
@@ -4010,7 +4039,7 @@ def load_escalations(repo_key: str, program: str) -> List[Dict[str, Any]]:
 
 def cmd_escalate(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
 
     if args.log:
         records = load_escalations(repo_key, program)
@@ -4249,7 +4278,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
             if quiet:
                 return 0
             raise OrchError("no programs for this repo")
-        program = resolve_program(repo_key, args.program)
+        program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     except OrchError:
         if quiet:
             return 0
@@ -4481,7 +4510,7 @@ def _mark_frontdesk_suggested(repo_key: Optional[str], program: Optional[str],
 
 def cmd_frontdesk(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = frontdesk_path(repo_key, program)
     if args.clear:
         if os.path.exists(path):
@@ -4554,8 +4583,9 @@ def cmd_guard(args: argparse.Namespace) -> int:
         return 0
     cwd = payload.get("cwd")
     try:
-        repo_key, _, _ = repo_identity(cwd if isinstance(cwd, str) else args.repo)
-        program = resolve_program(repo_key, None)
+        where = cwd if isinstance(cwd, str) else args.repo
+        repo_key, _, _ = repo_identity(where)
+        program = resolve_program(repo_key, None, where)
     except OrchError:
         return 0
     if not list_programs(repo_key):
@@ -5555,6 +5585,112 @@ def compaction_path(repo_key: str, program: str) -> str:
     return os.path.join(program_dir(repo_key, program), "compaction.json")
 
 
+# Where a long-lived role is compacted on purpose, at the end of a turn, rather
+# than left for the harness window. Measured, one orchestrator ran to 642K with
+# no automatic compaction at all, and its two compactions were the human typing
+# `/compact`. A turn end is a seam by construction -- lanes keep running, and
+# whatever the orchestrator meant to come back to rides in the prompt's
+# "Do first" list. Never below the loop-safe window for the measured floor.
+COMPACT_AT = int(os.environ.get("ORCH_COMPACT_AT", 300_000) or 0)
+
+# One request per session per this many seconds. A `/compact` that was sent but
+# did not land (a human typed first, the provider refused) must not be re-sent
+# on every turn end.
+COMPACT_RETRY_S = int(os.environ.get("ORCH_COMPACT_RETRY_S", 600))
+
+# A compaction leaves the agent idle: unlike a rotation, nothing starts the next
+# turn, so the "Do first" list would wait for the human. The follow-up prompt is
+# that missing first turn. It is sent once, only after a compaction this tool
+# asked for has actually landed, and not at all past this age -- by then a human
+# has plainly been driving.
+COMPACT_FOLLOWUP_S = int(os.environ.get("ORCH_COMPACT_FOLLOWUP_S", 1800))
+
+
+# The harness window is the BACKSTOP to turn-end compaction, not a competitor:
+# it catches the turn that never ends, which the plugin cannot reach. Set at or
+# under ORCH_COMPACT_AT it would fire first, mid-turn, with the repo's generic
+# summary instead of the orchestrator prompt -- so while turn-end compaction is
+# on, the window sits this far above its threshold.
+COMPACT_WINDOW_MARGIN = int(os.environ.get("ORCH_COMPACT_WINDOW_MARGIN", 150_000))
+
+
+def backstop_window(window: int) -> int:
+    """`window`, raised clear of ORCH_COMPACT_AT when that is enabled. Pure."""
+    if not COMPACT_AT:
+        return window
+    return min(max(window, COMPACT_AT + COMPACT_WINDOW_MARGIN), WINDOW_CEILING)
+
+
+def compact_prompt_path() -> str:
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.join(os.path.dirname(here), "assets", "compact-prompt.md")
+
+
+def compact_prompt() -> str:
+    with open(compact_prompt_path(), "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def compact_followup_prompt() -> str:
+    path = os.path.join(os.path.dirname(compact_prompt_path()), "compact-followup.md")
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def followup_due(scan: Dict[str, Any], requested: Dict[str, Any],
+                 session: str, now: float) -> Tuple[bool, str]:
+    """Whether the compaction this tool requested has landed and needs its
+    first turn. Pure."""
+    if requested.get("session") != session:
+        return False, "no compaction was requested for this session"
+    if requested.get("followup") != "pending":
+        return False, "follow-up already %s" % (requested.get("followup") or "not owed")
+    if now - float(requested.get("at_epoch") or 0) > COMPACT_FOLLOWUP_S:
+        return False, "requested over %ds ago" % COMPACT_FOLLOWUP_S
+    if int(scan.get("compactions") or 0) <= int(requested.get("compactions") or 0):
+        return False, "the requested compaction has not landed yet"
+    return True, "compaction landed"
+
+
+def transcript_for_session(session_id: str, cwd: str) -> Optional[str]:
+    """A Claude Code transcript by session id: the cwd's project dir first."""
+    if not re.fullmatch(r"[A-Za-z0-9-]+", session_id or ""):
+        return None
+    name = session_id + ".jsonl"
+    pdir = project_dir_for(cwd) if os.path.isdir(cwd) else None
+    if pdir and os.path.isfile(os.path.join(pdir, name)):
+        return os.path.join(pdir, name)
+    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    try:
+        for entry in os.listdir(base):
+            candidate = os.path.join(base, entry, name)
+            if os.path.isfile(candidate):
+                return candidate
+    except OSError:
+        pass
+    return None
+
+
+def compaction_due(scan: Dict[str, Any], floor: int, requested: Dict[str, Any],
+                   session: str, now: float) -> Tuple[bool, str]:
+    """Whether to compact this session now, and why not if not. Pure."""
+    if not COMPACT_AT:
+        return False, "disabled (ORCH_COMPACT_AT=0)"
+    threshold = max(COMPACT_AT, recommend_window(floor))
+    context = int(scan.get("last") or 0)
+    if context < threshold:
+        return False, "context %dK is under %dK" % (context // 1000, threshold // 1000)
+    events = scan.get("events") or []
+    if events and scan.get("calls", 0) - events[-1]["at_call"] < LOOP_CALL_GAP:
+        return False, ("last compaction was under %d calls ago; refusing a loop"
+                       % LOOP_CALL_GAP)
+    if (requested.get("session") == session
+            and now - float(requested.get("at_epoch") or 0) < COMPACT_RETRY_S
+            and context >= int(requested.get("context") or 0)):
+        return False, "already requested %ds ago" % int(now - float(requested["at_epoch"]))
+    return True, "context %dK is over %dK" % (context // 1000, threshold // 1000)
+
+
 def scan_compaction(path: str) -> Dict[str, Any]:
     """Floor, observed window and compaction spacing, from a transcript.
 
@@ -5638,6 +5774,8 @@ def scan_compaction(path: str) -> Dict[str, Any]:
                                or [0]),
         "events": events,
         "compactions": len(events),
+        # The context carried by the most recent call: what the session holds now.
+        "last": prev,
     }
 
 
@@ -5693,13 +5831,80 @@ def compaction_advisories(scan: Dict[str, Any], window: int,
     return out
 
 
+def _compaction_due(args: argparse.Namespace, repo_key: Optional[str],
+                    program: Optional[str]) -> int:
+    """`compaction due`: print the `/compact` line to send, or exit 3.
+    `compaction followup`: once that compaction has landed, print the prompt
+    for the first turn after it -- exactly once -- or exit 3.
+
+    Called by the Paseo plugin at every turn end, so it is silent on stdout
+    unless the answer is yes; `--explain` says why on stderr for the plugin log.
+    """
+    def no(reason: str) -> int:
+        if args.explain:
+            print("not %s: %s" % ("owed" if args.action == "followup" else "due", reason),
+                  file=sys.stderr)
+        return 3
+
+    if not (repo_key and program):
+        return no("no program for this worktree")
+    try:
+        claim = _load_claims(repo_key).get(_worktree_key(args.repo)) or {}
+    except OrchError:
+        claim = {}
+    role = claim.get("target")
+    if not args.any_role and role not in LONG_LIVED_ROLES:
+        return no("inbox claim %r is not a long-lived role" % role)
+    path = args.transcript
+    if not path and args.session_id:
+        path = transcript_for_session(args.session_id, args.repo)
+    if not path and role:
+        path = _load_json(transcripts_path(repo_key, program)).get(role)
+    if not path or not os.path.isfile(path):
+        return no("no transcript for this session")
+    scan = scan_compaction(path)
+    if not scan:
+        return no("no model calls in %s" % path)
+    record = _load_json(compaction_path(repo_key, program))
+    floor = max(effective_floor(scan), int(record.get("floor") or 0))
+    marker = os.path.join(program_dir(repo_key, program), "compact-requested.json")
+    now = time.time()
+    requested = _load_json(marker)
+    if args.action == "followup":
+        owed, reason = followup_due(scan, requested, path, now)
+        if not owed:
+            return no(reason)
+        try:
+            _save_json(marker, {**requested, "followup": "sent", "followup_at": _now()})
+        except OSError:
+            pass
+        if args.explain:
+            print("followup: %s" % reason, file=sys.stderr)
+        print(compact_followup_prompt())
+        return 0
+    due, reason = compaction_due(scan, floor, requested, path, now)
+    if not due:
+        return no(reason)
+    try:
+        _save_json(marker, {"session": path, "context": scan["last"],
+                            "compactions": scan["compactions"],
+                            "followup": "pending",
+                            "at_epoch": now, "at": _now()})
+    except OSError:
+        pass
+    if args.explain:
+        print("due: %s" % reason, file=sys.stderr)
+    print("/compact " + compact_prompt())
+    return 0
+
+
 def cmd_compaction(args: argparse.Namespace) -> int:
     quiet = getattr(args, "format", "text") == "hook"
     if quiet and args.repo == ".":
         args.repo = _hook_cwd() or args.repo
     try:
         repo_key, _, _ = repo_identity(args.repo)
-        program = resolve_program(repo_key, args.program)
+        program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     except OrchError:
         if quiet:
             return 0
@@ -5739,6 +5944,7 @@ def cmd_compaction(args: argparse.Namespace) -> int:
             window = WINDOW_BLIND_DEFAULT
         if not window:
             return 3
+        window = backstop_window(window)
         print(window)
         if args.explain:
             print("role %r · floor %sK%s · window %dK (%s)"
@@ -5748,6 +5954,13 @@ def cmd_compaction(args: argparse.Namespace) -> int:
                      "measured" if floor and recorded_window else "blind"),
                   file=sys.stderr)
         return 0
+
+    if args.action == "prompt":
+        print(compact_prompt())
+        return 0
+
+    if args.action in ("due", "followup"):
+        return _compaction_due(args, repo_key, program)
 
     path = find_transcript(args)
     if not path:
@@ -5885,7 +6098,7 @@ def _checkpoint_values(values: Optional[List[str]]) -> List[str]:
 
 def cmd_checkpoint(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     agent = _agent_name(args.agent_id or args.agent)
     completed = (args.completed_step or "").strip()
     following = (args.next_step or "").strip()
@@ -6022,7 +6235,7 @@ def _successor_checklist(rotation: Dict[str, Any]) -> str:
 
 def cmd_rotate_begin(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     existing = load_rotation(repo_key, program)
     if existing.get("state") in ("pending", "claimed") and not args.force:
         raise OrchError(
@@ -6101,7 +6314,7 @@ def cmd_rotate_begin(args: argparse.Namespace) -> int:
 def cmd_recover(args: argparse.Namespace) -> int:
     """Create or adopt the one replacement obligation for a failed agent."""
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     agent = _agent_name(args.agent)
     checkpoint = load_checkpoint(repo_key, program, agent)
     generation = checkpoint.get("generation")
@@ -6194,7 +6407,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
 
 def cmd_rotate_claim(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     rotation = load_rotation(repo_key, program)
     if rotation.get("state") not in ("pending", "claimed"):
         raise OrchError(
@@ -6258,7 +6471,7 @@ def cmd_rotate_claim(args: argparse.Namespace) -> int:
 
 def cmd_rotate_complete(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     rotation = load_rotation(repo_key, program)
     if rotation.get("state") not in ("pending", "claimed"):
         print("no rotation in flight for %s" % program)
@@ -6298,7 +6511,7 @@ def cmd_rotate_complete(args: argparse.Namespace) -> int:
 
 def cmd_rotate_status(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     rotation = load_rotation(repo_key, program)
     if rotation.get("state") not in ("pending", "claimed"):
         print("no rotation in flight for %s" % program)
@@ -6318,7 +6531,7 @@ def cmd_rotate_status(args: argparse.Namespace) -> int:
 
 def cmd_rotate_abort(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program = resolve_program(repo_key, args.program)
+    program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     path = rotation_path(repo_key, program)
     if os.path.exists(path):
         os.unlink(path)
@@ -6601,7 +6814,7 @@ def cmd_wake(args: argparse.Namespace) -> int:
         args.repo = _hook_cwd() or args.repo
     try:
         repo_key, _, _ = repo_identity(args.repo)
-        program = resolve_program(repo_key, args.program)
+        program = resolve_program(repo_key, args.program, getattr(args, "repo", "."))
     except OrchError:
         if quiet:
             return 0
@@ -7029,19 +7242,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "compaction",
         help="measure this session's context floor and check the window")
-    sp.add_argument("action", choices=("measure", "check", "window"),
+    sp.add_argument("action", choices=("measure", "check", "window", "due", "followup", "prompt"),
                     help="measure: floor and recommended window · "
                          "check: SessionStart loop detector · "
-                         "window: the number this program should launch with")
+                         "window: the number this program should launch with · "
+                         "due: the /compact line to send now, or exit 3 · "
+                         "followup: the first-turn prompt after that compaction lands · "
+                         "prompt: the orchestrator compaction prompt")
+    sp.add_argument("--session-id",
+                    help="`due`, `followup`: the harness session id, to find its transcript")
     sp.add_argument("--transcript",
                     help="a harness transcript; defaults to this session's")
     sp.add_argument("--program")
     sp.add_argument("--format", default="text",
                     choices=("text", "json", "hook"))
     sp.add_argument("--any-role", action="store_true",
-                    help="`window`: answer even for a worker worktree")
+                    help="`window`, `due`, `followup`: answer even for a worker worktree")
     sp.add_argument("--explain", action="store_true",
-                    help="`window`: say on stderr why, for a plugin log")
+                    help="`window`, `due`: say on stderr why, for a plugin log")
     sp.set_defaults(func=cmd_compaction)
 
     sp = sub.add_parser(

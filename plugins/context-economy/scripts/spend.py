@@ -991,23 +991,33 @@ def cost_advisories(usage: Dict[str, Any], budget: Dict[str, Any]) -> List[str]:
 
 
 def _should_warn(start: str, usage: Dict[str, Any],
-                 advisories: List[str]) -> bool:
+                 advisories: List[str], session: str = "") -> bool:
     """Speak on a NEW condition, or when context has grown by half again.
 
     A hook that nags every turn gets switched off, and is then worth nothing at
     the moment it would have mattered.
+
+    "New" is judged per session, and a compaction starts the climb over. The
+    record lives per repo, so without both of those a successor inherited its
+    predecessor's 604K high-water mark and stayed silent until 906K -- and a
+    session that compacted never warned on its second climb at all.
     """
     path = os.path.join(state_dir(start), "warned.json")
     prior = _load_json(path)
     kinds = sorted({a.split()[0] for a in advisories})
-    last_context = int(prior.get("context") or 0)
     context = usage.get("context", 0)
-    fresh = kinds != prior.get("kinds")
+    if context >= CONTEXT_URGENT:
+        kinds.append("urgent")
+    same_session = prior.get("session", "") == session
+    last_context = int(prior.get("context") or 0) if same_session else 0
+    fresh = not same_session or kinds != prior.get("kinds")
     grown = last_context and context >= last_context * 1.5
-    if not (fresh or grown):
+    compacted = last_context and context < last_context
+    if not (fresh or grown or compacted):
         return False
     try:
-        _save_json(path, {"kinds": kinds, "context": context, "at": _now()})
+        _save_json(path, {"kinds": kinds, "context": context,
+                          "session": session, "at": _now()})
     except OSError:
         pass
     return True
@@ -1042,7 +1052,8 @@ def cmd_cost(args: argparse.Namespace) -> int:
         print(json.dumps({**usage, "advisories": advisories}, indent=2))
         return 0
     if quiet:
-        if not advisories or not _should_warn(args.repo, usage, advisories):
+        if not advisories or not _should_warn(args.repo, usage, advisories,
+                                              session=path):
             return 0
         emit("Stop", "\n".join(advisories))
         return 0

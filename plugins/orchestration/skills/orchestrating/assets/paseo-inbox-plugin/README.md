@@ -1,6 +1,6 @@
 # orch-inbox (optional Paseo plugin)
 
-Two things, both optional, sharing one `orch` resolution:
+Four things, all optional, sharing one `orch` resolution:
 
 1. **Inbox delivery** — delivers pending `orch` inbox items to an agent at the end of its turn, so a
    requester never has to send a prompt into a running agent's turn.
@@ -8,6 +8,11 @@ Two things, both optional, sharing one `orch` resolution:
    prints into a terminal status bar, and an agent panel with the roster behind it.
 3. **Replay recovery guard** — classifies Cursor's two known capacity failures, records a compact
    generation-aware notice through `orch`, and appends an actionable timeline row.
+4. **Turn-end compaction** — at a completed turn end with nothing to deliver, asks
+   `orch compaction due` and, if it prints a `/compact …` line, sends it; when that compaction's
+   own turn ends, sends `orch compaction followup`'s prompt so the agent starts on its "Do first"
+   list instead of sitting idle. Only long-lived roles, only while idle with no pending question. Policy and prompt live in `orch`; see the skill's
+   `references/cost.md` ("Compact at a turn end, on purpose").
 
 The second is the Paseo half of the status surface; the Claude Code half is the `statusLine` command
 in `references/statusline.md`. Both render the same JSON from the same collector.

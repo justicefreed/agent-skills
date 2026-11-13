@@ -1,6 +1,6 @@
 {
   "name": "orch-inbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Paseo plugin: orch inbox delivery at turn end, and the program status pill.",
   "scripts": {

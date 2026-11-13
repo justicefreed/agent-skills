@@ -677,6 +677,25 @@ for path in _tmp:
     except OSError:
         pass
 
+# --------------------------------------------------------------------------- #
+# The context advisory's dedupe is per session, and a compaction restarts it.
+# Measured: a successor inherited its predecessor's 604K mark and never warned
+# on its own climb to 642K; a compacted session never warned on its second.
+# --------------------------------------------------------------------------- #
+
+print("\nwarn dedupe")
+os.environ["SPEND_STATE_HOME"] = tempfile.mkdtemp()
+_repo = tempfile.mkdtemp()
+_adv = ["CONTEXT 300K · rising"]
+_w = lambda ctx, sess: spend._should_warn(_repo, {"context": ctx}, _adv, session=sess)
+check_same("first warning speaks", _w(300_000, "a"), True)
+check_same("the same level again stays quiet", _w(320_000, "a"), False)
+check_same("half again larger speaks", _w(460_000, "a"), True)
+check_same("a successor session speaks below its predecessor's mark", _w(260_000, "b"), True)
+check_same("after compacting, the next climb speaks", (_w(600_000, "b"), _w(255_000, "b")), (True, True))
+check_same("crossing into urgent speaks even under 1.5x", _w(410_000, "b"), True)
+del os.environ["SPEND_STATE_HOME"]
+
 print()
 if FAILURES:
     print("  %d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES)))
