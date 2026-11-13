@@ -209,7 +209,11 @@ orch compaction followup --explain  # after that compaction lands: its first-tur
 `due` answers only for a long-lived role, once context passes `ORCH_COMPACT_AT` (300K; never below
 the loop-safe window for the measured floor), not within `ORCH_LOOP_CALL_GAP` calls of the last
 compaction, and once per session per `ORCH_COMPACT_RETRY_S` (600s). `ORCH_COMPACT_AT=0` disables
-it. There is no checkpoint turn first: a turn end is already a seam, and the prompt makes the
+it. A lane's finish notification can interrupt the turn the `/compact` is running in; the transcript
+then carries a `Compaction canceled.` row, and `due` treats the request as cancelled rather than in
+flight: it retries after `ORCH_COMPACT_BACKOFF_S` (60s) doubling per attempt (60, 120, 240s), at most
+`ORCH_COMPACT_MAX_ATTEMPTS` (4) per `ORCH_COMPACT_ATTEMPT_WINDOW_S` (1800s). Past the cap `due`
+refuses until the window ends, and the cost hook says the compaction keeps being interrupted. There is no checkpoint turn first: a turn end is already a seam, and the prompt makes the
 summary carry a **Do first** list — unwritten rulings, unanswered questions, unconsumed lane
 reports, anything marked for a second look — which the resumed orchestrator works before anything
 else.

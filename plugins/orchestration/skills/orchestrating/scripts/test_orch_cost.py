@@ -309,6 +309,104 @@ else:
     os.environ["XDG_STATE_HOME"] = _saved_state
 
 # --------------------------------------------------------------------------- #
+# 6b. A `/compact` cancelled by a notification is retried on a backoff.
+# --------------------------------------------------------------------------- #
+
+print("\ncompaction cancelled")
+_B, _MAX, _WIN = (orch.COMPACT_BACKOFF_S, orch.COMPACT_MAX_ATTEMPTS,
+                  orch.COMPACT_ATTEMPT_WINDOW_S)
+_cscan = lambda cancels, compactions=0: {"last": 320_000, "calls": 200, "events": [],
+    "compactions": compactions, "cancels": cancels}
+_creq = lambda attempts, at=1000.0, **kw: {"session": "s1", "at_epoch": at, "context": 310_000,
+    "compactions": 0, "attempts": attempts, "first_epoch": 1000.0, **kw}
+_cdue = lambda scan, req, now: orch.compaction_due(scan, 30_000, req, "s1", now)
+_sc = _cscan([1012.0])
+check_same("a cancelled request is refused inside the first backoff",
+           _cdue(_sc, _creq(1), 1012.0 + _B - 1)[0], False)
+check_true("and the reason says cancelled and which retry",
+           "cancelled; retry 2/%d in" % _MAX in _cdue(_sc, _creq(1), 1020.0)[1])
+check_same("it is allowed once the backoff has passed",
+           _cdue(_sc, _creq(1), 1012.0 + _B)[0], True)
+check_same("a cancelled request is retried well inside COMPACT_RETRY_S",
+           _cdue(_sc, _creq(1), 1012.0 + _B)[0] and _B < orch.COMPACT_RETRY_S, True)
+check_same("the second backoff is double", (
+    _cdue(_sc, _creq(2), 1012.0 + 2 * _B - 1)[0], _cdue(_sc, _creq(2), 1012.0 + 2 * _B)[0]),
+    (False, True))
+check_same("the third is quadruple", (
+    _cdue(_sc, _creq(3), 1012.0 + 4 * _B - 1)[0], _cdue(_sc, _creq(3), 1012.0 + 4 * _B)[0]),
+    (False, True))
+check_same("the cap refuses even long after the backoff",
+           _cdue(_sc, _creq(_MAX), 1012.0 + 10 * _B)[0], False)
+check_true("with a reason that says so",
+           "cancelled %d times" % _MAX in _cdue(_sc, _creq(_MAX), 1100.0)[1])
+check_same("once the window has passed the series restarts",
+           _cdue(_sc, _creq(_MAX), 1000.0 + _WIN)[0], True)
+check_same("a landed compaction resets the attempts",
+           orch.compaction_attempts(_cscan([1012.0], compactions=1), _creq(3), "s1", 1100.0)[0], 0)
+check_same("and a boundary after the cancel means it is not cancelled",
+           orch.compaction_cancelled_at(_cscan([1012.0], compactions=1), _creq(1), "s1"), 0.0)
+check_same("another session's attempts do not count",
+           orch.compaction_attempts(_sc, _creq(3), "s0", 1100.0)[0], 0)
+check_same("a cancel row older than the request is not this request's",
+           _cdue(_cscan([900.0]), _creq(1), 1100.0)[0], False)
+check_true("so the old in-flight guard still speaks for it",
+           "already requested" in _cdue(_cscan([900.0]), _creq(1), 1100.0)[1])
+check_same("an in-flight request with no cancel row is allowed after COMPACT_RETRY_S",
+           _cdue(_cscan([]), _creq(1), 1000.0 + orch.COMPACT_RETRY_S)[0], True)
+check_same("a marker from before `attempts` counts as one",
+           orch.compaction_attempts(_sc, {k: v for k, v in _creq(1).items()
+                                          if k not in ("attempts", "first_epoch")},
+                                    "s1", 1100.0)[0], 1)
+check_same("exhaustion is reported only at the cap",
+           (orch.compaction_exhausted(_sc, _creq(_MAX - 1), "s1", 1100.0),
+            orch.compaction_exhausted(_sc, _creq(_MAX), "s1", 1100.0)), (0, _MAX))
+check_same("and not once its window has passed",
+           orch.compaction_exhausted(_sc, _creq(_MAX), "s1", 1000.0 + _WIN), 0)
+
+_saved_state = os.environ.get("XDG_STATE_HOME")
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+_repo = make_repo()
+_rk, _, _ = orch.repo_identity(_repo)
+_big = [call("r%d" % i, input_tokens=10, cache_read_input_tokens=1000 * i,
+             cache_creation_input_tokens=0, output_tokens=5) for i in range(1, 40)]
+_big.append(call("rlast", input_tokens=10, cache_read_input_tokens=320_000,
+                 cache_creation_input_tokens=0, output_tokens=5))
+_t = transcript(_big)
+code, out, err = run(_repo, "compaction", "due", "--any-role", "--transcript", _t)
+check_true("e2e: due prints the first time", code == 0 and out.startswith("/compact "))
+_stamp = lambda secs: (datetime.now(timezone.utc) + timedelta(seconds=secs)).isoformat()
+with open(_t, "a") as _fh:
+    _fh.write(json.dumps({"type": "system", "subtype": "local_command", "timestamp": _stamp(1),
+        "content": "<local-command-stdout>Compaction canceled.</local-command-stdout>"}) + "\n")
+code, out, err = run(_repo, "compaction", "due", "--any-role", "--explain", "--transcript", _t)
+check_true("e2e: refused inside the backoff, saying why",
+           code == 3 and "cancelled; retry 2/" in err)
+_mfiles = [os.path.join(d, f) for d, _, fs in os.walk(os.environ["XDG_STATE_HOME"])
+           for f in fs if f == "compact-requested.json"]
+check_same("e2e: one marker was written", len(_mfiles), 1)
+_m = json.load(open(_mfiles[0]))
+check_same("e2e: and it counts the attempt", _m["attempts"], 1)
+_m["at_epoch"] -= _B + 5
+_m["first_epoch"] -= _B + 5
+with open(_mfiles[0], "w") as _fh:
+    json.dump(_m, _fh)
+# The cancel row is stamped 1s after the real request; age the whole series so
+# the backoff has run out without sleeping.
+_rows = [json.loads(l) for l in open(_t)]
+for _r in _rows:
+    if _r.get("subtype") == "local_command":
+        _r["timestamp"] = _stamp(-(_B + 4))
+with open(_t, "w") as _fh:
+    _fh.write("".join(json.dumps(r) + "\n" for r in _rows))
+code, out, err = run(_repo, "compaction", "due", "--any-role", "--transcript", _t)
+check_true("e2e: printed again after the backoff", code == 0 and out.startswith("/compact "))
+check_same("e2e: attempt 2 recorded", json.load(open(_mfiles[0]))["attempts"], 2)
+if _saved_state is None:
+    del os.environ["XDG_STATE_HOME"]
+else:
+    os.environ["XDG_STATE_HOME"] = _saved_state
+
+# --------------------------------------------------------------------------- #
 # 7. The harness window is a backstop, above the turn-end threshold.
 # --------------------------------------------------------------------------- #
 

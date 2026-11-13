@@ -3937,6 +3937,9 @@ def cmd_cost(args: argparse.Namespace) -> int:
         desk = frontdesk_advisory(repo_key, program, usage, open_entries)
         if desk:
             advisories.append(desk)
+        spent = _compaction_exhausted_advisory(repo_key, program, path)
+        if spent:
+            advisories.append(spent)
 
     if args.format == "json":
         print(json.dumps({**usage, "advisories": advisories,
@@ -3986,6 +3989,26 @@ def cmd_cost(args: argparse.Namespace) -> int:
     if not advisories:
         print("\nno advisories: context and fan-out are within thresholds.")
     return 0
+
+
+def _compaction_exhausted_advisory(repo_key: str, program: str,
+                                   session: str) -> Optional[str]:
+    """The advisory for a turn-end compaction that notifications keep cancelling.
+
+    Reads the marker first: the transcript scan is only worth doing for a
+    session that has already used up its attempts.
+    """
+    requested = _load_json(os.path.join(program_dir(repo_key, program),
+                                        "compact-requested.json"))
+    if (requested.get("session") != session
+            or int(requested.get("attempts") or 0) < COMPACT_MAX_ATTEMPTS):
+        return None
+    scan = scan_compaction(session)
+    spent = compaction_exhausted(scan, requested, session, time.time()) if scan else 0
+    if not spent:
+        return None
+    return ("COMPACTION interrupted %d times by lane notifications; compact at "
+            "a quiet moment or let lanes finish." % spent)
 
 
 def _should_warn(repo_key: Optional[str], program: Optional[str],
@@ -5643,6 +5666,17 @@ COMPACT_AT = int(os.environ.get("ORCH_COMPACT_AT", 300_000) or 0)
 # on every turn end.
 COMPACT_RETRY_S = int(os.environ.get("ORCH_COMPACT_RETRY_S", 600))
 
+# A `/compact` interrupted by an incoming notification (a lane finishing) is
+# recorded in the transcript as a `local_command` row, and the compaction never
+# happens. That is not "possibly in flight", so it is retried on a short
+# exponential backoff -- BACKOFF * 2^(n-1) seconds after attempt n was cancelled
+# -- instead of waiting out COMPACT_RETRY_S. At most MAX_ATTEMPTS per WINDOW from
+# the first, so a notification storm cannot turn this into a retry loop.
+COMPACT_CANCELED = "Compaction canceled."
+COMPACT_BACKOFF_S = int(os.environ.get("ORCH_COMPACT_BACKOFF_S", 60))
+COMPACT_MAX_ATTEMPTS = int(os.environ.get("ORCH_COMPACT_MAX_ATTEMPTS", 4))
+COMPACT_ATTEMPT_WINDOW_S = int(os.environ.get("ORCH_COMPACT_ATTEMPT_WINDOW_S", 1800))
+
 # A compaction leaves the agent idle: unlike a rotation, nothing starts the next
 # turn, so the "Do first" list would wait for the human. The follow-up prompt is
 # that missing first turn. It is sent once, only after a compaction this tool
@@ -5716,6 +5750,59 @@ def transcript_for_session(session_id: str, cwd: str) -> Optional[str]:
     return None
 
 
+def _iso_epoch(stamp: Any) -> float:
+    """Epoch seconds of a transcript's ISO UTC timestamp, 0.0 if unreadable."""
+    try:
+        text = str(stamp)
+        when = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.timestamp()
+    except ValueError:
+        return 0.0
+
+
+def compaction_cancelled_at(scan: Dict[str, Any], requested: Dict[str, Any],
+                            session: str) -> float:
+    """When the request in the marker was cancelled, or 0.0. Pure.
+
+    Cancelled: a "Compaction canceled." row newer than the request, and no
+    compaction boundary since (the count `followup_due` compares).
+    """
+    if requested.get("session") != session:
+        return 0.0
+    if int(scan.get("compactions") or 0) > int(requested.get("compactions") or 0):
+        return 0.0
+    at = float(requested.get("at_epoch") or 0)
+    return max([c for c in scan.get("cancels") or [] if c > at] or [0.0])
+
+
+def compaction_attempts(scan: Dict[str, Any], requested: Dict[str, Any],
+                        session: str, now: float) -> Tuple[int, float]:
+    """(attempts so far, epoch of the first) in the current series. Pure.
+
+    A series ends when a compaction lands, the session changes, or the attempt
+    window has passed; a marker from before this field counts as one attempt.
+    """
+    if (requested.get("session") != session
+            or int(scan.get("compactions") or 0) > int(requested.get("compactions") or 0)):
+        return 0, now
+    at = float(requested.get("at_epoch") or 0)
+    first = float(requested.get("first_epoch") or at)
+    if now - first >= COMPACT_ATTEMPT_WINDOW_S:
+        return 0, now
+    return int(requested.get("attempts") or 1), first
+
+
+def compaction_exhausted(scan: Dict[str, Any], requested: Dict[str, Any],
+                         session: str, now: float) -> int:
+    """How many cancelled attempts used up the cap, or 0 if it is not spent. Pure."""
+    attempts, _ = compaction_attempts(scan, requested, session, now)
+    if attempts >= COMPACT_MAX_ATTEMPTS and compaction_cancelled_at(scan, requested, session):
+        return attempts
+    return 0
+
+
 def compaction_due(scan: Dict[str, Any], floor: int, requested: Dict[str, Any],
                    session: str, now: float) -> Tuple[bool, str]:
     """Whether to compact this session now, and why not if not. Pure."""
@@ -5729,6 +5816,18 @@ def compaction_due(scan: Dict[str, Any], floor: int, requested: Dict[str, Any],
     if events and scan.get("calls", 0) - events[-1]["at_call"] < LOOP_CALL_GAP:
         return False, ("last compaction was under %d calls ago; refusing a loop"
                        % LOOP_CALL_GAP)
+    cancelled = compaction_cancelled_at(scan, requested, session)
+    if cancelled:
+        attempts, first = compaction_attempts(scan, requested, session, now)
+        if attempts >= COMPACT_MAX_ATTEMPTS:
+            return False, ("cancelled %d times; no more attempts for %ds"
+                           % (attempts, int(first + COMPACT_ATTEMPT_WINDOW_S - now)))
+        wait = cancelled + COMPACT_BACKOFF_S * 2 ** (attempts - 1) - now
+        if attempts and wait > 0:
+            return False, ("cancelled; retry %d/%d in %ds"
+                           % (attempts + 1, COMPACT_MAX_ATTEMPTS, int(wait) + 1))
+        return True, ("context %dK is over %dK; previous request was cancelled"
+                      % (context // 1000, threshold // 1000))
     if (requested.get("session") == session
             and now - float(requested.get("at_epoch") or 0) < COMPACT_RETRY_S
             and context >= int(requested.get("context") or 0)):
@@ -5757,6 +5856,7 @@ def scan_compaction(path: str) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     pending = False
     peak = 0
+    cancels: List[float] = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -5765,6 +5865,13 @@ def scan_compaction(path: str) -> Dict[str, Any]:
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    continue
+                if (row.get("type") == "system"
+                        and row.get("subtype") == "local_command"
+                        and COMPACT_CANCELED in str(row.get("content") or "")):
+                    epoch = _iso_epoch(row.get("timestamp"))
+                    if epoch:
+                        cancels.append(epoch)
                     continue
                 if (row.get("isCompactSummary")
                         or row.get("subtype") == "compact_boundary"):
@@ -5819,6 +5926,9 @@ def scan_compaction(path: str) -> Dict[str, Any]:
                                or [0]),
         "events": events,
         "compactions": len(events),
+        # When the harness said "Compaction canceled." (epoch seconds): a
+        # notification that interrupted the turn the `/compact` was running in.
+        "cancels": cancels,
         # The context carried by the most recent call: what the session holds now.
         "last": prev,
     }
@@ -5931,9 +6041,11 @@ def _compaction_due(args: argparse.Namespace, repo_key: Optional[str],
     if not due:
         return no(reason)
     try:
+        attempts, first = compaction_attempts(scan, requested, path, now)
         _save_json(marker, {"session": path, "context": scan["last"],
                             "compactions": scan["compactions"],
                             "followup": "pending",
+                            "attempts": attempts + 1, "first_epoch": first,
                             "at_epoch": now, "at": _now()})
     except OSError:
         pass
