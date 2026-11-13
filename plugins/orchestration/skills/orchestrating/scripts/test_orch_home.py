@@ -281,8 +281,37 @@ def case_b_refusals():
                os.path.isfile(marker(cw)))
 
 
+def case_c_unclaimed_drain_is_quiet():
+    """Several programs + no claim + `--to <agent-id>`: an empty inbox, not an error."""
+    p = make_repo()
+    for prog in ("alpha", "beta"):
+        code, _, err = run(p, "open", "--program", prog, "--brief",
+                           write_brief(p, p, "%s.md" % prog, prog))
+        fresh()
+        check_same("C setup: program %s exists" % prog, code, 0)
+    cw = linked_worktree(p, "unclaimed")
+    for verb in ("drain", "peek"):
+        code, out, err = run(cw, "inbox", verb, "--to", "agent-uuid-1",
+                             *(["--format", "text"] if verb == "drain" else ["--quiet"]))
+        check_true("C: unclaimed `inbox %s --to` is exit 0/3 with no output" % verb,
+                   code in (0, 3) and out == "" and err == "")
+    code, out, err = run(cw, "inbox", "drain", "--to", "agent-uuid-1", "--format", "text")
+    check_same("C: unclaimed drain exits 0", code, 0)
+    code, out, err = run(cw, "inbox", "list", "--to", "agent-uuid-1")
+    check_true("C: resolve_program still refuses for other commands (no weakening)",
+               code != 0 and "several programs" in err)
+    # A claimed worktree still drains.
+    code, _, err = run(cw, "inbox", "claim", "--program", "beta", "--as", "w9")
+    check_same("C setup: the worktree claims w9 in beta", code, 0)
+    run(p, "inbox", "send", "--program", "beta", "--to", "w9", "--body", "claimed ping")
+    code, out, err = run(cw, "inbox", "drain", "--to", "w9", "--format", "text")
+    check_true("C: a claimed worktree still drains its inbox",
+               code == 0 and "claimed ping" in out)
+
+
 for fn in (case_a_rollback_compat, case_b_marker_delivery_whoami_resume_close,
-           case_b_env_override, case_b_refusals):
+           case_b_env_override, case_b_refusals,
+           case_c_unclaimed_drain_is_quiet):
     case(fn)
 
 print("\n%s" % ("all home cases pass" if not FAILURES

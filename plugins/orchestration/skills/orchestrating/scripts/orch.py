@@ -2934,6 +2934,24 @@ def resolve_target(args: argparse.Namespace, repo_key: str
     return None, None
 
 
+def resolve_target_quietly(args: argparse.Namespace, repo_key: str
+                           ) -> Tuple[Optional[str], Optional[str]]:
+    """`resolve_target`, except an unresolvable `--to` with no claim is "no inbox".
+
+    The turn-end hook drains `--to <agent-id>` for every agent. In a repo with
+    several programs and an agent that never claimed an inbox, `resolve_program`
+    refuses to guess -- correctly, for every command that would write. For a
+    read of an inbox nobody addresses, the refusal is only noise, and it fires
+    on every turn. `resolve_program` itself is left alone.
+    """
+    try:
+        return resolve_target(args, repo_key)
+    except OrchError:
+        if getattr(args, "to", None) and not _claimed_program(repo_key, args.repo):
+            return None, None
+        raise
+
+
 def _read_pending(log: str, cursor: str) -> Tuple[List[Dict[str, Any]], int]:
     """Return (undelivered items, total line count)."""
     try:
@@ -3134,7 +3152,7 @@ def cmd_inbox_send(args: argparse.Namespace) -> int:
 
 def cmd_inbox_peek(args: argparse.Namespace) -> int:
     repo_key, _, _ = repo_identity(args.repo)
-    program, target = resolve_target(args, repo_key)
+    program, target = resolve_target_quietly(args, repo_key)
     if not target:
         if not args.quiet:
             print("no inbox claimed for this worktree")
@@ -3167,7 +3185,7 @@ def cmd_inbox_drain(args: argparse.Namespace) -> int:
         args.repo = _hook_cwd() or args.repo
     try:
         repo_key, _, _ = repo_identity(args.repo)
-        program, target = resolve_target(args, repo_key)
+        program, target = resolve_target_quietly(args, repo_key)
     except OrchError:
         # A hook fires everywhere, including outside a repo and in sessions
         # that never orchestrated anything. Refusing loudly there would train
