@@ -768,14 +768,37 @@ def _scalar(value: str) -> str:
 TRACK_TIMEOUT_S = int(os.environ.get("ORCH_TRACK_TIMEOUT", 30))
 
 
-def run_track(args: List[str], root: str) -> Tuple[bool, Dict[str, Any]]:
-    """`track <args> --json --cwd <root>` -> (ok, parsed JSON).
+def track_argv(sub: str, positionals: List[str], flags: List[str],
+               root: str) -> List[str]:
+    """argv for `track`: every flag first, then a literal `--`, then positionals.
 
-    On failure the parsed JSON is track's own error object (`error` code and
-    `message`), or a synthesised one when it printed nothing parseable.
+    Track ids and `--expect` labels come from brief files an agent wrote. track
+    reads any argument starting `--` as a flag and lets a later flag overwrite
+    an earlier one, so an id such as `--allow-complete` would be taken as one.
+    A bare `--` ends track's flag parsing; putting every flag of ours before it
+    and every untrusted value after it means no value can be read as a flag.
     """
+    return (["track", sub, "--json", "--cwd", root] + flags
+            + ["--"] + positionals)
+
+
+def run_track(sub: str, positionals: List[str], root: str,
+              flags: Optional[List[str]] = None) -> Tuple[bool, Dict[str, Any]]:
+    """`track <sub> --json --cwd <root> <flags> -- <positionals>` -> (ok, JSON).
+
+    `flags` are ours (a flag and its value are separate elements); `positionals`
+    are untrusted ids. On failure the parsed JSON is track's own error object
+    (`error` code and `message`), or a synthesised one when it printed nothing
+    parseable.
+    """
+    for value in positionals + [flags[i + 1] for i, f in enumerate(flags or [])
+                                if f == "--expect" and i + 1 < len(flags)]:
+        if value.startswith("-"):
+            raise OrchError("refusing to pass %r to track: ids and labels must "
+                            "not start with `-`." % value)
+    args = [sub] + positionals
     try:
-        out = subprocess.run(["track"] + args + ["--json", "--cwd", root],
+        out = subprocess.run(track_argv(sub, positionals, flags or [], root),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              timeout=TRACK_TIMEOUT_S)
     except FileNotFoundError:
@@ -822,7 +845,7 @@ def expect_task_state(item: Dict[str, Any], expect: str) -> Optional[str]:
 def check_track_targets(advances: Any, root: str, path: str) -> None:
     """Refuse a brief whose agent-track target cannot be advanced by this lane."""
     for target in track_targets(advances):
-        ok, item = run_track(["show", target["track"]], root)
+        ok, item = run_track("show", [target["track"]], root)
         if not ok:
             raise OrchError("brief %s: track item %s: %s %s"
                             % (path, target["track"], item.get("error"),
@@ -904,6 +927,10 @@ def validate_brief(fields: Dict[str, Any], path: str) -> None:
                         "brief %s: advances item %r needs a real `%s`. `expect` is "
                         "the exact label of the track task this lane completes."
                         % (path, item, key))
+                if str(item[key]).startswith("-"):
+                    raise OrchError(
+                        "brief %s: advances item %r: `%s` must not start with `-`; "
+                        "track would read it as a flag." % (path, item, key))
 
     if "review" in fields:
         mode = str(fields["review"]).strip()
@@ -1937,7 +1964,7 @@ def apply_track_target(target: Dict[str, str], root: str, notify: bool,
         rec.update(state="failed", code=code, detail=detail, repair=repair)
         return rec
 
-    ok, item = run_track(["show", tid], root)
+    ok, item = run_track("show", [tid], root)
     if not ok:
         return failed(str(item.get("error")), str(item.get("message") or ""))
     state = expect_task_state(item, expect)
@@ -1949,12 +1976,12 @@ def apply_track_target(target: Dict[str, str], root: str, notify: bool,
     if state != "current":
         return failed("NOT_CURRENT", "current task is %s"
                       % json.dumps((item.get("currentTask") or {}).get("label")))
-    ok, res = run_track(["advance", tid, "--expect", expect]
-                        + (["--notify"] if notify else []), root)
+    ok, res = run_track("advance", [tid], root,
+                        ["--expect", expect] + (["--notify"] if notify else []))
     if not ok:
         return failed(str(res.get("error")), str(res.get("message") or ""))
     rec["state"] = "applied"
-    ok, after = run_track(["show", tid], root)
+    ok, after = run_track("show", [tid], root)
     if ok:
         rec["next"] = (after.get("currentTask") or {}).get("label")
         rec["blocked_by"] = after.get("blockedBy") or []
@@ -2325,7 +2352,7 @@ def audit_findings(repo_key: str, program: str, root: str, track: bool = True,
             if targets:
                 for target in targets:
                     try:
-                        ok, item = run_track(["show", target["track"]], root)
+                        ok, item = run_track("show", [target["track"]], root)
                     except OrchError:
                         break               # no `track`: nothing to compare against
                     if ok and expect_task_state(item, target.get("expect")) == "done":

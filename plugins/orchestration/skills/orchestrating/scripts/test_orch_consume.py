@@ -563,6 +563,45 @@ def case_f_target_moved():
                code == 1 and "target-moved" in text)
 
 
+def case_g_track_argv_injection():
+    base = {f: "x" for f in orch.REQUIRED_BRIEF_FIELDS}
+    base.update(expected_artifacts=["a.md"])
+    for key, adv in (("track", {"track": "--allow-complete", "expect": "Approve design"}),
+                     ("expect", {"track": "T-015", "expect": "--reassign-gate"})):
+        try:
+            orch.validate_brief(dict(base, advances=[adv]), "b.md")
+            refused = None
+        except orch.OrchError as exc:
+            refused = str(exc)
+        check_true("G: a flag-shaped %s is refused by validate_brief" % key,
+                   refused and "must not start with `-`" in refused)
+    try:
+        orch.run_track("show", ["--allow-complete"], ".")
+        refused = False
+    except orch.OrchError:
+        refused = True
+    check_true("G: run_track itself refuses a flag-shaped positional", refused)
+
+    sc = Scenario(open_lane=False)
+    calls = sc.fixture + ".calls"
+    os.environ["FAKE_TRACK_CALLS"] = calls
+    try:
+        ok, item = orch.run_track("show", ["T-015"], sc.p)
+        ok2, res = orch.run_track("advance", ["T-015"], sc.p,
+                                  ["--expect", "Implement retry policy", "--notify"])
+    finally:
+        del os.environ["FAKE_TRACK_CALLS"]
+    check_true("G: a show still works through the new argv", ok and item.get("id") == "T-015")
+    check_true("G: an advance still works through the new argv", ok2)
+    with open(calls, "r", encoding="utf-8") as fh:
+        argvs = [ln[len("call "):] for ln in fh.read().splitlines()]
+    check_same("G: argv is sub, flags, then `--`, then the id", argvs, [
+        "show --json --cwd %s -- T-015" % sc.p,
+        "advance --json --cwd %s --expect Implement retry policy --notify -- T-015" % sc.p])
+    check_true("G: nothing follows the `--` but the id",
+               all(a.endswith(" -- T-015") for a in argvs))
+
+
 for fn in (case_c_open_accepts_valid_mapping, case_c_refusals,
            case_c_target_not_yet_current_allowed, case_c_real_track,
            case_d_happy_path, case_d_notify_default_on, case_d_evidence_on_ref,
@@ -572,7 +611,8 @@ for fn in (case_c_open_accepts_valid_mapping, case_c_refusals,
            case_d_idempotent_already, case_d_skip_target, case_d_legacy_plan_target,
            case_f_clean, case_f_checkpoint_missing, case_f_checkpoint_stale,
            case_f_checkpoint_incomplete, case_f_harvested_unfinished, case_f_exception,
-           case_f_home_unbound, case_f_target_moved):
+           case_f_home_unbound, case_f_target_moved,
+           case_g_track_argv_injection):
     case(fn)
 
 print("\n%s" % ("all consume cases pass" if not FAILURES

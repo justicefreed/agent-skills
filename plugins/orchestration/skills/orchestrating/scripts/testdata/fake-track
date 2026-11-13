@@ -14,7 +14,7 @@ import os
 import sys
 
 argv = sys.argv[1:]
-as_json = "--json" in argv
+as_json = "--json" in (argv[:argv.index("--")] if "--" in argv else argv)
 fixture = os.environ["FAKE_TRACK_FIXTURE"]
 log = os.environ.get("FAKE_TRACK_LOG")
 
@@ -27,15 +27,22 @@ def fail(code, message):
     sys.exit(1)
 
 
+_flag_argv = argv[:argv.index("--")] if "--" in argv else argv
+
+
 def flag(name):
-    return argv[argv.index(name) + 1] if name in argv else None
+    return _flag_argv[_flag_argv.index(name) + 1] if name in _flag_argv else None
 
 
 def positional():
-    skip, out = False, []
+    skip, out, ended = False, [], False
     for a in argv[1:]:
-        if skip:
+        if ended:
+            out.append(a)       # after a bare `--` everything is positional
+        elif skip:
             skip = False
+        elif a == "--":
+            ended = True
         elif a in ("--cwd", "--expect"):
             skip = True
         elif not a.startswith("--"):
