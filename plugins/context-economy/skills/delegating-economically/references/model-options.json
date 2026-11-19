@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "updated": "2026-10-08",
+  "updated": "2026-11-19",
   "preferences": {
     "minimal": [
       "claude-haiku-5-5",
@@ -144,10 +144,9 @@
       "provider": "anthropic",
       "family": "claude-haiku",
       "lineage": "claude",
-      "rungs": [
-        "minimal"
-      ],
-      "use": "minimal tier, superseded: Haiku 5.5 costs less at every prompt length; kept for providers whose `haiku` still resolves here"
+      "rungs": [],
+      "superseded_by": "claude-haiku-5-5",
+      "use": "superseded: Haiku 5.5 costs less at every prompt length; reached only on an explicit request naming it"
     },
     {
       "id": "gemini-3.8-flash",
@@ -174,10 +173,9 @@
       "provider": "anthropic",
       "family": "claude-sonnet",
       "lineage": "claude",
-      "rungs": [
-        "economy"
-      ],
-      "use": "economy tier: everyday analysis and implementation with a bounded scope"
+      "rungs": [],
+      "superseded_by": "claude-sonnet-5-5",
+      "use": "superseded: Sonnet 5.5 costs less at every rate; reached only on an explicit request naming it"
     },
     {
       "id": "claude-sonnet-5",
@@ -190,10 +188,9 @@
         "default": "medium",
         "above-default": "high"
       },
-      "rungs": [
-        "economy"
-      ],
-      "use": "economy tier: everyday analysis and implementation with a bounded scope; economy policy explicitly selects medium thinking rather than the provider's high default"
+      "rungs": [],
+      "superseded_by": "claude-sonnet-5-5",
+      "use": "superseded: Sonnet 5.5 bills the same input and output with cache reads at half the price; the effort map stays so a lane already on it keeps medium thinking rather than the provider's high default"
     },
     {
       "id": "claude-sonnet-5-5",
@@ -257,20 +254,18 @@
       "provider": "anthropic",
       "family": "claude-opus",
       "lineage": "claude",
-      "rungs": [
-        "advanced"
-      ],
-      "use": "advanced tier: complex, interconnected coding or reasoning work"
+      "rungs": [],
+      "superseded_by": "claude-opus-5-5",
+      "use": "superseded: Opus 5.5 costs less at every rate; reached only on an explicit request naming it"
     },
     {
       "id": "claude-opus-5",
       "provider": "anthropic",
       "family": "claude-opus",
       "lineage": "claude",
-      "rungs": [
-        "advanced"
-      ],
-      "use": "advanced tier: complex, interconnected coding or reasoning work"
+      "rungs": [],
+      "superseded_by": "claude-opus-5-5",
+      "use": "superseded: Opus 5.5 costs less at every rate; reached only on an explicit request naming it"
     },
     {
       "id": "claude-opus-5-5",
@@ -284,12 +279,21 @@
       "use": "advanced tier for complex, interconnected work; designated frontier model after a demonstrated capability limit"
     },
     {
-      "id": "claude-fable-5-1",
+      "id": "claude-fable-5-2",
       "provider": "anthropic",
       "family": "claude-fable",
       "lineage": "claude",
       "rungs": [],
       "use": "off the ladder: no rung selects it, so it is reached only on an explicit human request naming it"
+    },
+    {
+      "id": "claude-fable-5-1",
+      "provider": "anthropic",
+      "family": "claude-fable",
+      "lineage": "claude",
+      "rungs": [],
+      "superseded_by": "claude-fable-5-2",
+      "use": "superseded: Fable 5.2 costs less at every rate; reached only on an explicit request naming it"
     }
   ]
 }

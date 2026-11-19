@@ -112,8 +112,8 @@ being tested against — is in `rungs.md` and `cost.md`. What orchestration adds
   option map, `open` resolves and the spawn guard requires its concrete `thinkingOptionId`. For
   example, Sonnet 5.5 economy work resolves to `medium` (`default`), a verifier to `low`, a Haiku 5.5
   front desk to `low`, and `high` only through a justified above-default escalation — multi-file changes,
-  analytical documents, reports. Sonnet 5 keeps the same policy by mapping `default` to `medium`
-  rather than its provider's `high` default.
+  analytical documents, reports. The map's `default` is `medium` even though Sonnet 5.5's provider
+  default is `high`.
 
 If you find yourself wanting `advanced`, the frontier model, or an above-default effort dial as a
 *starting point*, that is a signal the **brief** is underspecified — fixing the brief is cheaper and

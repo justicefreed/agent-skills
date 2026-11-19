@@ -699,6 +699,24 @@ def validate_options(options: Dict[str, Any], registry: Registry) -> None:
             if rung not in OPTION_RUNGS:
                 raise PricingError("model option %r has unknown rung %r" % (model_id, rung))
     tagged = {row["id"]: set(row.get("rungs", [])) for row in models}
+    by_id = {row["id"]: row for row in models}
+    for row in models:
+        successor = row.get("superseded_by")
+        if successor is None:
+            continue
+        if tagged[row["id"]]:
+            raise PricingError("model option %r is superseded but still tagged %s; a "
+                               "superseded model is on no rung"
+                               % (row["id"], ", ".join(sorted(tagged[row["id"]]))))
+        if successor not in by_id:
+            raise PricingError("model option %r is superseded by %r, which is not a model option"
+                               % (row["id"], successor))
+        if by_id[successor].get("family") != row.get("family"):
+            raise PricingError("model option %r is superseded by %r, which is another family"
+                               % (row["id"], successor))
+        if by_id[successor].get("superseded_by"):
+            raise PricingError("model option %r is superseded by %r, which is itself superseded"
+                               % (row["id"], successor))
     for rung, preferred in (options.get("preferences") or {}).items():
         for model_id in preferred:
             if model_id not in model_ids:
