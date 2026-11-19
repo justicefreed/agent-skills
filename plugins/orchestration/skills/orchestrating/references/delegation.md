@@ -162,6 +162,10 @@ high and nothing looked wrong. So `orch open`:
   labels to spawn with. For a `reviewer` it first excludes the author's whole lineage — from
   `author_family:`, or from what the `reviews:` entry actually spawned — unless `--same-family-ok
   "<why>"` puts the exception on record;
+- **removes locally unavailable Claude candidates** before recording the resolution. It reads only
+  Claude Code's local settings and Paseo's local Claude provider configuration; no sibling
+  repository is required. A warning names every dropped candidate. Other providers are untouched.
+  If every candidate is removed, `open` refuses because it cannot produce a spawnable lane;
 - **prints the roster's flags for the new entry at once**, rather than waiting for someone to run
   `roster`.
 
@@ -195,6 +199,11 @@ sixth round that is mostly the first five.
 
 Never write a model name into a brief: it is wrong the next time the provider ships, and `orch`
 rejects it. The names live in the catalogue, dated, and `open` reads them there.
+
+Run `orch models check` after changing either a Claude policy or the catalogue. It reports
+recommended Claude IDs that local policy disallows, and configured allowed Claude IDs missing from
+the catalogue; a disallowed recommendation exits nonzero for CI or a release check. With no local
+policy files, every Claude ID is considered allowed.
 
 **Mode alone is not enough.** A brief lives outside the worker's worktree, and so does the skill's
 own `references/` corpus; in Claude Code a read outside the working directory prompts under *every*

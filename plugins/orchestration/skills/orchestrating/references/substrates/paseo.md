@@ -7,6 +7,14 @@ not restate it here; a duplicated tool table goes stale the first time the API m
 This file holds only the **delta**: verb mapping, semantics the vendor skill does not state, and
 orchestration policy.
 
+## Claude model availability
+
+When `orch open` resolves a Claude candidate, it respects the machine's Claude Code
+`availableModels`/managed `deniedModels` policy and this provider's static `models` list when
+present (plus `additionalModels`). It does not apply either list to Cursor, Codex, or another
+provider. `orch models check` reports policy/catalogue drift before dispatch; missing local config
+is unrestricted.
+
 ## Verb map
 
 | Verb | Call | Semantics | Evidence |

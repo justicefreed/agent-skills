@@ -36,6 +36,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import model_availability
+
 SCHEMA_VERSION = 1
 
 # Fields a brief's front matter must supply. These are the fields that make an
@@ -1355,12 +1357,19 @@ def cmd_open(args: argparse.Namespace) -> int:
                 "--author-family. If no other lineage is reachable, say so: "
                 "--same-family-ok \"<why>\"." % archetype)
         exclude = lineages_for(lineage_of_model(author) or author)
-    resolved = rung_models(model, exclude)
+    availability = availability_for(args.repo)
+    dropped_models = availability_warning(model, exclude, availability)
+    resolved = rung_models(model, exclude, availability)
+    if dropped_models:
+        print("warning: %s rung excludes unavailable Claude candidates: %s"
+              % (model, ", ".join(dropped_models)), file=sys.stderr)
     if not resolved:
         raise OrchError(
-            "the catalogue has no %s models outside lineage %s. Pass "
-            "--same-family-ok \"<why>\" to review within it, on the record."
-            % (model, ", ".join(exclude)))
+            "the %s rung has no usable candidate after lineage and local "
+            "Claude availability policy. %s"
+            % (model, ("Pass --same-family-ok \"<why>\" to review within it, "
+                       "on the record." if exclude else
+                       "Update local Claude/Paseo policy or choose another rung.")))
     thinking_options = resolved_thinking_options(resolved, effort)
 
     if args.program:
@@ -1609,7 +1618,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         entry["model"] = rung
         if entry.get("resolved_models") is not None:
             entry["resolved_models"] = [
-                row["model"] for row in rung_models(rung, entry.get("exclude_lineages"))]
+                row["model"] for row in rung_models(
+                    rung, entry.get("exclude_lineages"), availability_for(args.repo))]
             entry["resolved_thinking_options"] = resolved_thinking_options(
                 [{"model": model_id} for model_id in entry["resolved_models"]],
                 str(entry.get("effort") or "default"))
@@ -3432,7 +3442,8 @@ def effort_index(effort: Any) -> int:
         return -1
 
 
-def rung_models(rung: str, exclude: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+def rung_models(rung: str, exclude: Optional[List[str]] = None,
+                availability: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """The catalogue's models for a rung, preferred first, minus excluded lineages."""
     spend = _spend_module()
     options = catalogue()
@@ -3440,8 +3451,24 @@ def rung_models(rung: str, exclude: Optional[List[str]] = None) -> List[Dict[str
     rows = [row for row in options["models"]
             if rung in row.get("rungs", []) and spend.lineage_of(row) not in excluded]
     rows.sort(key=lambda row: spend._preference_rank(options, rung, row["id"]))
-    return [{"model": row["id"], "provider": row.get("provider"),
-             "lineage": spend.lineage_of(row)} for row in rows]
+    resolved = [{"model": row["id"], "provider": row.get("provider"),
+                 "lineage": spend.lineage_of(row)} for row in rows]
+    if availability is not None:
+        resolved, _ = model_availability.filter_rows(resolved, availability)
+    return resolved
+
+
+def availability_for(repo: Optional[str]) -> Dict[str, Any]:
+    """Read optional local policy; absence deliberately means no restriction."""
+    return model_availability.policy(repo)
+
+
+def availability_warning(rung: str, exclude: List[str],
+                         availability: Dict[str, Any]) -> List[str]:
+    """Human-readable dropped Claude candidates for `open` and escalation."""
+    all_rows = rung_models(rung, exclude)
+    _, dropped = model_availability.filter_rows(all_rows, availability)
+    return ["%s (%s)" % (row["model"], reason) for row, reason in dropped]
 
 
 def model_effort_option(model_id: str, effort: str) -> Optional[str]:
@@ -4197,7 +4224,8 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         entry["model"] = target
         if entry.get("resolved_models") is not None:
             entry["resolved_models"] = [
-                row["model"] for row in rung_models(target, entry.get("exclude_lineages"))]
+                row["model"] for row in rung_models(
+                    target, entry.get("exclude_lineages"), availability_for(args.repo))]
         changes.append("%s -> %s" % (current, target))
     if effort is not None:
         entry["effort"] = effort
@@ -4520,6 +4548,35 @@ def cmd_model_check(args: argparse.Namespace) -> int:
     else:
         print("model        %s is current in the catalogue" % found[0])
     return 0
+
+
+def cmd_models_check(args: argparse.Namespace) -> int:
+    """Report local Claude policy drift without requiring any sibling checkout."""
+    current = availability_for(args.repo)
+    options = catalogue()
+    recommended = []
+    for rung, ids in options.get("preferences", {}).items():
+        for model_id in ids:
+            row = next((row for row in options["models"] if row["id"] == model_id), {})
+            if row.get("provider") == "anthropic":
+                ok, reason = model_availability.allowed(model_id, current)
+                if not ok:
+                    recommended.append((rung, model_id, reason))
+    catalogue_ids = {row["id"] for row in options["models"]}
+    configured = (current["available"] or []) + (current["paseo"] or [])
+    unknown = sorted({model_id for model_id in configured
+                      if model_id.startswith("claude-") and model_id not in catalogue_ids})
+    if recommended:
+        for rung, model_id, reason in recommended:
+            print("disallowed recommendation: %s %s (%s)" % (rung, model_id, reason))
+    else:
+        print("all recommended Claude models are allowed")
+    if unknown:
+        for model_id in unknown:
+            print("allowed model absent from catalogue: %s" % model_id)
+    else:
+        print("all configured Claude model IDs have catalogue rows")
+    return 1 if recommended else 0
 
 
 def _frontdesk_marker(repo_key: str, program: str) -> str:
@@ -7431,6 +7488,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a harness transcript; defaults to this session's")
     mp.add_argument("--format", default="text", choices=("text", "hook"))
     mp.set_defaults(func=cmd_model_check)
+
+    sp = sub.add_parser(
+        "models", help="compare catalogue recommendations with local Claude policy")
+    msub = sp.add_subparsers(dest="models_action", required=True)
+    mp = msub.add_parser(
+        "check", help="list disallowed recommended and unknown allowed Claude IDs")
+    common(mp)
+    mp.set_defaults(func=cmd_models_check)
 
     sp = sub.add_parser(
         "rotate",
