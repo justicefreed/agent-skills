@@ -215,6 +215,25 @@ options_rejects("archetype with an absolute effort is rejected",
                 lambda o: o.update(archetypes={"verifier": {"rung": "economy",
                                                             "effort": "medium"}}),
                 "must be relative")
+# A superseded model is reached only by name: the selector never offers it,
+# and `orch model check` points a session on it at the named successor.
+def _supersede(o, successor="target", families=("f", "f")):
+    o["models"][0]["family"], o["models"][1]["family"] = families
+    o["models"][1].update(rungs=[], superseded_by=successor)
+
+
+options_rejects("superseded model still tagged with a rung is rejected",
+                lambda o: (_supersede(o), o["models"][1].update(rungs=["economy"])),
+                "still tagged economy")
+options_rejects("superseded_by naming no model option is rejected",
+                lambda o: _supersede(o, successor="ghost"),
+                "not a model option")
+options_rejects("superseded_by naming another family is rejected",
+                lambda o: _supersede(o, families=("f", "g")),
+                "another family")
+options_rejects("superseded_by naming a superseded model is rejected",
+                lambda o: (_supersede(o), o["models"][0].update(rungs=[], superseded_by="source")),
+                "itself superseded")
 
 # Input translation: canonical ids pass through, names and aliases translate
 # with the table date, anything else is an error rather than a guess.
@@ -247,6 +266,17 @@ _, shipped, _ = pricing.load_snapshot()
 shipped_options = pricing.load_json(pricing.default_options_path())
 pricing.validate_options(shipped_options, pricing.Registry(shipped))
 check("shipped options validate against the shipped registry", True, True)
+_claude_ladder = {}
+for _row in shipped_options["models"]:
+    if _row["provider"] == "anthropic" and _row.get("rungs"):
+        _claude_ladder.setdefault(_row["family"], []).append(_row["id"])
+check("shipped map puts only the newest Claude model of each family on the ladder",
+      {family: len(ids) for family, ids in _claude_ladder.items() if len(ids) > 1}, {})
+check("every off-ladder Claude model but the newest Fable names its successor",
+      sorted(row["id"] for row in shipped_options["models"]
+             if row["provider"] == "anthropic" and not row.get("rungs")
+             and not row.get("superseded_by")),
+      ["claude-fable-5-2"])
 check("shipped map has no rung whose cheaper model costs more",
       pricing.rung_order_warnings(shipped_options, shipped), [])
 _order_options = {"preferences": {"economy": ["cheap"], "advanced": ["dear"]},
@@ -378,7 +408,7 @@ check("claude-code models all carry a spawn field",
 check("claude-code haiku spawns via its alias even beside its own agent definition",
       next((row["spawn"] for row in _cc_models["models"]
             if row["model"] == "claude-haiku-5-5"), None),
-      {"kind": "alias", "value": "haiku", "alias_table": "2026-10-08", "route": "anthropic"})
+      {"kind": "alias", "value": "haiku", "alias_table": "2026-11-19", "route": "anthropic"})
 
 codex_fd, codex_catalog_path = tempfile.mkstemp(suffix=".json")
 with os.fdopen(codex_fd, "w") as fh:
@@ -478,7 +508,7 @@ check("an ocx-cursor model with NO agent definition is not reachable",
 check("case 1: an undrifted alias wins over an agent definition named for the id",
            pricing.spawn_field("claude-opus-5-5", "claude-opus", "claude-code",
                                _shipped_registry, _agent_index)["spawn"],
-           {"kind": "alias", "value": "opus", "alias_table": "2026-10-08", "route": "anthropic"})
+           {"kind": "alias", "value": "opus", "alias_table": "2026-11-19", "route": "anthropic"})
 
 # Ruling (a)'s falsification: `claude-sonnet-5` prices on `anthropic`. Its
 # only agent definition here (`ocx-claude-sonnet-5`) is on `ocx-cursor` -- a
@@ -508,7 +538,7 @@ check("ruling (a): the `via` alternative carries its own route's price",
 check("case 3: an undrifted alias, on the model's native route",
            pricing.spawn_field("claude-haiku-5-5", "claude-haiku", "claude-code",
                                _shipped_registry, {})["spawn"],
-           {"kind": "alias", "value": "haiku", "alias_table": "2026-10-08", "route": "anthropic"})
+           {"kind": "alias", "value": "haiku", "alias_table": "2026-11-19", "route": "anthropic"})
 # The shipped alias table's `opus` points at the current `claude-opus-5-5`,
 # so for last generation's `claude-opus-4-8` the alias has drifted. A spawn
 # field must refuse that alias, not guess it -- unless an agent definition

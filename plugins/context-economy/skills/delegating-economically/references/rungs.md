@@ -89,6 +89,9 @@ and may provide `visibility` and `supported_reasoning_levels`.
 The capability map is `model-options.json`, beside this file. Model names live
 there because they are volatile data, not durable guidance. Update that map
 when providers ship or retire models; do not add another provider section here.
+When a newer model replaces one in the map, the old one keeps its row with no
+rungs and a `superseded_by` naming the newcomer, so no rung offers it and
+`orch model check` sends a session still on it to the successor.
 `validate_options` enforces the policy as well as the shape: no archetype
 starts above `economy`, archetype effort is relative, and a rung's preference
 must be tagged with that rung. Done when `spend models` returns at least one

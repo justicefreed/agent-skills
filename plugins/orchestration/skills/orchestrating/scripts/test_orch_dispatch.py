@@ -122,9 +122,9 @@ check_same("an implementer with no model starts at economy",
 check_same("and at the archetype's relative effort",
            entry(root, e_impl)["effort"], "default")
 check_true("open resolves the rung to exact models",
-           "claude-sonnet-5" in entry(root, e_impl)["resolved_models"])
-check_same("Sonnet 5's economy policy resolves to medium thinking",
-           entry(root, e_impl)["resolved_thinking_options"].get("claude-sonnet-5"),
+           "claude-sonnet-5-5" in entry(root, e_impl)["resolved_models"])
+check_same("Sonnet 5.5's economy policy resolves to medium thinking",
+           entry(root, e_impl)["resolved_thinking_options"].get("claude-sonnet-5-5"),
            "medium")
 check_same("an unannotated lane receives a persisted bounded contract",
            entry(root, e_impl)["limits"],
@@ -132,7 +132,7 @@ check_same("an unannotated lane receives a persisted bounded contract",
             "max_cost_usd": 8.0, "checkpoint_every_calls": 20,
             "slice_id": "unsliced", "read_set": [], "write_set": []})
 check_true("open prints the models and the label to spawn with",
-           "claude-sonnet-5" in err and '"orch_entry": "%s"' % e_impl in err)
+           "claude-sonnet-5-5" in err and '"orch_entry": "%s"' % e_impl in err)
 check_true("the resolution never offers a model above the rung",
            "claude-opus-5-5" not in entry(root, e_impl)["resolved_models"])
 
@@ -214,7 +214,7 @@ check_same("a reviewer excludes the author's whole lineage",
 check_true("and still resolves at economy", "gpt-5.6-terra" in rev["resolved_models"])
 
 hook(root, "mcp__paseo__create_agent",
-     {"title": "w", "initialPrompt": "go", "provider": "claude/claude-sonnet-5",
+     {"title": "w", "initialPrompt": "go", "provider": "claude/claude-sonnet-5-5",
       "labels": {"orch_entry": e_impl},
       "settings": {"modeId": "auto", "thinkingOptionId": "medium"}})
 code, out, err = run(root, "open", "--brief",
@@ -278,7 +278,7 @@ spawn = {"title": "w", "initialPrompt": "go", "settings": {"modeId": "auto"}}
 
 check_true("an unlabelled spawn is refused while an entry is pending",
            denied(hook(root3, "mcp__paseo__create_agent",
-                       dict(spawn, provider="claude/claude-sonnet-5"))))
+                       dict(spawn, provider="claude/claude-sonnet-5-5"))))
 check_same("an agent labelled as not a lane is allowed",
            hook(root3, "mcp__paseo__create_agent",
                 dict(spawn, provider="claude/claude-opus-5-5",
@@ -293,35 +293,35 @@ check_true("an alias is refused, because what it names drifts",
 check_true("a spawn with no mode is refused",
            denied(hook(root3, "mcp__paseo__create_agent",
                        {"title": "w", "initialPrompt": "go",
-                        "provider": "claude/claude-sonnet-5",
+                        "provider": "claude/claude-sonnet-5-5",
                         "labels": {"orch_entry": e3}})))
-check_true("Sonnet 5 without its resolved medium effort is refused",
+check_true("Sonnet 5.5 without its resolved medium effort is refused",
            denied(hook(root3, "mcp__paseo__create_agent",
-                       dict(spawn, provider="claude/claude-sonnet-5",
+                       dict(spawn, provider="claude/claude-sonnet-5-5",
                             labels={"orch_entry": e3}))))
-check_true("Sonnet 5 at provider-default high is refused for economy work",
+check_true("Sonnet 5.5 at provider-default high is refused for economy work",
            denied(hook(root3, "mcp__paseo__create_agent",
-                       dict(spawn, provider="claude/claude-sonnet-5",
+                       dict(spawn, provider="claude/claude-sonnet-5-5",
                             labels={"orch_entry": e3},
                             settings={"modeId": "auto", "thinkingOptionId": "high"}))))
 check_true("a long-context variant is refused without its escalation",
            denied(hook(root3, "mcp__paseo__create_agent",
-                       dict(spawn, provider="claude/claude-sonnet-5[1m]",
+                       dict(spawn, provider="claude/claude-sonnet-5-5[1m]",
                             labels={"orch_entry": e3}))))
 check_same("the resolved model, labelled, in the recorded mode, is allowed",
            hook(root3, "mcp__paseo__create_agent",
-                dict(spawn, provider="claude/claude-sonnet-5",
+                dict(spawn, provider="claude/claude-sonnet-5-5",
                     labels={"orch_entry": e3},
                     settings={"modeId": "auto", "thinkingOptionId": "medium"})), None)
 check_same("and what was spawned is recorded on the entry",
-           entry(root3, e3)["spawned_model"], "claude-sonnet-5")
+           entry(root3, e3)["spawned_model"], "claude-sonnet-5-5")
 
 run(root3, "update", e3, "--agent-id", "agent-3")
 run(root3, "escalate", e3, "--effort", "above-default", "--scope", "attempt",
     "--reason", "the first pass cannot establish the required invariant",
     "--evidence", "entry:%s" % e3)
 check_same("a justified Sonnet effort escalation resolves to high",
-           entry(root3, e3)["resolved_thinking_options"].get("claude-sonnet-5"),
+           entry(root3, e3)["resolved_thinking_options"].get("claude-sonnet-5-5"),
            "high")
 check_true("a RETUNE cannot leave Sonnet at medium after its high escalation",
            denied(hook(root3, "mcp__paseo__update_agent",
@@ -374,7 +374,7 @@ check_true("--spawned-model records a spawn no hook saw, and the roster compares
 # --------------------------------------------------------------------------- #
 
 _agents = tempfile.mkdtemp(prefix="orch-agents-")
-for _name, _model in (("claude-sonnet-5", "claude-sonnet-5"),
+for _name, _model in (("claude-sonnet-5-5", "claude-sonnet-5-5"),
                       ("claude-opus-5-5", "claude-opus-5-5"),
                       ("inherits", "inherit")):
     with open(os.path.join(_agents, _name + ".md"), "w") as fh:
@@ -396,7 +396,7 @@ try:
 
     marked = "orch_entry: %s\nDo the work in the brief." % e6
     check_true("a subagent naming no entry is refused while one is pending",
-               denied(agent(prompt="do the work", subagent_type="claude-sonnet-5")))
+               denied(agent(prompt="do the work", subagent_type="claude-sonnet-5-5")))
     check_same("a subagent marked `orch_entry: none` is allowed",
                agent(prompt="orch_entry: none\nlook something up"), None)
     _inherit = agent(prompt=marked)
@@ -411,10 +411,10 @@ try:
     check_true("the `opus` alias is refused for an economy lane",
                denied(agent(prompt=marked, model="opus")))
     check_same("the agent definition for the resolved model is allowed",
-               agent(prompt=marked, subagent_type="claude-sonnet-5"), None)
+               agent(prompt=marked, subagent_type="claude-sonnet-5-5"), None)
     check_same("and the spawn is recorded, via the Agent tool",
                (entry(root4, e6)["spawned_model"], entry(root4, e6)["spawned_via"]),
-               ("claude-sonnet-5", "agent-tool"))
+               ("claude-sonnet-5-5", "agent-tool"))
     check_same("a spawned lane no longer counts as pending for the next subagent",
                hook(root4, "Agent", {"description": "x", "prompt": "unrelated"}), None)
 
@@ -469,11 +469,11 @@ if FAILURES:
 _paseo = tempfile.mkdtemp(prefix="paseo-home-")
 os.makedirs(os.path.join(_paseo, "agents", "ws"))
 with open(os.path.join(_paseo, "agents", "ws", "agent-rt.json"), "w") as fh:
-    json.dump({"config": {"model": "claude-sonnet-5"},
+    json.dump({"config": {"model": "claude-sonnet-5-5"},
                "runtimeInfo": {"model": "claude-opus-5-5"}}, fh)
 os.environ["PASEO_HOME"] = _paseo
 _rt = {"status": "pending", "agent_id": "agent-rt", "mode": "auto",
-       "resolved_models": ["claude-sonnet-5"]}
+       "resolved_models": ["claude-sonnet-5-5"]}
 check_true("a lane running another model than planned is flagged",
            "RUNTIME-MISMATCH:claude-opus-5-5" in orch.entry_flags(_rt))
 check_true("a lane running the planned model is not",

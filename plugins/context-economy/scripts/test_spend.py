@@ -471,11 +471,11 @@ check_same("the written file's own model: frontmatter is the canonical id",
 
 # Ruling (b): the default scope is only the Claude models a rung preference
 # currently recommends, not every anthropic-route option. The shipped
-# `model-options.json` has 9 anthropic-provider rows but only 3 appear in any
+# `model-options.json` has 10 anthropic-provider rows but only 3 appear in any
 # rung's `preferences` list (haiku/minimal, sonnet-5-5/economy, opus-5-5/
-# advanced+frontier); the other 6 (`claude-haiku-4-5-20251001`, `claude-sonnet-4-6`,
-# `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5-1`) are options the rung/archetype system
-# could select in principle but does not currently prefer.
+# advanced+frontier); the other 7 are superseded (`claude-haiku-4-5-20251001`,
+# `claude-sonnet-4-6`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-5`,
+# `claude-fable-5-1`) or off the ladder (`claude-fable-5-2`).
 check_same("agents --write default scope is the 3 currently-preferred Claude models",
            sorted(row["id"] for row in _written["models"]),
            ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"])
@@ -496,7 +496,7 @@ check_same("agents --write --all covers every anthropic model option",
            sorted(row["id"] for row in _all_written["models"]),
            sorted(["claude-haiku-4-5-20251001", "claude-haiku-5-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5",
                    "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
-                   "claude-fable-5-1"]))
+                   "claude-fable-5-1", "claude-fable-5-2"]))
 shutil.rmtree(_all_dir, ignore_errors=True)
 
 _rewrite_dir = tempfile.mkdtemp()
@@ -586,9 +586,14 @@ check_same("frontier selects only the designated models",
            ["claude-opus-5-5", "gpt-5.6-sol"])
 check_same("no rung selects the off-ladder frontier model",
            [rung for rung in spend.MODEL_RUNGS
-            if "claude-fable-5-1" in [row["model"] for row in spend.select_models(
+            if "claude-fable-5-2" in [row["model"] for row in spend.select_models(
                 _shipped, _every_model, rung, "default")]],
            [])
+check_same("every rung offers only the newest Claude model of each family",
+           sorted({row["model"] for rung in spend.MODEL_RUNGS
+                   for row in spend.select_models(_shipped, _every_model, rung, "default")
+                   if row["model"].startswith("claude-")}),
+           ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"])
 
 # Every "second pair of eyes" is one reviewer archetype: the old names resolve
 # to it, so a brief written against any of them gets the same rung and family
@@ -604,7 +609,7 @@ check_same("review-shaped names all resolve to the reviewer archetype",
 # verifier the level below it. Both were `medium` before, which erased it.
 def _archetype_effort(name):
     policy = _shipped["archetypes"][name]
-    return spend.select_models(_shipped, [{"slug": "claude-sonnet-5",
+    return spend.select_models(_shipped, [{"slug": "claude-sonnet-5-5",
                                "default_reasoning_level": "medium",
                                "supported_reasoning_levels": [
                                    {"effort": "low"}, {"effort": "medium"},
@@ -617,7 +622,7 @@ check_same("verifier effort is one below the model's default",
 
 _review_catalog = transcript([])
 with open(_review_catalog, "w") as fh:
-    json.dump({"models": [{"slug": "claude-sonnet-5"}, {"slug": "gpt-5.6-terra"}]}, fh)
+    json.dump({"models": [{"slug": "claude-sonnet-5-5"}, {"slug": "gpt-5.6-terra"}]}, fh)
 
 
 def _spend_models(*argv):

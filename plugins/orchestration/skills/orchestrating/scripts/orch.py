@@ -4404,14 +4404,17 @@ def last_assistant_model(path: str) -> Optional[Tuple[str, str, int]]:
 def superseded_by(canonical: str) -> Optional[str]:
     """The preferred same-family sibling for a model the catalogue superseded.
 
-    For any rung the model holds, if the rung's preferences name a model of
-    the same family and this model is not itself preferred, the catalogue has
-    moved on -- the preferred sibling is the first same-family entry.
+    A row's `superseded_by` names it outright. Otherwise, for any rung the
+    model holds, if the rung's preferences name a model of the same family and
+    this model is not itself preferred, the catalogue has moved on -- the
+    preferred sibling is the first same-family entry.
     """
     options = catalogue()
     row = next((r for r in options["models"] if r.get("id") == canonical), None)
     if row is None:
         return None
+    if row.get("superseded_by"):
+        return str(row["superseded_by"])
     family = str(row.get("family") or "").lower()
     for rung in row.get("rungs", []):
         preferred = options.get("preferences", {}).get(rung, [])
