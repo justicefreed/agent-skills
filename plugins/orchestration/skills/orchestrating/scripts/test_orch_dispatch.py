@@ -36,6 +36,11 @@ os.environ.setdefault("ORCH_FANOUT_MAX", "100")
 _spec = importlib.util.spec_from_file_location("orch", os.path.join(HERE, "orch.py"))
 orch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(orch)
+# Dispatch semantics are portable and must not inherit the developer machine's
+# Claude policy; policy parsing itself has dedicated injected-path fixtures.
+orch.availability_for = lambda repo: {
+    "available": None, "match": "prefix", "denied": [], "paseo": None,
+}
 
 FAILURES = []
 
